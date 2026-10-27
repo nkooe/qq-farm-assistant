@@ -1,0 +1,49 @@
+syntax = "proto3";
+
+package gamepb.qqvippb;
+
+import "corepb.proto";
+
+// ============ QQ会员服务 ============
+
+message GetQQVipRewardsStatusRequest {}
+
+message QQVipRewardStatus {
+    int32 type = 1;
+    repeated corepb.Item rewards = 2;
+    bool is_enable = 3;
+    int64 activity_id = 4;
+    int64 reward_type = 5;
+    int64 reward_multiplier = 6;
+    int64 begin_time = 7;
+    int64 end_time = 8;
+}
+
+message GetQQVipRewardsStatusReply {
+    bool is_qq_vip = 1;
+    bool can_claim = 2;
+    bool claimed_today = 3;
+    bool rewards_can_claim = 4;
+    repeated QQVipRewardStatus reward_statuses = 5;
+    bool has_redpoint = 6;
+    int64 remaining_days = 7;
+    int64 days_remaining_reminder = 8;
+    bool mall_free_can_claim = 9;
+}
+
+message RefreshVipInfoRequest {}
+message RefreshVipInfoReply {}
+
+message ClaimQQVipRewardsRequest {
+    repeated int64 reward_types = 1 [packed = true];
+}
+
+message ClaimQQVipRewardsReply {
+    repeated corepb.Item items = 3;
+}
+
+// --- VIP信息更新通知 ---
+message VipInfoUpdatedNTF {
+    int64 vip_type = 1;
+    int64 vip_level = 2;
+}

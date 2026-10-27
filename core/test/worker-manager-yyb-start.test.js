@@ -1,0 +1,414 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { EventEmitter } = require('node:events');
+const { setImmediate } = require('node:timers/promises');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-farm-worker-start-'));
+process.env.FARM_DATA_DIR = dataDir;
+test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
+
+const { createWorkerManager } = require('../src/runtime/worker-manager');
+const { createScheduler } = require('../src/services/scheduler');
+const store = require('../src/models/store');
+
+function harness(t, reconnect = {}, overrides = {}) {
+  const workers = {};
+  const requests = new Map();
+  const accounts = [];
+  const scheduler = createScheduler('worker_manager');
+  scheduler.clearAll();
+  t.after(() => scheduler.clearAll());
+  const config = { autoReconnect: false, reconnectDelayMin: 5, reconnectMaxAttempts: 3, ...reconnect };
+  t.mock.method(store, 'getAccounts', () => ({ accounts }));
+  t.mock.method(store, 'getGlobalWxConfig', () => config);
+  const envBefore = { url: process.env.YYB_API_URL, key: process.env.YYB_API_KEY };
+  process.env.YYB_API_URL = 'http://yyb.test';
+  process.env.YYB_API_KEY = 'test-token';
+  t.after(() => {
+    if (envBefore.url === undefined) delete process.env.YYB_API_URL;
+    else process.env.YYB_API_URL = envBefore.url;
+    if (envBefore.key === undefined) delete process.env.YYB_API_KEY;
+    else process.env.YYB_API_KEY = envBefore.key;
+  });
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    const { ref } = JSON.parse(init.body);
+    return new Promise(resolve => {
+      requests.set(ref, () => resolve({ json: async () => ({ code: 0, data: { result: { code: `code-${ref}` } } }) }));
+    });
+  });
+  const created = [];
+  class FakeWorker extends EventEmitter {
+    constructor(_path, options) {
+      super();
+      this.id = options.workerData.accountId;
+      this.messages = [];
+      created.push(this);
+    }
+    postMessage(message) {
+      this.messages.push(message);
+      if (message.type === 'stop') this.emit('exit', 0);
+    }
+    terminate() { this.emit('exit', 0); }
+  }
+  const manager = createWorkerManager({
+    WorkerThread: FakeWorker,
+    processRef: { pkg: false },
+    workers,
+    workerScriptPath: 'fake-worker',
+    globalLogs: [],
+    log() {}, addAccountLog() {}, normalizeStatusForPanel: value => value,
+    triggerOfflineReminder: async () => ({ ok: false, status: 'disabled' }),
+    buildConfigSnapshotForAccount: id => ({ accountId: id, clientVersion: '1.15.0_qq', wxClientVersion: '1.16.0_wx' }),
+    ...overrides,
+  });
+  return { manager, workers, created, requests, accounts, scheduler, config };
+}
+
+test('concurrent starts of one YYB account create only one worker', async (t) => {
+  const h = harness(t);
+  const account = { id: '1', name: 'A', platform: 'wx', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const first = h.manager.startWorker(account);
+  const second = h.manager.startWorker({ ...account });
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'starting');
+  assert.equal(h.manager.getWorkerRuntime('1').connected, false);
+  assert.equal(h.requests.size, 1);
+  h.requests.get('wx-a')();
+  assert.deepEqual(await Promise.all([first, second]), [true, true]);
+  assert.equal(h.created.length, 1);
+  assert.equal(h.created[0].messages[0].config.code, 'code-wx-a');
+  assert.equal(h.created[0].messages[0].config.platform, 'wx');
+  assert.equal(h.created[0].messages[0].config.clientVersion, '1.15.0_qq');
+  assert.equal(h.created[0].messages[0].config.wxClientVersion, '1.16.0_wx');
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'starting');
+  h.workers['1'].status = { connection: { connected: true } };
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'online');
+});
+
+test('runtime friend state is persisted by the parent before syncing it back to the worker', async t => {
+  const h = harness(t);
+  const writes = [];
+  t.mock.method(store, 'applyConfigSnapshot', (patch, options) => writes.push({ patch, options }));
+  await h.manager.startWorker({ id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
+  const worker = h.created[0];
+  worker.emit('message', { type: 'automation_patch', patch: { friendHelpExpExhausted: true } });
+  assert.deepEqual(writes, [{ patch: { friendHelpExpExhausted: true }, options: { accountId: '1' } }]);
+  assert.equal(worker.messages.at(-1).type, 'config_sync');
+});
+
+test('known friend updates reach the parent and failed storage writes do not crash it', async t => {
+  const h = harness(t);
+  const writes = [];
+  t.mock.method(store, 'setKnownFriendGids', (id, gids) => writes.push({ id, gids }));
+  await h.manager.startWorker({ id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
+  const worker = h.created[0];
+  worker.emit('message', { type: 'known_friend_gids_sync', gids: [101, 102] });
+  assert.deepEqual(writes, [{ id: '1', gids: [101, 102] }]);
+  t.mock.method(store, 'applyConfigSnapshot', () => { throw Object.assign(new Error('fixture storage failure'), { code: 'STORAGE_WRITE_FAILED' }); });
+  const before = worker.messages.length;
+  assert.doesNotThrow(() => worker.emit('message', { type: 'automation_patch', patch: { friendBadRetryDate: '2026-10-24' } }));
+  assert.equal(worker.messages.length, before);
+});
+
+test('YYB refresh failure is visible and never starts a worker with a stale code', async (t) => {
+  const h = harness(t);
+  t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ({ code: 502, msg: 'proxy unavailable' }) }));
+  const started = await h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a', code: 'stale' });
+  assert.equal(started, false);
+  assert.equal(h.created.length, 0);
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'failed');
+  assert.match(h.manager.getWorkerRuntime('1').error, /proxy unavailable/);
+  h.manager.stopWorker('1');
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'stopped');
+});
+
+test('two YYB identities start independently and stopping A preserves B', async (t) => {
+  const h = harness(t);
+  const first = h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  const second = h.manager.startWorker({ id: '2', name: 'B', loginType: 'yyb', yybOpenid: 'wx-b' });
+  h.requests.get('wx-b')();
+  await second;
+  assert.deepEqual(Object.keys(h.workers), ['2']);
+  h.requests.get('wx-a')();
+  await first;
+  assert.equal(h.created.length, 2);
+  h.manager.stopWorker('1');
+  assert.deepEqual(Object.keys(h.workers), ['2']);
+  assert.equal(h.workers['2'].process.messages[0].config.code, 'code-wx-b');
+});
+
+test('runtime diagnostics hide upstream proxy credentials and tokens', async (t) => {
+  const h = harness(t);
+  const message = 'proxy handshake failed at socks5://user:secret-pass@proxy.test:1080?key=secret-key Bearer secret-token refresh_token=secret-refresh';
+  t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ({ code: 502, msg: message }) }));
+  await h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  const runtime = h.manager.getWorkerRuntime('1');
+  assert.equal(runtime.state, 'failed');
+  assert.match(runtime.error, /proxy handshake failed/);
+  assert.doesNotMatch(runtime.error, /secret-|user:|proxy\.test/);
+});
+
+test('stopping an account during code refresh cancels its pending startup', async (t) => {
+  const h = harness(t);
+  const pending = h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  h.manager.stopWorker('1');
+  h.requests.get('wx-a')();
+  assert.equal(await pending, false);
+  assert.equal(h.created.length, 0);
+  assert.deepEqual(Object.keys(h.workers), []);
+});
+
+test('YYB startup refresh failures retry until a fresh code is obtained', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(t, { autoReconnect: true });
+  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a', code: 'stale' };
+  h.accounts.push(account);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ++calls < 3
+    ? { code: 502, msg: 'refresh temporarily unavailable' }
+    : { code: 0, data: { result: { code: 'fresh-code' } } } }));
+
+  const results = await Promise.all([h.manager.startWorker(account), h.manager.startWorker(account)]);
+  assert.deepEqual(results, [false, false]);
+  assert.equal(calls, 1);
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'reconnecting');
+  assert.match(h.manager.getWorkerRuntime('1').error, /temporarily unavailable/);
+  assert.equal(h.manager.getWorkerRuntime('1').reconnect.attempt, 1);
+  assert.equal(h.scheduler.getSnapshot().tasks.filter(task => task.name === 'reconnect_attempt_1').length, 1);
+
+  t.mock.timers.tick(5 * 60 * 1000);
+  await setImmediate();
+  assert.equal(calls, 2);
+  assert.equal(h.created.length, 0);
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), true);
+
+  t.mock.timers.tick(5 * 60 * 1000);
+  await setImmediate();
+  assert.equal(calls, 3);
+  assert.equal(h.created.length, 1);
+  assert.equal(h.created[0].messages[0].config.code, 'fresh-code');
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+});
+
+test('persistent YYB refresh failures stop at the configured retry limit', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 2 });
+  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  h.accounts.push(account);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return { json: async () => ({ code: 502, msg: 'refresh failed' }) };
+  });
+  await h.manager.startWorker(account);
+  for (let i = 0; i < 4; i++) {
+    t.mock.timers.tick(5 * 60 * 1000);
+    await setImmediate();
+  }
+  assert.equal(calls, 3); // initial request + two automatic retries
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'failed');
+  assert.equal(h.manager.getWorkerRuntime('1').reconnect.state, 'waiting_credentials');
+  assert.equal(h.created.length, 0);
+});
+
+test('a disconnected worker retains its reason and scheduled retry instead of appearing stopped', async t => {
+  const h = harness(t, { autoReconnect: true });
+  const account = { id: '1', name: 'A', loginType: 'manual', code: 'fixture' };
+  h.accounts.push(account);
+  await h.manager.startWorker(account);
+  h.created[0].emit('message', { type: 'ws_reconnect_failed', reason: 'heartbeat_timeout' });
+  const runtime = h.manager.getWorkerRuntime('1');
+  assert.equal(runtime.state, 'reconnecting');
+  assert.match(runtime.error, /heartbeat_timeout/);
+  assert.equal(runtime.reconnect.attempt, 1);
+  assert.equal(runtime.reconnect.maxAttempts, 3);
+  assert.ok(runtime.reconnect.nextRetryAt > Date.now());
+  h.manager.stopWorker('1');
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'stopped');
+  assert.equal(h.manager.getWorkerRuntime('1').reconnect, null);
+});
+
+test('fresh background credentials reopen a capped retry cycle once and a manual stop cancels the watcher', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
+  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  h.accounts.push(account);
+  let recovered = false;
+  let codeCalls = 0;
+  let healthCalls = 0;
+  t.mock.method(globalThis, 'fetch', async (_url, init) => {
+    if (!init.body) {
+      healthCalls++;
+      return { ok: true, json: async () => ({ code: 0, data: { expires_at: Math.floor(Date.now() / 1000) + 7200,
+        refresh: { last_error: recovered ? '' : 'retry', last_success_at: recovered ? Math.floor(Date.now() / 1000) + 1 : 0 } } }) };
+    }
+    codeCalls++;
+    return { json: async () => recovered ? { code: 0, data: { result: { code: 'fresh' } } } : { code: 502, msg: 'refresh failed' } };
+  });
+  await h.manager.startWorker(account);
+  t.mock.timers.tick(300000); await setImmediate();
+  assert.equal(codeCalls, 2);
+  assert.equal(h.manager.getWorkerRuntime('1').reconnect.state, 'waiting_credentials');
+  t.mock.timers.tick(60000); await setImmediate();
+  assert.equal(codeCalls, 2, 'health polling cannot consume more game retries');
+  recovered = true;
+  t.mock.timers.tick(60000); await setImmediate();
+  assert.equal(h.created.length, 1);
+  assert.equal(codeCalls, 3);
+  assert.equal(h.scheduler.has('credential_recovery'), false);
+  assert.equal(healthCalls, 2);
+  h.manager.stopWorker('1');
+  t.mock.timers.tick(60000); await setImmediate();
+  assert.equal(h.created.length, 1);
+});
+
+test('stopping during a credential health read blocks a late successful recovery', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
+  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  h.accounts.push(account);
+  let finish;
+  t.mock.method(globalThis, 'fetch', async (_url, init) => init.body
+    ? { json: async () => ({ code: 502, msg: 'refresh failed' }) }
+    : new Promise(resolve => { finish = resolve; }));
+  await h.manager.startWorker(account);
+  t.mock.timers.tick(300000); await setImmediate();
+  t.mock.timers.tick(60000); await setImmediate();
+  assert.equal(typeof finish, 'function');
+  h.manager.stopWorker('1');
+  finish({ ok: true, json: async () => ({ code: 0, data: { expires_at: Date.now() / 1000 + 7200,
+    refresh: { last_error: '', last_success_at: Math.floor(Date.now() / 1000) + 1 } } }) });
+  await setImmediate();
+  assert.equal(h.created.length, 0);
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'stopped');
+  assert.equal(h.scheduler.has('credential_recovery'), false);
+});
+
+for (const change of ['disabled', 'deleted', 'autostart_off', 'old_success']) {
+  test(`credential recovery respects ${change} without starting a worker`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
+    const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+    h.accounts.push(account);
+    t.mock.method(globalThis, 'fetch', async (_url, init) => init.body
+      ? { json: async () => ({ code: 502, msg: 'refresh failed' }) }
+      : { ok: true, json: async () => ({ code: 0, data: { expires_at: Date.now() / 1000 + 7200,
+          refresh: { last_error: '', last_success_at: Math.floor(Date.now() / 1000) + (change === 'old_success' ? -7200 : 1) } } }) });
+    await h.manager.startWorker(account);
+    t.mock.timers.tick(300000); await setImmediate();
+    if (change === 'disabled') h.config.autoReconnect = false;
+    if (change === 'deleted') h.accounts.length = 0;
+    if (change === 'autostart_off') account.autoStart = false;
+    t.mock.timers.tick(60000); await setImmediate();
+    assert.equal(h.created.length, 0);
+    assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+    assert.equal(h.scheduler.has('credential_recovery'), change === 'old_success');
+  });
+}
+
+for (const response of [null, { code: 0 }, { code: 0, data: [] }, { code: 502 }, { code: '0' }, {}]) {
+  test(`credential recovery ignores an invalid health envelope ${JSON.stringify(response)}`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
+    const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+    h.accounts.push(account);
+    t.mock.method(globalThis, 'fetch', async (_url, init) => init.body
+      ? { json: async () => ({ code: 502, msg: 'refresh failed' }) }
+      : { ok: true, json: async () => response && !Object.hasOwn(response, 'data') && response.code !== 0
+          ? { ...response, data: { expires_at: Date.now() / 1000 + 7200,
+              refresh: { last_error: '', last_success_at: Math.floor(Date.now() / 1000) + 1 } } } : response });
+    await h.manager.startWorker(account);
+    t.mock.timers.tick(300000); await setImmediate();
+    t.mock.timers.tick(60000); await setImmediate();
+    assert.equal(h.created.length, 0);
+    assert.equal(h.manager.getWorkerRuntime('1').reconnect.state, 'waiting_credentials');
+    assert.equal(h.scheduler.has('credential_recovery'), true);
+  });
+}
+
+test('offline reminder history waits for delivery and never claims a skipped reminder was sent', async t => {
+  let finish;
+  const entries = [];
+  const h = harness(t, {}, { triggerOfflineReminder: () => new Promise(resolve => { finish = resolve; }),
+    addAccountLog: (...entry) => entries.push(entry) });
+  await h.manager.startWorker({ id: '1', name: 'A', loginType: 'manual', code: 'fixture' });
+  h.workers['1'].disconnectedSince = Date.now() - 61000;
+  h.created[0].emit('message', { type: 'status_sync', data: { connection: { connected: false } } });
+  assert.equal(entries.some(entry => entry[0] === 'offline_reminder'), false);
+  finish({ ok: false, status: 'unconfigured' });
+  await setImmediate();
+  const reminder = entries.find(entry => entry[0] === 'offline_reminder');
+  assert.match(reminder[1], /未配置/);
+  assert.doesNotMatch(reminder[1], /已发送/);
+});
+
+test('stopping a failed account without a worker cancels its scheduled retry', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(t, { autoReconnect: true });
+  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  h.accounts.push(account);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return { json: async () => ({ code: 502, msg: 'refresh failed' }) };
+  });
+  await h.manager.startWorker(account);
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), true);
+  h.manager.stopWorker('1');
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+  t.mock.timers.tick(5 * 60 * 1000);
+  await setImmediate();
+  assert.equal(calls, 1);
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'stopped');
+});
+
+test('stop during an automatic refresh prevents further startup and retries', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(t, { autoReconnect: true });
+  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  h.accounts.push(account);
+  t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ({ code: 502, msg: 'refresh failed' }) }));
+  await h.manager.startWorker(account);
+  let finish;
+  t.mock.method(globalThis, 'fetch', () => new Promise(resolve => { finish = resolve; }));
+  t.mock.timers.tick(5 * 60 * 1000);
+  await setImmediate();
+  assert.equal(typeof finish, 'function');
+  h.manager.stopWorker('1');
+  finish({ json: async () => ({ code: 502, msg: 'refresh failed' }) });
+  await setImmediate();
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+  assert.equal(h.manager.getWorkerRuntime('1').state, 'stopped');
+  assert.equal(h.created.length, 0);
+});
+
+test('disabled reconnect, deleted accounts and changed settings prevent automatic starts', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(t);
+  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  h.accounts.push(account);
+  let calls = 0;
+  t.mock.method(globalThis, 'fetch', async () => {
+    calls++;
+    return { json: async () => ({ code: 502, msg: 'refresh failed' }) };
+  });
+  await h.manager.startWorker(account);
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+  h.config.autoReconnect = true;
+  await h.manager.startWorker(account);
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), true);
+  h.config.autoReconnect = false;
+  t.mock.timers.tick(5 * 60 * 1000);
+  await setImmediate();
+  assert.equal(calls, 2);
+  h.config.autoReconnect = true;
+  await h.manager.startWorker(account);
+  h.accounts.length = 0;
+  t.mock.timers.tick(5 * 60 * 1000);
+  await setImmediate();
+  assert.equal(calls, 3);
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+});

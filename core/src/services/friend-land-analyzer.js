@@ -1,0 +1,656 @@
+const { PlantPhase, PHASE_NAMES } = require('../config/config');
+const {
+  getPlantName,
+  getPlantNameOrNull,
+  getPlantById,
+  getPlantGrowTime,
+  getSeedImageBySeedId,
+  getMutantEffectsByIds,
+} = require('../config/gameConfig');
+const {
+  toNum,
+  toTimeSec,
+  getServerTimeSec,
+  log,
+  logWarn,
+  randomDelay,
+  sleep,
+} = require('../utils/utils');
+const { getUserState } = require('../utils/network');
+const {
+  getPlantBlacklist,
+  getFriendBlacklist,
+  removeFriendFromCache,
+} = require('../models/store');
+const {
+  enterFriendFarm,
+  leaveFriendFarm,
+  getDogName,
+  handleFriendEnterError,
+} = require('./friend-api');
+const {
+  getCurrentPhase,
+  buildLandMap,
+  getDisplayLandContext,
+  isOccupiedSlaveLand,
+} = require('./farm-land-analyzer');
+
+const GOLDEN_BUG_ITEM_ID = 301101;
+const GOLDEN_BUG_SOCIAL_TYPE = 2;
+
+// ===== Analyze friend lands =====
+
+/**
+ * Analyze a friend's lands and classify them into actionable categories.
+ * Returns actionable ordinary-farm and golden-bug land groups.
+ */
+function analyzeFriendLands(lands, myGid, friendName = '', options = {}) {
+  const { plantBlacklist = null } = options;
+  const result = {
+    stealable: [],
+    stealableInfo: [],
+    needWater: [],
+    needWeed: [],
+    needBug: [],
+    canPutWeed: [],
+    canPutBug: [],
+    canPutGoldenBug: [],
+  };
+
+  const landMap = buildLandMap(lands);
+
+  for (const land of lands) {
+    const landId = toNum(land.id);
+
+    // Skip slave lands in merged planting
+    if (isOccupiedSlaveLand(land, landMap)) continue;
+
+    const plant = land.plant;
+    if (!plant || !plant.phases || plant.phases.length === 0) continue;
+
+    const currentPhase = getCurrentPhase(
+      plant.phases,
+      false,
+      `[${friendName}]土地#${landId}`
+    );
+    if (!currentPhase) continue;
+
+    const phase = currentPhase.phase;
+    const socialItems = Array.isArray(plant.social_items) ? plant.social_items : [];
+    const alreadyHasGoldenBug = socialItems.some(item => (
+      toNum(item && item.item_id) === GOLDEN_BUG_ITEM_ID &&
+      toNum(item && item.type) === GOLDEN_BUG_SOCIAL_TYPE
+    ));
+
+    if (phase !== PlantPhase.MATURE && phase !== PlantPhase.DEAD && !alreadyHasGoldenBug) {
+      result.canPutGoldenBug.push(landId);
+    }
+
+    // Mature & stealable
+    if (phase === PlantPhase.MATURE) {
+      if (plant.stealable) {
+        const plantId = toNum(plant.id);
+        const plantName = getPlantNameOrNull(plantId) || plant.name || getPlantName(plantId) || '未知';
+        const plantInfo = getPlantById(plantId);
+        const seedId = plantInfo ? toNum(plantInfo.seed_id) : 0;
+
+        // Respect plant blacklist
+        if (plantBlacklist && seedId > 0 && plantBlacklist.includes(seedId)) continue;
+
+        result.stealable.push(landId);
+        result.stealableInfo.push({ landId, plantId, name: plantName });
+      }
+      continue;
+    }
+
+    // Dead — skip
+    if (phase === PlantPhase.DEAD) continue;
+
+    // Dry / weeds / insects
+    // 注意：用 weed_num/insect_num 判定（和 checkFriends 好友列表快照一致），
+    // 不能只用 weed_owners/insect_owners（进入农场后 owners 可能为空导致漏判）。
+    // 【2026-08-15】叠加阶段时间戳判定（对齐纯 Go 版 analyzeLands）：
+    // dry_time/weeds_time/insect_time >0 且 <= 服务器时间 也算有需求（到点干/草/虫）。
+    const serverTime = getServerTimeSec();
+    const dryTime = toTimeSec(currentPhase.dry_time);
+    const weedTime = toTimeSec(currentPhase.weeds_time);
+    const insectTime = toTimeSec(currentPhase.insect_time);
+    if (toNum(plant.dry_num) > 0 || (dryTime > 0 && dryTime <= serverTime)) result.needWater.push(landId);
+    const weedNum = toNum(plant.weed_num);
+    const hasWeedOwners = plant.weed_owners && plant.weed_owners.length > 0;
+    if (weedNum > 0 || hasWeedOwners || (weedTime > 0 && weedTime <= serverTime)) result.needWeed.push(landId);
+    const insectNum = toNum(plant.insect_num);
+    const hasInsectOwners = plant.insect_owners && plant.insect_owners.length > 0;
+    if (insectNum > 0 || hasInsectOwners || (insectTime > 0 && insectTime <= serverTime)) result.needBug.push(landId);
+
+    // Can put weed / bug (limit: max 2 owners, and we haven't put one yet)
+    if (phase !== PlantPhase.MATURE) {
+      const weedOwners = plant.weed_owners || [];
+      const bugOwners = plant.insect_owners || [];
+      const alreadyPutWeed = weedOwners.some(owner => toNum(owner) === myGid);
+      const alreadyPutBug = bugOwners.some(owner => toNum(owner) === myGid);
+
+      if (weedOwners.length < 2 && !alreadyPutWeed) result.canPutWeed.push(landId);
+      if (bugOwners.length < 2 && !alreadyPutBug) result.canPutBug.push(landId);
+    }
+  }
+
+  return result;
+}
+
+// ===== Dog info =====
+
+/**
+ * Get a single friend's dog information by entering and leaving their farm.
+ */
+async function getFriendDogInfo(gid, friendName = '') {
+  const numericGid = toNum(gid);
+  const defaultResult = { dogId: 0, dogName: '无狗' };
+  if (!numericGid) return defaultResult;
+
+  const accountId = process.env.FARM_ACCOUNT_ID || '';
+  const blacklist = new Set(getFriendBlacklist(accountId));
+  if (blacklist.has(numericGid)) {
+    return { dogId: 0, dogName: '无狗', blacklisted: true };
+  }
+
+  try {
+    const enterReply = await enterFriendFarm(numericGid);
+    await leaveFriendFarm(numericGid);
+
+    const dogInfo = enterReply.__briefDogInfo;
+    if (dogInfo && dogInfo.dogId > 0) {
+      const dogId = toNum(dogInfo.dogId);
+      const dogName = getDogName(dogId);
+      return { dogId, dogName: dogName || '无狗' };
+    }
+
+    return dogInfo && !dogInfo.valid ? { dogId: 0, dogName: '未知', unknown: true } : { dogId: 0, dogName: '无狗' };
+  } catch (err) {
+    const handled = handleFriendEnterError(numericGid, friendName, err);
+    if (handled.handled && handled.kind === 'blacklist') {
+      return { dogId: 0, dogName: '无狗', blacklisted: true };
+    }
+    if (handled.handled && handled.kind === 'invalid_removed') {
+      // 【2026-08-07 修复】好友已被删除（如 code=1002002 不是好友）：
+      // handleFriendEnterError 已将其移出"已知 GID 列表"（QQ 平台），
+      // 这里再补上内存/磁盘好友缓存清理，避免残留导致反复 Enter 失败 + 前端数量不刷新。
+      try {
+        removeFriendFromCache(accountId, numericGid);
+        if (friendsListCache) {
+          friendsListCache = friendsListCache.filter(f => toNum(f.gid) !== numericGid);
+          friendsListCacheAt = Date.now();
+        }
+      } catch { /* 清理失败不影响主流程 */ }
+      return { dogId: 0, dogName: '无狗', invalidRemoved: true };
+    }
+    logWarn('好友', `获取好友 ${numericGid} 狗信息失败: ${err.message}`, {
+      module: 'friend',
+      event: '获取好友狗信息',
+      result: 'error',
+      friendGid: numericGid,
+      error: err.message,
+    });
+    return { dogId: 0, dogName: '未知', unknown: true };
+  }
+}
+
+/**
+ * Batch get dog info for multiple friends.
+ * Returns: { map: Map<gid, dogInfo>, failCount, blacklistCount }
+ */
+async function batchGetFriendDogInfo(friends) {
+  const dogMap = new Map();
+  const friendList = Array.isArray(friends) ? friends : [];
+  let noDogCount = 0;
+  let unknownCount = 0;
+  let blacklistCount = 0;
+  const BATCH_LOG_INTERVAL = 30;
+  const BATCH_SLEEP_MS = 1000;
+  const accountId = process.env.FARM_ACCOUNT_ID || '';
+  const blacklist = new Set(getFriendBlacklist(accountId));
+
+  // Normalize entries
+  const entries = friendList
+    .map(entry => {
+      if (typeof entry === 'object' && entry !== null) {
+        return { gid: toNum(entry.gid), name: entry.name || `GID:${toNum(entry.gid)}` };
+      }
+      return { gid: toNum(entry), name: `GID:${toNum(entry)}` };
+    })
+    .filter(e => e.gid > 0);
+
+  log('好友', `batchGetFriendDogInfo 开始: 共 ${entries.length} 个好友`, {
+    module: 'friend',
+    event: 'batchGetFriendDogInfo',
+    step: 'start',
+    count: entries.length,
+  });
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const gid = entry.gid;
+
+    if (blacklist.has(gid)) {
+      blacklistCount++;
+      dogMap.set(gid, { dogId: 0, dogName: '无狗', blacklisted: true });
+      continue;
+    }
+
+    const dogInfo = await getFriendDogInfo(gid, entry.name);
+    if (dogInfo.unknown) unknownCount++;
+    else if (dogInfo.dogId === 0 && !dogInfo.blacklisted && !dogInfo.invalidRemoved) noDogCount++;
+    if (dogInfo.blacklisted) {
+      blacklistCount++;
+      blacklist.add(gid);
+    }
+    dogMap.set(gid, dogInfo);
+
+    if (i < entries.length - 1) {
+      await randomDelay(100, 200);
+    }
+
+    // Periodic sleep to avoid rate limiting（自用：从 1000ms 降到 300ms）
+    if ((i + 1) % BATCH_LOG_INTERVAL === 0 && i < entries.length - 1) {
+      await sleep(300);
+    }
+  }
+
+  log('好友',
+    `batchGetFriendDogInfo 完成: 成功获取 ${dogMap.size} 个好友的狗信息，无狗 ${noDogCount} 个，黑名单 ${blacklistCount} 个`,
+    {
+      module: 'friend',
+      event: 'batchGetFriendDogInfo',
+      step: 'done',
+      resultCount: dogMap.size,
+      failCount: noDogCount,
+      blacklistCount,
+    }
+  );
+
+  return { map: dogMap, failCount: noDogCount, blacklistCount, unknownCount };
+}
+
+// ===== Friends list =====
+// 【2026-08-07 修复】好友列表内存缓存加 TTL：过期后自动重新拉取，
+// 否则被删好友会一直残留（前端好友页数量/列表不刷新，必须手动 forceSync）
+const FRIENDS_LIST_CACHE_TTL_MS = 5 * 60 * 1000;
+let friendsListCache = null;
+let friendsListCacheAt = 0;
+
+/**
+ * Get a processed friends list with dog info from cache if available.
+ * Filters out fake NPCs (name "小小农夫" with level 1).
+ */
+async function getFriendsList(forceRefresh = false) {
+  try {
+    if (!forceRefresh && friendsListCache && (Date.now() - friendsListCacheAt) < FRIENDS_LIST_CACHE_TTL_MS) {
+      return decoratePetInfo(friendsListCache);
+    }
+
+    log('好友', '开始获取好友列表', {
+      module: 'friend',
+      event: '获取好友列表',
+    });
+
+    const { getAllFriends } = require('./friend-api');
+    const allFriendsReply = await getAllFriends(forceRefresh);
+    const rawFriends = allFriendsReply.game_friends || [];
+    const userState = getUserState();
+    const accountId = process.env.FARM_ACCOUNT_ID || '';
+    const petCache = require('./friend-pet-cache');
+    const dogInfoCache = accountId ? petCache.entries(accountId) : null;
+
+    const friends = rawFriends
+      .filter(friend => {
+        // Exclude self
+        if (toNum(friend.gid) === userState.gid) return false;
+        // Exclude fake NPC
+        if (
+          (friend.name === '小小农夫' || friend.remark === '小小农夫') &&
+          toNum(friend.level) === 1
+        ) {
+          return false;
+        }
+        return true;
+      })
+      .map(friend => {
+        const gid = toNum(friend.gid);
+        const cachedDog = dogInfoCache && dogInfoCache[gid] ? dogInfoCache[gid] : null;
+        return {
+          gid,
+          name: friend.remark || friend.name || `GID:${gid}`,
+          avatarUrl: String(friend.avatar_url || '').trim(),
+          level: toNum(friend.level),
+          gold: toNum(friend.gold),
+          open_id: friend.open_id || '',
+          dogId: cachedDog ? cachedDog.dogId : 0,
+          dogName: cachedDog ? (getDogName(cachedDog.dogId) || '无狗') : '未知',
+          dogState: petCache.getState(gid, accountId),
+          plant: friend.plant
+            ? {
+                stealNum: toNum(friend.plant.steal_plant_num),
+                dryNum: toNum(friend.plant.dry_num),
+                weedNum: toNum(friend.plant.weed_num),
+                insectNum: toNum(friend.plant.insect_num),
+              }
+            : null,
+        };
+      })
+      .sort((a, b) => {
+        const cmp = (a.name || '').localeCompare(b.name || '', 'zh-CN');
+        if (cmp !== 0) return cmp;
+        return (a.gid || 0) - (b.gid || 0);
+      });
+
+    friendsListCache = friends;
+    friendsListCacheAt = Date.now();
+
+    const cachedDogCount = dogInfoCache ? Object.keys(dogInfoCache).length : 0;
+    log('好友',
+      `获取好友列表成功，共 ${friends.length} 位好友${
+        cachedDogCount > 0 ? `，已从缓存加载 ${cachedDogCount} 个狗信息` : ''}`,
+      {
+        module: 'friend',
+        event: '获取好友列表',
+        result: 'ok',
+        count: friends.length,
+        cachedDogInfoCount: cachedDogCount,
+      }
+    );
+
+    return friends;
+  } catch (err) {
+    log('好友', `获取好友列表失败: ${err.message}`, {
+      module: 'friend',
+      event: '获取好友列表',
+      result: 'error',
+      error: err.message,
+    });
+    return [];
+  }
+}
+
+/**
+ * Fetch dog info for all friends in the list.
+ * 优先用本地缓存（巡查时随 enterFriendFarm 收集的），只对缓存缺失的好友拉取。
+ * Caches guard dog (护主犬, id=90021) info locally.
+ */
+async function fetchFriendsDogInfo(forceRefresh = false) {
+  const accountId = process.env.FARM_ACCOUNT_ID || '';
+  let friends = friendsListCache;
+
+  if (!friends || friends.length === 0) {
+    friends = await getFriendsList(true);
+  }
+
+  if (!friends || friends.length === 0) {
+    return { ok: false, error: '好友列表为空，请先获取好友列表' };
+  }
+
+  // 优先用本地缓存（巡查时随 enterFriendFarm 收集的护主犬信息）
+  const petCache = require('./friend-pet-cache');
+  const existingCache = accountId ? petCache.entries(accountId) : null;
+  const cachedGids = existingCache ? new Set(Object.keys(existingCache).map(Number)) : new Set();
+
+  // 【2026-08-07 修复】forceRefresh（周期性全量刷新）时对全部好友重拉狗信息，
+  // 原逻辑只拉"缓存里没有的" → 已缓存的护主犬换狗/消失永远不会被更新。
+  const targets = forceRefresh
+    ? friends.map(f => ({ gid: toNum(f.gid), name: f.name || `GID:${toNum(f.gid)}` }))
+    : friends
+        .filter(f => !cachedGids.has(toNum(f.gid)))
+        .map(f => ({
+          gid: toNum(f.gid),
+          name: f.name || `GID:${toNum(f.gid)}`,
+        }));
+
+  log('好友', `获取狗信息：共 ${friends.length} 个好友，${forceRefresh ? '全量刷新' : `缓存命中 ${friends.length - targets.length} 个，需拉取 ${targets.length} 个`}`, {
+    module: 'friend',
+    event: 'fetchFriendsDogInfo',
+    total: friends.length,
+    forceRefresh,
+    cached: forceRefresh ? 0 : friends.length - targets.length,
+    uncached: targets.length,
+  });
+
+  let failCount = 0;
+  let blacklistCount = 0;
+
+  if (targets.length > 0) {
+    const result = await batchGetFriendDogInfo(targets);
+    failCount = result.failCount;
+    blacklistCount = result.blacklistCount;
+    // 合并新拉取的狗信息到好友列表
+    for (const friend of friends) {
+      const dogInfo = result.map.get(toNum(friend.gid));
+      if (dogInfo) {
+        friend.dogId = dogInfo.dogId;
+        friend.dogName = dogInfo.dogName;
+        friend.blacklisted = dogInfo.blacklisted || false;
+      }
+    }
+  }
+
+  // Read the current truth after probing; an old guard entry must never overwrite a new no-dog reply.
+  const currentEntries = petCache.entries(accountId);
+  for (const friend of friends) {
+    const entry = currentEntries[toNum(friend.gid)];
+    friend.dogState = petCache.getState(friend.gid, accountId);
+    friend.dogId = entry?.dogId || 0;
+    friend.dogName = entry ? (getDogName(entry.dogId) || '无狗') : '未知';
+  }
+
+  friendsListCache = friends;
+  friendsListCacheAt = Date.now();
+
+  petCache.flush(accountId);
+
+  const guardDogCount = friends.filter(f => f.dogId === 90021).length;
+  failCount = friends.filter(f => f.dogState !== 'unknown' && f.dogId === 0).length;
+  const unknownCount = friends.filter(f => f.dogState === 'unknown').length;
+
+  log('好友',
+    `获取狗信息完成: 共 ${friends.length} 个好友，护主犬 ${guardDogCount} 个，无狗 ${failCount} 个，未知 ${unknownCount} 个，黑名单 ${blacklistCount} 个`,
+    {
+      module: 'friend',
+      event: '获取好友狗信息',
+      result: 'ok',
+      count: friends.length,
+      guardDogCount,
+      failCount,
+      blacklistCount,
+    }
+  );
+
+  return {
+    ok: true,
+    friends,
+    failCount,
+    blacklistCount,
+    guardDogCount,
+    unknownCount,
+  };
+}
+
+// ===== Friend lands detail =====
+
+/**
+ * Get a friend's lands in detail (for frontend display).
+ */
+async function getFriendLandsDetail(gid) {
+  try {
+    const enterReply = await enterFriendFarm(gid);
+    const lands = enterReply.lands || [];
+    const userState = getUserState();
+    const plantBlacklist = getPlantBlacklist(userState.accountId);
+    const analysis = analyzeFriendLands(lands, userState.gid, '', { plantBlacklist });
+    await leaveFriendFarm(gid);
+
+    const detailLands = [];
+    const serverTimeSec = getServerTimeSec();
+    const landMap = buildLandMap(lands);
+
+    for (const land of lands) {
+      const landId = toNum(land.id);
+      const landLevel = toNum(land.level);
+      const isUnlocked = !!land.unlocked;
+      const { sourceLand, occupiedByMaster, masterLandId, occupiedLandIds } =
+        getDisplayLandContext(land, landMap);
+
+      // Locked land
+      if (!isUnlocked) {
+        detailLands.push({
+          id: landId,
+          unlocked: false,
+          status: 'locked',
+          plantName: '',
+          phaseName: '未解锁',
+          level: landLevel,
+          needWater: false,
+          needWeed: false,
+          needBug: false,
+          occupiedByMaster: false,
+          masterLandId: 0,
+          occupiedLandIds: [],
+          plantSize: 1,
+        });
+        continue;
+      }
+
+      const targetPlant = (sourceLand && sourceLand.plant) || land.plant;
+
+      // Empty land
+      if (!targetPlant || !targetPlant.phases || targetPlant.phases.length === 0) {
+        detailLands.push({
+          id: landId,
+          unlocked: true,
+          status: 'empty',
+          plantName: '',
+          phaseName: '空地',
+          level: landLevel,
+          occupiedByMaster,
+          masterLandId,
+          occupiedLandIds,
+          plantSize: 1,
+        });
+        continue;
+      }
+
+      const currentPhase = getCurrentPhase(targetPlant.phases, false, '');
+      if (!currentPhase) {
+        detailLands.push({
+          id: landId,
+          unlocked: true,
+          status: 'empty',
+          plantName: '',
+          phaseName: '',
+          level: landLevel,
+          occupiedByMaster,
+          masterLandId,
+          occupiedLandIds,
+          plantSize: 1,
+        });
+        continue;
+      }
+
+      const phase = currentPhase.phase;
+      const plantId = toNum(targetPlant.id);
+      const plantName = getPlantNameOrNull(plantId) || targetPlant.name || getPlantName(plantId) || '未知';
+      const plantInfo = getPlantById(plantId);
+      let seedId = toNum(plantInfo && plantInfo.seed_id);
+      // 新作物回退：服务器下发的 plant.id = 1000000 + 种子ID（狗尾草 1020516 → 20516、芦苇 1025995、泡泡棉花糖 1029004）
+      if (!seedId && plantId > 1000000) seedId = plantId - 1000000;
+      if (!seedId && plantId >= 20000 && plantId < 100000) seedId = plantId;
+      const seedImage = seedId > 0 ? getSeedImageBySeedId(seedId) : '';
+      const plantSize = Math.max(1, toNum(plantInfo && plantInfo.size) || 1);
+      const totalSeasons = Math.max(1, toNum(plantInfo && plantInfo.seasons) || 1);
+      const currentSeasonRaw = toNum(targetPlant.season);
+      const currentSeason =
+        currentSeasonRaw > 0 ? Math.min(currentSeasonRaw, totalSeasons) : 1;
+      const phaseName = PHASE_NAMES[phase] || '';
+
+      // Compute maturity time
+      const maturePhase = Array.isArray(targetPlant.phases)
+        ? targetPlant.phases.find(p => p && toNum(p.phase) === PlantPhase.MATURE)
+        : null;
+      const matureTimeSec = maturePhase ? toTimeSec(maturePhase.begin_time) : 0;
+      const matureInSec = matureTimeSec > serverTimeSec ? matureTimeSec - serverTimeSec : 0;
+      const totalGrowTime = getPlantGrowTime(plantId);
+
+      // Determine status
+      let status = 'growing';
+      if (phase === PlantPhase.MATURE) {
+        status = targetPlant.stealable ? 'stealable' : 'harvested';
+      } else if (phase === PlantPhase.DEAD) {
+        status = 'dead';
+      }
+
+      // Mutant effects
+      const mutantConfigIds = targetPlant.mutant_config_ids || [];
+      const mutantEffects = getMutantEffectsByIds(mutantConfigIds);
+
+      detailLands.push({
+        id: landId,
+        unlocked: true,
+        status,
+        plantName,
+        plantId,
+        seedId,
+        seedImage,
+        phaseName,
+        currentSeason,
+        totalSeason: totalSeasons,
+        level: landLevel,
+        matureInSec,
+        totalGrowTime,
+        needWater: toNum(targetPlant.dry_num) > 0,
+        needWeed: targetPlant.weed_owners && targetPlant.weed_owners.length > 0,
+        needBug: targetPlant.insect_owners && targetPlant.insect_owners.length > 0,
+        occupiedByMaster,
+        masterLandId,
+        occupiedLandIds,
+        plantSize,
+        mutantEffects,
+      });
+    }
+
+    return { lands: detailLands, summary: analysis };
+  } catch {
+    return { lands: [], summary: {} };
+  }
+}
+
+// ===== Cache accessors =====
+
+function getFriendsListCache() {
+  return friendsListCache && decoratePetInfo(friendsListCache);
+}
+
+function decoratePetInfo(friends) {
+  const accountId = process.env.FARM_ACCOUNT_ID || '';
+  const cache = require('./friend-pet-cache');
+  const entries = cache.entries(accountId);
+  return friends.map(friend => {
+    const entry = entries[toNum(friend.gid)];
+    return { ...friend, dogId: entry?.dogId || 0,
+      dogName: entry ? (getDogName(entry.dogId) || '无狗') : '未知',
+      dogState: cache.getState(friend.gid, accountId) };
+  });
+}
+
+function setFriendsListCache(cache) {
+  friendsListCache = cache;
+  friendsListCacheAt = Date.now();
+}
+
+// ===== Exports =====
+module.exports = {
+  analyzeFriendLands,
+  getFriendDogInfo,
+  batchGetFriendDogInfo,
+  getFriendsList,
+  fetchFriendsDogInfo,
+  getFriendLandsDetail,
+  getFriendsListCache,
+  setFriendsListCache,
+};

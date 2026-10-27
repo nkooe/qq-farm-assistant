@@ -1,0 +1,168 @@
+const { parseMallPriceValue, parseMallLimitInfo } = require("../services/mall");
+  const { toNum } = require("../utils/utils");
+
+const MALL_GOODS_ORDER = [1002, 1003, 1006];
+const MALL_GOODS_PRICE_OVERRIDES = {
+  1002: 42,
+  1003: 34,
+  1006: 33,
+};
+const MALL_GOODS_META = {
+  1002: {
+    name: "10小时有机化肥",
+    images: [
+      "/game-config/seed_images_named/80011_organic_1.png",
+      "/game-config/seed_images_named/80013_organic_8.png",
+    ],
+    layout: "horizontal",
+  },
+  1003: {
+    name: "10小时化肥",
+    images: [
+      "/game-config/seed_images_named/80001_ordinary_1.png",
+      "/game-config/seed_images_named/80003_ordinary_8.png",
+    ],
+    layout: "horizontal",
+  },
+  1006: {
+    name: "狗粮礼包",
+    images: [
+      "/game-config/seed_images_named/90004_dog_food_1.png",
+      "/game-config/seed_images_named/90005_dog_food_3.png",
+      "/game-config/seed_images_named/90006_dog_food_5.png",
+    ],
+    layout: "triangle",
+  },
+};
+
+function getAuthorizedAccountId({
+  req,
+  res,
+  getAccountIdFromRequest,
+  canAccessAccount,
+}) {
+  const accountId = getAccountIdFromRequest(req);
+  if (!accountId) {
+    res.status(400).json({ ok: false, error: "Missing\x20x-account-id" });
+    return null;
+  }
+  if (!canAccessAccount(req, accountId)) {
+    res.status(403).json({ ok: false, error: "无权访问此账号" });
+    return null;
+  }
+  return accountId;
+}
+
+function registerAdminMallRoutes({
+  app,
+  provider,
+  adminLogger,
+  getAccountIdFromRequest,
+  canAccessAccount,
+  sendProviderError,
+}) {
+  app.get("/api/shop/mall", async (req, res) => {
+    const accountId = getAuthorizedAccountId({
+      req,
+      res,
+      getAccountIdFromRequest,
+      canAccessAccount,
+    });
+    if (!accountId) return;
+
+    try {
+      const status = provider.getStatus(accountId);
+      if (!status || !status.connection || !status.connection.connected) {
+        return res.json({
+          ok: false,
+          error: "获取道具商城失败:\x20账号未运行",
+        });
+      }
+
+      const userTicket = status?.status?.coupon || 0;
+      const discounts = await provider.getMallGoods(accountId);
+      const goods = [];
+
+      for (const discount of discounts) {
+        const id = toNum(discount.goods_id) || 0;
+        if (!MALL_GOODS_ORDER.includes(id)) continue;
+
+        const meta = MALL_GOODS_META[id];
+        if (!meta) continue;
+
+        const isFree = discount.is_free === true;
+        const isLimited = discount.is_limited === true;
+        const price =
+          MALL_GOODS_PRICE_OVERRIDES[id] || parseMallPriceValue(discount.price);
+        let limitCount = 0;
+        let boughtNum = 0;
+        if (isLimited && discount.limit) {
+          try {
+            const limitInfo = parseMallLimitInfo(discount.limit);
+            if (limitInfo) {
+              limitCount = limitInfo.limitCount || 0;
+              boughtNum = limitInfo.boughtNum || 0;
+            }
+          } catch {}
+        }
+
+        const isSoldOut = limitCount > 0 && boughtNum >= limitCount;
+        goods.push({
+          id,
+          goodsId: id,
+          name: meta.name,
+          type: toNum(discount.type) || 0,
+          itemIds: [],
+          price,
+          isFree,
+          isLimited,
+          limitCount,
+          boughtNum,
+          isSoldOut,
+          discount: discount.discount || "",
+          images: meta.images,
+          layout: meta.layout,
+          canBuy: !isSoldOut && (isFree || userTicket >= price),
+        });
+      }
+
+      goods.sort(
+        (left, right) =>
+          MALL_GOODS_ORDER.indexOf(left.goodsId) -
+          MALL_GOODS_ORDER.indexOf(right.goodsId),
+      );
+      res.json({ ok: true, data: goods, userTicket });
+    } catch (error) {
+      adminLogger.error("获取道具商城失败", {
+        error: error.message,
+        stack: error.stack,
+      });
+      const message = error.message || "未知错误";
+      res.json({ ok: false, error: `获取道具商城失败:\x20${  message}` });
+    }
+  });
+
+  app.post("/api/shop/mall/buy", async (req, res) => {
+    const accountId = getAuthorizedAccountId({
+      req,
+      res,
+      getAccountIdFromRequest,
+      canAccessAccount,
+    });
+    if (!accountId) return;
+
+    try {
+      const { goodsId, count } = req.body || {};
+      if (!goodsId || !count) {
+        return res.status(400).json({ ok: false, error: "参数不完整" });
+      }
+
+      const data = await provider.buyMallGoods(accountId, goodsId, count);
+      res.json({ ok: true, data });
+    } catch (error) {
+      sendProviderError(res, error);
+    }
+  });
+}
+
+module.exports = { registerAdminMallRoutes };

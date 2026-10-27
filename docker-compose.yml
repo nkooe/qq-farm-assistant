@@ -1,0 +1,53 @@
+services:
+  qq-farm-bot:
+    build:
+      context: .
+      dockerfile: core/Dockerfile
+      args:
+        # 可选：yyb-go 为私有仓库时传入具备 read 权限的 token；公开仓库留空即可
+        - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    image: qq-farm-bot:latest
+    container_name: qq-farm-bot
+    restart: unless-stopped
+    ports:
+      # 宿主机默认 3900（Windows 端口排除区间会拒绝 3007 监听）；容器内 Node 仍监听 3007
+      - "${PORT:-3900}:3007"
+    volumes:
+      - qq-farm-test-data:/app/core/data
+      - qq-farm-test-logs:/app/core/data/logs
+      # 应用宝 Go 服务的 SQLite 数据库持久化（跨容器重启保留已登录账号）
+      - qq-farm-test-yyb-db:/usr/local/share/yyb-go/resource/db
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
+      - NODE_ENV=production
+      - ADMIN_PORT=3007
+      # ===== 应用宝 Go 服务（同容器内，单镜像共用 3007 出口）=====
+      # Node 代理会把 /api/yyb/* 转发到下面的地址；无需在 Web 端再填外部地址
+      - YYB_API_URL=http://127.0.0.1:8450
+      # 该 token 同时作为：① Go 服务自身的 Bearer 鉴权（YYB_API_TOKEN）② Node 代理转发时携带的 apiKey（YYB_API_KEY）
+      - YYB_API_TOKEN=${YYB_API_TOKEN:-}
+      - YYB_API_KEY=${YYB_API_TOKEN:-}
+      - YYB_PORT=8450
+      # 可选：应用宝 Web 管理页登录账密（留空则由服务使用内置默认）
+      - YYB_ADMIN_USER=${YYB_ADMIN_USER:-}
+      - YYB_ADMIN_PASS=${YYB_ADMIN_PASS:-}
+    healthcheck:
+      # 同时检查主面板与应用宝服务，任一异常均标记 unhealthy。
+      test: ["CMD", "node", "/app/core/docker/healthcheck.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  qq-farm-test-data:
+    name: qq-farm-test-data
+  qq-farm-test-logs:
+    name: qq-farm-test-logs
+  qq-farm-test-yyb-db:
+    name: qq-farm-test-yyb-db

@@ -1,0 +1,60 @@
+node_modules/
+.DS_Store
+core/node_modules/
+web/node_modules/
+
+web/dist/
+web/stats.html
+dist/
+build/
+coverage/
+web/test-results/
+web/playwright-report/
+.cache/
+.vite/
+.turbo/
+
+core/data/
+logs/
+log/
+tmp/
+temp/
+.tmp/
+
+.env
+.env.*
+*.log
+
+# 运行时生成的种子图标资源（旧镜像带出，非源码，勿提交）
+core/src/gameConfig/seed_images_named/
+
+# 应用宝服务运行时生成的账号头像、登录二维码和本地数据库
+yyb-go/resource/avatars/
+yyb-go/resource/qr/
+yyb-go/resource/db/
+
+# 本地调试/迁移产生的临时备份
+core/data/*.before-*.json
+
+# Python
+__pycache__/
+*.pyc
+
+# Local credentials and run-time artifacts
+*.pem
+*.key
+*.p12
+*.pfx
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+
+# Private deployment notes and account screenshots
+/progress.md
+/docs/server-audit-*.md
+/docs/server-sync-*.md
+/assets/screenshots/

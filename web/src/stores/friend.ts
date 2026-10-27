@@ -1,0 +1,518 @@
+import { defineStore } from 'pinia'
+import { ref } from 'vue'
+import api from '@/api'
+import { useAccountStore } from '@/stores/account'
+
+export interface BlacklistItem {
+  gid: number
+  name: string
+  avatarUrl: string
+  skipSteal: boolean
+  skipHelp: boolean
+}
+
+export interface KnownFriendSettings {
+  knownFriendGids: number[]
+  knownFriendGidSyncCooldownSec: number
+  friendsListCacheTtlSec: number
+}
+
+export const useFriendStore = defineStore('friend', () => {
+  const friends = ref<any[]>([])
+  const loading = ref(false)
+  const dogInfoLoading = ref(false)
+  const friendLands = ref<Record<string, any[]>>({})
+  const friendLandsLoading = ref<Record<string, boolean>>({})
+  const blacklist = ref<BlacklistItem[]>([])
+  const interactRecords = ref<any[]>([])
+  const interactLoading = ref(false)
+  const interactError = ref('')
+
+  const knownFriendGids = ref<number[]>([])
+  const knownFriendGidSyncCooldownSec = ref(600)
+  const friendsListCacheTtlSec = ref(60)
+  const knownFriendSettingsLoading = ref(false)
+  const knownFriendSettingsSaving = ref(false)
+
+  function clearFriendData() {
+    friends.value = []
+    friendLands.value = {}
+    friendLandsLoading.value = {}
+    blacklist.value = []
+    interactRecords.value = []
+    interactError.value = ''
+    knownFriendGids.value = []
+    knownFriendGidSyncCooldownSec.value = 600
+    friendsListCacheTtlSec.value = 60
+  }
+
+  function isCurrentAccount(accountId: string) {
+    const accountStore = useAccountStore()
+    const currentId = String((accountStore.currentAccountId as { value?: string })?.value ?? accountStore.currentAccountId ?? '')
+    return currentId === String(accountId)
+  }
+
+  function buildPlantSummaryFromDetail(lands: any[], summary: any) {
+    let stealNum = 0
+    let dryNum = 0
+    let weedNum = 0
+    let insectNum = 0
+
+    const detailLands = Array.isArray(lands) ? lands : []
+    if (detailLands.length > 0) {
+      for (const land of detailLands) {
+        if (!land || !land.unlocked)
+          continue
+        if (land.status === 'stealable')
+          stealNum++
+        if (land.needWater)
+          dryNum++
+        if (land.needWeed)
+          weedNum++
+        if (land.needBug)
+          insectNum++
+      }
+    }
+    else {
+      stealNum = Array.isArray(summary?.stealable) ? summary.stealable.length : 0
+      dryNum = Array.isArray(summary?.needWater) ? summary.needWater.length : 0
+      weedNum = Array.isArray(summary?.needWeed) ? summary.needWeed.length : 0
+      insectNum = Array.isArray(summary?.needBug) ? summary.needBug.length : 0
+    }
+
+    return {
+      stealNum: Number(stealNum) || 0,
+      dryNum: Number(dryNum) || 0,
+      weedNum: Number(weedNum) || 0,
+      insectNum: Number(insectNum) || 0,
+    }
+  }
+
+  function syncFriendPlantSummary(friendId: string, lands: any[], summary: any) {
+    const key = String(friendId)
+    const idx = friends.value.findIndex(f => String(f?.gid || '') === key)
+    if (idx < 0)
+      return
+
+    const nextPlant = buildPlantSummaryFromDetail(lands, summary)
+    friends.value[idx] = {
+      ...friends.value[idx],
+      plant: nextPlant,
+    }
+  }
+
+  // 并发去重：连续触发（如账号切换 + 页面加载两个 watch 同时调用）时，
+  // 只让最后一次请求的结果生效，避免重复拉取好友列表
+  let friendsFetchToken = 0
+
+  async function fetchFriends(accountId: string, forceSync = false) {
+    if (!accountId)
+      return
+    const requestedId = String(accountId)
+    const token = ++friendsFetchToken
+    loading.value = true
+    try {
+      const res = await api.get('/api/friends', {
+        headers: { 'x-account-id': accountId },
+        params: forceSync ? { forceSync: 'true' } : {},
+      })
+      if (token !== friendsFetchToken)
+        return // 已有更新的请求，丢弃本次过期结果
+      if (!isCurrentAccount(requestedId))
+        return
+      if (res.data.ok) {
+        friends.value = res.data.data || []
+      }
+    }
+    finally {
+      if (token === friendsFetchToken)
+        loading.value = false
+    }
+  }
+
+  async function fetchFriendsDogInfo(accountId: string) {
+    if (!accountId)
+      return { ok: false, error: '账号ID无效' }
+    const requestedId = String(accountId)
+    dogInfoLoading.value = true
+    try {
+      const res = await api.post('/api/friends/fetch-dog-info', {}, {
+        headers: { 'x-account-id': accountId },
+        timeout: 600000,
+      })
+      if (res.data.ok && Array.isArray(res.data.friends) && isCurrentAccount(requestedId)) {
+        friends.value = res.data.friends
+      }
+      return {
+        ok: !!res.data.ok,
+        failCount: res.data.failCount || 0,
+        blacklistCount: res.data.blacklistCount || 0,
+        guardDogCount: res.data.guardDogCount || 0,
+        unknownCount: res.data.unknownCount || 0,
+        error: res.data.error || '',
+      }
+    }
+    catch (e: any) {
+      return {
+        ok: false,
+        error: e?.response?.data?.error || e?.message || '获取狗信息失败',
+      }
+    }
+    finally {
+      dogInfoLoading.value = false
+    }
+  }
+
+  async function fetchFriendDogInfo(accountId: string, gid: string | number) {
+    if (!accountId || !gid)
+      return null
+    try {
+      const res = await api.get(`/api/friend/${gid}/dog`, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok)
+        return res.data.data
+    }
+    catch {
+      // ignore
+    }
+    return null
+  }
+  async function fetchInteractRecords(accountId: string) {
+    if (!accountId)
+      return
+    const requestedId = String(accountId)
+    interactLoading.value = true
+    interactError.value = ''
+
+    try {
+      const res = await api.get('/api/interact-records', {
+        headers: { 'x-account-id': accountId },
+      })
+      if (!isCurrentAccount(requestedId))
+        return
+      if (res.data.ok) {
+        interactRecords.value = Array.isArray(res.data.data) ? res.data.data : []
+      }
+      else {
+        interactError.value = res.data.error || '加载访客记录失败'
+      }
+    }
+    catch (error: any) {
+      interactError.value = error?.response?.data?.error || error?.message || '加载访客记录失败'
+    }
+    finally {
+      interactLoading.value = false
+    }
+  }
+
+  async function fetchBlacklist(accountId: string) {
+    if (!accountId)
+      return
+    const requestedId = String(accountId)
+    try {
+      const res = await api.get('/api/friend-blacklist', {
+        headers: { 'x-account-id': accountId },
+      })
+      if (!isCurrentAccount(requestedId))
+        return
+      if (res.data.ok) {
+        blacklist.value = res.data.data || []
+      }
+    }
+    catch { /* ignore */ }
+  }
+
+  async function toggleBlacklist(accountId: string, gid: number) {
+    if (!accountId || !gid)
+      return
+    const res = await api.post('/api/friend-blacklist/toggle', { gid }, {
+      headers: { 'x-account-id': accountId },
+    })
+    if (res.data.ok) {
+      blacklist.value = res.data.data || []
+    }
+  }
+
+  async function updateBlacklistItem(accountId: string, gid: number, opts: { skipSteal?: boolean, skipHelp?: boolean }) {
+    if (!accountId || !gid)
+      return
+    try {
+      const res = await api.post('/api/friend-blacklist/update', { gid, ...opts }, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok) {
+        blacklist.value = res.data.data || []
+      }
+    }
+    catch { /* ignore */ }
+  }
+
+  async function fetchFriendLands(accountId: string, friendId: string) {
+    if (!accountId || !friendId)
+      return
+    const requestedId = String(accountId)
+    friendLandsLoading.value[friendId] = true
+    try {
+      const res = await api.get(`/api/friend/${friendId}/lands`, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (!isCurrentAccount(requestedId))
+        return
+      if (res.data.ok) {
+        const lands = res.data.data.lands || []
+        const summary = res.data.data.summary || null
+        friendLands.value[friendId] = lands
+        syncFriendPlantSummary(friendId, lands, summary)
+      }
+    }
+    finally {
+      friendLandsLoading.value[friendId] = false
+    }
+  }
+
+  async function operate(accountId: string, friendId: string, opType: string) {
+    if (!accountId || !friendId)
+      return { ok: false, message: '参数无效' }
+    try {
+      const res = await api.post(`/api/friend/${friendId}/op`, { opType }, {
+        headers: { 'x-account-id': accountId },
+      })
+      const result = res.data?.data || res.data || {}
+      await fetchFriends(accountId)
+      if (friendLands.value[friendId]) {
+        await fetchFriendLands(accountId, friendId)
+      }
+      return result
+    }
+    catch (e: any) {
+      return { ok: false, message: e?.response?.data?.error || e?.message || '操作失败' }
+    }
+  }
+
+  function applyKnownFriendSettings(data: KnownFriendSettings | null | undefined) {
+    if (!data)
+      return
+    knownFriendGids.value = Array.isArray(data.knownFriendGids) ? data.knownFriendGids : []
+    knownFriendGidSyncCooldownSec.value = Number.isFinite(data.knownFriendGidSyncCooldownSec)
+      ? Math.max(30, Math.min(86400, data.knownFriendGidSyncCooldownSec))
+      : 600
+    friendsListCacheTtlSec.value = Number.isFinite(data.friendsListCacheTtlSec)
+      ? Math.max(10, Math.min(86400, data.friendsListCacheTtlSec))
+      : 60
+  }
+
+  async function fetchKnownFriendSettings(accountId: string) {
+    if (!accountId)
+      return
+    const requestedId = String(accountId)
+    knownFriendSettingsLoading.value = true
+    try {
+      const res = await api.get('/api/friend-known-gids', {
+        headers: { 'x-account-id': accountId },
+      })
+      if (!isCurrentAccount(requestedId))
+        return
+      if (res.data.ok) {
+        applyKnownFriendSettings(res.data.data)
+      }
+    }
+    finally {
+      knownFriendSettingsLoading.value = false
+    }
+  }
+
+  async function saveKnownFriendSettings(accountId: string, payload: Partial<KnownFriendSettings>) {
+    if (!accountId)
+      return
+    knownFriendSettingsSaving.value = true
+    try {
+      const res = await api.post('/api/friend-known-gids', payload, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok) {
+        applyKnownFriendSettings(res.data.data)
+      }
+    }
+    finally {
+      knownFriendSettingsSaving.value = false
+    }
+  }
+
+  async function removeKnownFriendGid(accountId: string, gid: number) {
+    if (!accountId || !gid)
+      return
+    knownFriendSettingsSaving.value = true
+    try {
+      const res = await api.post('/api/friend-known-gids/remove', { gid }, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok) {
+        applyKnownFriendSettings(res.data.data)
+      }
+    }
+    finally {
+      knownFriendSettingsSaving.value = false
+    }
+  }
+
+  async function batchAddKnownFriendGids(accountId: string, gids: number[]) {
+    if (!accountId || !gids || gids.length === 0)
+      return { ok: false, addedCount: 0 }
+    knownFriendSettingsSaving.value = true
+    try {
+      const res = await api.post('/api/friend-known-gids/batch-add', { gids }, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok) {
+        applyKnownFriendSettings(res.data.data)
+      }
+      return { ok: res.data.ok, addedCount: res.data.addedCount || 0 }
+    }
+    finally {
+      knownFriendSettingsSaving.value = false
+    }
+  }
+
+  async function removeUnsyncedKnownFriendGids(accountId: string, gids: number[]) {
+    if (!accountId || !gids || gids.length === 0)
+      return { ok: false, removedCount: 0 }
+    knownFriendSettingsSaving.value = true
+    try {
+      const res = await api.post('/api/friend-known-gids/batch-remove', { gids }, {
+        headers: { 'x-account-id': accountId },
+      })
+      if (res.data.ok) {
+        applyKnownFriendSettings(res.data.data)
+      }
+      return { ok: res.data.ok, removedCount: res.data.removedCount || 0 }
+    }
+    finally {
+      knownFriendSettingsSaving.value = false
+    }
+  }
+
+  async function deleteFriendsBatch(accountId: string, gids: number[], password?: string) {
+    if (!accountId || !gids || gids.length === 0)
+      return { ok: false, successCount: 0, failedCount: 0 }
+    try {
+      // 删除好友为逐个 RPC，好友较多时可能耗时数分钟，单独放大超时避免被默认 20s 误判为失败
+      const res = await api.post('/api/friend/batch-delete', { gids, password }, {
+        headers: { 'x-account-id': accountId },
+        timeout: 600000,
+      })
+      return {
+        ok: !!res.data.ok,
+        success: Array.isArray(res.data.success) ? res.data.success.map(Number) : [],
+        successCount: res.data.successCount || 0,
+        failedCount: res.data.failedCount || 0,
+        failed: res.data.failed || [],
+      }
+    }
+    catch (e: any) {
+      return {
+        ok: false,
+        successCount: 0,
+        failedCount: gids.length,
+        error: e?.response?.data?.error || e?.message || '批量删除失败',
+      }
+    }
+  }
+
+  async function applyFriend(
+    accountId: string,
+    opts: {
+      gid?: number
+      shareKey?: string
+      openid?: string
+    },
+  ) {
+    if (!accountId)
+      return { ok: false, code: 0, error: '参数无效' }
+    try {
+      const o = opts || {}
+      const payload: Record<string, any> = {}
+      if (o.gid)
+        payload.gid = o.gid
+      if (o.shareKey)
+        payload.shareKey = o.shareKey
+      if (o.openid)
+        payload.openid = o.openid
+      const res = await api.post('/api/friend/apply', payload, {
+        headers: { 'x-account-id': accountId },
+        timeout: 30000,
+      })
+      return {
+        ok: !!res.data.ok,
+        code: Number(res.data.code) || 0,
+        error: res.data.error || '',
+        data: res.data.data,
+      }
+    }
+    catch (e: any) {
+      const raw = e?.response?.data?.error || e?.message || '加好友失败'
+      const m = String(raw).match(/code=(\d+)/)
+      return {
+        ok: false,
+        code: m ? Number(m[1]) : 0,
+        error: String(raw),
+      }
+    }
+  }
+
+  async function deleteFriend(accountId: string, gid: number) {
+    if (!accountId || !gid)
+      return { ok: false, error: '参数无效' }
+    try {
+      const res = await api.post(`/api/friend/${gid}/delete`, {}, {
+        headers: { 'x-account-id': accountId },
+        timeout: 60000,
+      })
+      return {
+        ok: !!res.data.ok,
+        message: res.data.message,
+      }
+    }
+    catch (e: any) {
+      return {
+        ok: false,
+        error: e?.response?.data?.error || e?.message || '删除好友失败',
+      }
+    }
+  }
+
+  return {
+    friends,
+    loading,
+    dogInfoLoading,
+    friendLands,
+    friendLandsLoading,
+    blacklist,
+    interactRecords,
+    interactLoading,
+    interactError,
+    knownFriendGids,
+    knownFriendGidSyncCooldownSec,
+    friendsListCacheTtlSec,
+    knownFriendSettingsLoading,
+    knownFriendSettingsSaving,
+    clearFriendData,
+    fetchFriends,
+    fetchFriendsDogInfo,
+    fetchFriendDogInfo,
+    fetchBlacklist,
+    toggleBlacklist,
+    updateBlacklistItem,
+    fetchInteractRecords,
+    fetchFriendLands,
+    operate,
+    fetchKnownFriendSettings,
+    saveKnownFriendSettings,
+    removeKnownFriendGid,
+    batchAddKnownFriendGids,
+    removeUnsyncedKnownFriendGids,
+    deleteFriendsBatch,
+    deleteFriend,
+    applyFriend,
+  }
+})

@@ -1,0 +1,46 @@
+/* Aliases keep imported feature components on the application's existing theme. */
+:root {
+  --ui-ink: var(--theme-text);
+  --ui-muted: #64748b;
+  --ui-subtle: #94a3b8;
+  --ui-primary: var(--theme-primary);
+  --ui-primary-fill: var(--theme-primary);
+  --ui-primary-soft: color-mix(in srgb, var(--theme-primary) 12%, transparent);
+  --ui-bg: var(--surface-1);
+  --ui-bg-soft: var(--surface-2);
+  --ui-surface: var(--surface-1);
+  --ui-surface-soft: var(--surface-2);
+  --ui-surface-strong: var(--surface-3);
+  --ui-border: var(--theme-border, #dbe3ed);
+  --ui-border-strong: #94a3b8;
+  --ui-warning: #b45309;
+  --ui-warning-soft: #fef3c7;
+  --ui-danger: #dc2626;
+  --ui-danger-soft: #fee2e2;
+  --ui-blue-soft: #dbeafe;
+  --ui-radius-card: 16px;
+  --ui-shadow-sm: 0 3px 16px #0f172a0a;
+}
+.dark { --ui-muted: #a3acb6; --ui-subtle: #8793a5; --ui-warning-soft: #422d18; --ui-danger-soft: #451d27; --ui-blue-soft: #1d304b; }
+.activity-account { max-width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--ui-border); border-radius: 12px; color: var(--ui-ink); background: var(--ui-surface); }
+.activity-tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+.activity-tabs button { min-height: 44px; padding: 10px 18px; border-radius: 12px; background: var(--ui-surface); color: var(--ui-ink); border: 1px solid var(--ui-border); }
+.activity-tabs button[aria-current] { background: var(--theme-primary); color: white; }
+.activity-offline { padding: 48px 20px; text-align: center; border: 1px dashed var(--ui-border); border-radius: 16px; }
+.activities-root button:focus-visible, .activities-root select:focus-visible { outline: 2px solid var(--theme-primary); outline-offset: 3px; }
+/* Uno reset uses button[type] and can override Naive's injected base rule. */
+.activities-root .n-button, .n-modal .n-button { min-height: 44px; background-color: var(--n-color); color: var(--n-text-color); }
+.activities-root .n-button:hover, .n-modal .n-button:hover { background-color: var(--n-color-hover); color: var(--n-text-color-hover); }
+.activities-root .n-button--disabled, .n-modal .n-button--disabled { background-color: var(--n-color-disabled); color: var(--n-text-color-disabled); }
+.activities-root .activity-picker { min-height: 0; }
+.activity-stage { display: flex; flex-direction: column; height: calc(100dvh - 260px); min-height: 560px; }
+/* 奶茶使用应用页面滚动，避免固定高度内再套一个被裁切的滚动窗口。 */
+.activity-stage:has(> .milk-shell) {
+  height: auto;
+  min-height: 0;
+}
+.activity-stage > .activity-picker { overflow-y: auto; }
+.dark .activities-root .activity-picker { background: var(--surface-1); }
+.dark .activities-root .activity-shell__frame { background: var(--surface-1); box-shadow: var(--ui-shadow-sm); }
+.dark .activities-root .activity-header { --ui-bg: var(--surface-1); --ui-ink: var(--theme-text); --ui-muted: #a3acb6; --ui-border: #ffffff17; }
+@media (max-width: 600px) { .activities-root .activity-picker { padding: 14px; } }

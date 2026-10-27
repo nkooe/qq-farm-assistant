@@ -1,0 +1,2 @@
+# 好友数据（已清洗，时间戳已去除，按 uid 去重）
+# 复制本文件内容到 qq-farm-bot/core/share.txt 后，bot 会自动用 processInviteCodes() 逐条 ReportArkClick
