@@ -4,6 +4,9 @@ import AccountSettingsTab from '../../src/components/settings/AccountSettingsTab
 import { useAccountSettings } from '../../src/composables/settings/useAccountSettings'
 import { useAccountStore } from '../../src/stores/account'
 import { useUserStore } from '../../src/stores/user'
+import Dashboard from '../../src/views/Dashboard.vue'
+
+const showDashboard = new URLSearchParams(location.search).has('dashboard')
 
 // Mount production components and composable; Playwright intercepts every API request.
 useUserStore().userInfo = { username: 'test-admin', role: 'admin', card: null, accountLimit: -1 }
@@ -24,13 +27,16 @@ onMounted(() => state.fetchAccounts())
     <p role="alert" class="whitespace-pre-line break-words">
       {{ alert }}
     </p>
+    <Dashboard v-if="showDashboard" />
     <AccountSettingsTab
+      v-else
       v-bind="state" default-plan-applying-id=""
       @clear-stopped="state.openClearStoppedConfirm" @confirm-clear-stopped="state.confirmClearStopped"
       @close-clear-stopped-confirm="state.showClearStoppedConfirm = false"
       @refresh-wx-codes="state.refreshWxCodesNow" @retry-refresh="state.retryFailedRefresh"
       @select="state.selectAccount" @add="state.openAddModal" @close-modal="state.showModal = false"
       @toggle="state.toggleAccount"
+      @saved="state.handleSaved" @refresh="state.handleAccountRefreshed"
     />
   </main>
 </template>

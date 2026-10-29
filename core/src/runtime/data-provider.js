@@ -4,6 +4,7 @@ const {
     resolveAccountId: resolveAccountIdByList
 } = require('../services/account-resolver');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
+const { loginIdentity } = require('../services/login-recovery');
 
 /**
  * 创建数据提供器 —— 封装对 Worker 的 API 调用，供 Admin Server 使用
@@ -29,6 +30,8 @@ function createDataProvider(deps) {
         scheduleAutoCodeRefresh,
         refreshAccountCode
     } = deps;
+    const manualRefreshes = new Map();
+    const refreshControllers = new Map();
 
     /** 获取账号列表 */
     function getAllAccountList() {
@@ -280,23 +283,42 @@ function createDataProvider(deps) {
             if (!id) throw new Error('Missing x-account-id');
             const account = findAccount(id);
             if (!account) throw new Error('账号不存在');
+            if (manualRefreshes.has(id)) return manualRefreshes.get(id);
             if (account.loginType === 'yyb' && account.yybOpenid) {
                 if (typeof refreshYybCodeIfNeeded !== 'function') {
                     throw new TypeError('应用宝刷新服务不可用');
                 }
-                const result = await refreshYybCodeIfNeeded(account);
-                if (!result || result.ok !== true || !result.code) {
-                    return {
-                        ok: false,
-                        source: 'yyb',
-                        error: result && result.error ? result.error : '应用宝 Code 刷新失败',
-                    };
-                }
-                store.addOrUpdateAccount({ id, code: result.code });
-                if (workers[id]) {
-                    await restartWorker(account, { skipYybRefresh: true });
-                }
-                return { ok: true, source: 'yyb' };
+                const controller = new AbortController();
+                refreshControllers.set(id, controller);
+                const identity = loginIdentity(account);
+                const originalCode = account.code;
+                const task = Promise.resolve().then(async () => {
+                    const result = await refreshYybCodeIfNeeded({ ...account }, { signal: controller.signal });
+                    const current = findAccount(id);
+                    if (controller.signal.aborted || !current) return { ok: false, source: 'yyb', error: '账号已停止或删除，本次结果已丢弃' };
+                    if (loginIdentity(current) !== identity) {
+                        // A concurrent startup may already have committed this same shared result.
+                        if (result?.ok && current.code === result.code && loginIdentity({ ...current, code: originalCode }) === identity) return { ok: true, source: 'yyb' };
+                        return { ok: false, source: 'yyb', error: '账号登录信息已变化，本次结果已丢弃' };
+                    }
+                    if (!result || result.ok !== true || !result.code) {
+                        return {
+                            ok: false,
+                            source: 'yyb',
+                            error: result && result.error ? result.error : '应用宝 Code 刷新失败',
+                        };
+                    }
+                    store.addOrUpdateAccount({ id, code: result.code });
+                    if (workers[id] || getWorkerRuntime?.(id)?.state === 'starting') {
+                        await restartWorker({ ...current, code: result.code }, { skipYybRefresh: true });
+                    }
+                    return { ok: true, source: 'yyb' };
+                }).finally(() => {
+                    if (manualRefreshes.get(id) === task) manualRefreshes.delete(id);
+                    if (refreshControllers.get(id) === controller) refreshControllers.delete(id);
+                });
+                manualRefreshes.set(id, task);
+                return task;
             }
             if (typeof refreshAccountCode !== 'function') throw new Error('自动刷新服务不可用');
             const ok = await refreshAccountCode(id, 'manual');
@@ -336,6 +358,7 @@ function createDataProvider(deps) {
                 acc.runtimeState = runtime?.state || (acc.connected ? 'online' : worker ? 'starting' : 'stopped');
                 acc.runtimeError = runtime?.error || '';
                 acc.runtimeReconnect = runtime?.reconnect || null;
+                acc.runtimeLogin = runtime?.login || null;
                 if (worker && worker.status && worker.status.status && worker.status.status.name) {
                     acc.nick = worker.status.status.name;
                 }
@@ -352,17 +375,20 @@ function createDataProvider(deps) {
             return { state: connected ? 'online' : running ? 'starting' : 'stopped', connected, running, error: '' };
         },
 
-        startAccount: (ref) => {
+        startAccount: (ref, options = {}) => {
             const id = resolveAccountId(ref);
             const account = findAccount(id || ref);
             if (!account) return false;
+            refreshControllers.get(id)?.abort();
+            deps.cancelCodeRefresh?.(id);
             account.autoStart = true;
             store.addOrUpdateAccount({ id: account.id, autoStart: true });
+            scheduleAutoCodeRefresh?.(id);
             const runtime = typeof getWorkerRuntime === 'function' ? getWorkerRuntime(account.id) : null;
             if (workers[account.id] && !workers[account.id]?.status?.connection?.connected && runtime?.state !== 'starting') {
-                Promise.resolve(restartWorker(account)).catch(() => {});
+                Promise.resolve(restartWorker(account, options)).catch(() => {});
             } else {
-                Promise.resolve(startWorker(account)).catch(() => {});
+                Promise.resolve(startWorker(account, options)).catch(() => {});
             }
             return true;
         },
@@ -371,17 +397,21 @@ function createDataProvider(deps) {
             const id = resolveAccountId(ref);
             const account = findAccount(id || ref);
             if (!account) return false;
+            refreshControllers.get(id)?.abort();
+            deps.cancelCodeRefresh?.(id);
             account.autoStart = false;
             store.addOrUpdateAccount({ id: account.id, autoStart: false });
             if (id) stopWorker(id);
             return true;
         },
 
-        restartAccount: (ref) => {
+        restartAccount: (ref, options = {}) => {
             const id = resolveAccountId(ref);
             const account = findAccount(id || ref);
             if (!account) return false;
-            restartWorker(account);
+            refreshControllers.get(id)?.abort();
+            deps.cancelCodeRefresh?.(id);
+            restartWorker(account, options);
             return true;
         },
 

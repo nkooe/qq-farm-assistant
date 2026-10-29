@@ -1,157 +1,86 @@
 const fetch = require('node-fetch');
 const { createScheduler } = require('../services/scheduler');
+const { createLoginRecovery, LoginRecoveryError, loginIdentity, requestDeadline } = require('../services/login-recovery');
+const { sanitizeRefreshText } = require('../models/refresh-job-store');
 
 function createAutoCodeRefreshService(deps) {
-  const {
-    store,
-    getAccounts,
-    addOrUpdateAccount,
-    resolveWorkerControls,
-    log,
-    addAccountLog,
-  } = deps;
-
+  const { store, getAccounts, addOrUpdateAccount, resolveWorkerControls, log, addAccountLog } = deps;
+  const loginRecovery = deps.loginRecovery || createLoginRecovery();
+  const request = deps.fetch || fetch;
+  const pending = new Map();
   const scheduler = createScheduler('auto_code_refresh');
+  const taskName = id => `refresh_${String(id || '')}`;
+  const findAccount = id => (getAccounts().accounts || []).find(account => String(account.id) === String(id));
+  const controls = () => resolveWorkerControls?.() || {};
+  const online = id => controls().getWorkerRuntime?.(id)?.connected === true;
 
-  function getTaskName(accountId) {
-    return `refresh_${  String(accountId || '')}`;
-  }
-
-  function findAccount(accountId) {
-    const data = getAccounts();
-    const accounts = Array.isArray(data && data.accounts) ? data.accounts : [];
-    return accounts.find(acc => String(acc.id) === String(accountId));
-  }
-
-  function normalizeConfig(accountId) {
-    const cfg = store.getAutoCodeRefresh ? store.getAutoCodeRefresh(accountId) : null;
-    return {
-      enabled: cfg && cfg.enabled === true,
-      intervalMinutes: Math.max(1, Math.min(1440, Number(cfg && cfg.intervalMinutes) || 60)),
-    };
-  }
-
-  function getWxConfig() {
-    return store.getGlobalWxConfig ? store.getGlobalWxConfig() : {};
-  }
-
-  async function requestFarmCode(account, wxConfig) {
-    const wxid = String(account && account.wxid || '').trim();
-    if (!wxid) throw new Error('账号缺少 wxid，无法自动刷新 Code');
-
-    const apiKey = String(wxConfig.apiKey || '').trim();
-    const appId = String(wxConfig.appId || 'wx5306c5978fdb76e4').trim();
-
-    if (apiKey) {
-      const proxyApiUrl = String(wxConfig.proxyApiUrl || 'https://code.z74d.top/api').trim();
-      const targetUrl = `${proxyApiUrl  }?api_key=${  encodeURIComponent(apiKey)  }&action=jslogin`;
-      const response = await fetch(targetUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ wxid, appid: appId }),
-      });
-      const data = await response.json();
-      if (data && data.code === 0 && data.data && data.data.code) return String(data.data.code);
-      throw new Error(data && data.msg ? data.msg : '代理获取 Code 失败');
-    }
-
-    const apiBase = String(wxConfig.apiBase || 'https://code.z74d.top/api').trim();
-    const response = await fetch(`${apiBase  }/Wxapp/JSLogin`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ Wxid: wxid, Appid: appId }),
-    });
-    const data = await response.json();
-    if (data && data.Success && data.Data && data.Data.code) return String(data.Data.code);
-    const msg = data && data.Data && data.Data.jsapiBaseresponse && data.Data.jsapiBaseresponse.errmsg
-      ? data.Data.jsapiBaseresponse.errmsg
-      : data && data.Message ? data.Message : '获取 Code 失败';
-    throw new Error(msg);
-  }
-
-  async function refreshAccountCode(accountId, reason = 'timer') {
-    const account = findAccount(accountId);
-    if (!account) return false;
-
-    const wxConfig = getWxConfig();
-    if (wxConfig.enabled === false) {
-      log('系统', '自动刷新 Code 跳过: 微信登录未启用', {
-        accountId: String(accountId),
-        accountName: account.name,
-      });
-      return false;
-    }
-
+  async function requestFarmCode(account, config, signal) {
+    if (!account.wxid) throw new LoginRecoveryError('账号缺少 wxid，无法刷新 Code', 'configuration');
+    const deadline = requestDeadline(signal, 25000);
     try {
-      const code = await requestFarmCode(account, wxConfig);
-      const nextAccount = { ...account, code };
-      addOrUpdateAccount(nextAccount);
-
-      const controls = typeof resolveWorkerControls === 'function' ? (resolveWorkerControls() || {}) : {};
-      if (typeof controls.restartWorker === 'function') controls.restartWorker(nextAccount);
-
-      addAccountLog('auto_code_refresh', `自动刷新 Code 成功，已重启账号: ${  account.name}`,
-        account.id, account.name, { reason });
-      log('系统', `自动刷新 Code 成功: ${  account.name}`, {
-        accountId: String(account.id),
-        accountName: account.name,
-      });
-      return true;
-    } catch (err) {
-      addAccountLog('auto_code_refresh_failed', `自动刷新 Code 失败: ${  err.message}`,
-        account.id, account.name, { reason });
-      log('错误', `自动刷新 Code 失败: ${  account.name  } - ${  err.message}`, {
-        accountId: String(account.id),
-        accountName: account.name,
-      });
-      return false;
-    }
+      const key = String(config.apiKey || '').trim();
+      const appid = String(config.appId || 'wx5306c5978fdb76e4');
+      const base = String(key ? config.proxyApiUrl || 'https://code.z74d.top/api' : config.apiBase || 'https://code.z74d.top/api').replace(/\/+$/, '');
+      const url = key ? `${base}?api_key=${encodeURIComponent(key)}&action=jslogin` : `${base}/Wxapp/JSLogin`;
+      const response = await request(url, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(key ? { wxid: account.wxid, appid } : { Wxid: account.wxid, Appid: appid }), signal: deadline.signal });
+      if (!response.ok) throw new LoginRecoveryError(`微信取码接口返回 HTTP ${response.status}`, response.status === 401 || response.status === 403 ? 'configuration' : response.status === 429 ? 'busy' : 'temporary');
+      const data = await response.json();
+      const code = key ? data?.code === 0 && data.data?.code : data?.Success && data.Data?.code;
+      if (typeof code !== 'string' || !code.trim()) throw new LoginRecoveryError('微信接口未返回有效 Code，请检查登录状态');
+      return code;
+    } catch (error) {
+      if (signal.aborted) throw new LoginRecoveryError('微信取码已取消', 'cancelled', 410);
+      if (deadline.signal.aborted) throw new LoginRecoveryError('微信取码超时，请稍后重试', 'timeout', 504);
+      throw error;
+    } finally { deadline.close(); }
   }
 
-  function scheduleAccount(accountId) {
-    const cfg = normalizeConfig(accountId);
-    const taskName = getTaskName(accountId);
-    scheduler.clear(taskName);
-    if (!cfg.enabled) return;
-
-    const account = findAccount(accountId);
-    if (!account || !String(account.wxid || '').trim()) {
-      log('系统', '自动刷新 Code 未启动: 账号缺少 wxid', {
-        accountId: String(accountId),
-        accountName: account && account.name || '',
-      });
-      return;
-    }
-
-    scheduler.setIntervalTask(taskName, cfg.intervalMinutes * 60000, () => {
-      refreshAccountCode(accountId, 'timer');
-    }, { preventOverlap: true });
-
-    log('系统', `自动刷新 Code 已启用: ${  account.name  }，间隔 ${  cfg.intervalMinutes  } 分钟`, {
-      accountId: String(accountId),
-      accountName: account.name,
-    });
+  function refreshAccountCode(id, reason = 'timer') {
+    id = String(id);
+    if (pending.has(id)) return pending.get(id);
+    const account = findAccount(id);
+    if (!account || account.platform === 'qq' || account.loginType === 'yyb') return Promise.resolve(false);
+    const config = store.getGlobalWxConfig?.() || {};
+    if (config.enabled === false || (reason === 'timer' && (account.autoStart === false || online(id)))) return Promise.resolve(false);
+    const identity = loginIdentity(account);
+    const operation = (async () => {
+      try {
+        const code = await loginRecovery.run(account, 'wxid', ({ signal }) => requestFarmCode(account, config, signal));
+        const current = findAccount(id);
+        if (pending.get(id) !== operation || !current || loginIdentity(current) !== identity) return false;
+        if (reason === 'timer' && online(id)) return false;
+        addOrUpdateAccount({ id, code });
+        if (typeof controls().restartWorker === 'function' && current.autoStart !== false) await controls().restartWorker({ ...current, code });
+        addAccountLog('auto_code_refresh', '微信 Code 已刷新', id, current.name, { reason });
+        return true;
+      } catch (error) {
+        if (error.kind !== 'cancelled') {
+          const message = sanitizeRefreshText(error.message || '微信取码失败');
+          addAccountLog('auto_code_refresh_failed', message, id, account.name, { reason });
+          log('错误', `微信 Code 刷新失败: ${message}`, { accountId: id });
+        }
+        return false;
+      } finally { if (pending.get(id) === operation) pending.delete(id); }
+    })();
+    pending.set(id, operation);
+    return operation;
   }
 
-  function rescheduleAll() {
-    scheduler.clearAll();
-    const data = getAccounts();
-    const accounts = Array.isArray(data && data.accounts) ? data.accounts : [];
-    for (const account of accounts) {
-      scheduleAccount(account.id);
-    }
+  function stopAccount(id) { scheduler.clear(taskName(id)); loginRecovery.cancel(id); pending.delete(String(id)); }
+  function scheduleAccount(id) {
+    scheduler.clear(taskName(id));
+    const config = store.getAutoCodeRefresh?.(id);
+    const account = findAccount(id);
+    if (!account || account.platform === 'qq' || account.loginType === 'yyb') return;
+    if (!config?.enabled) { loginRecovery.cancel(id); return; }
+    if (!account.wxid || account.autoStart === false) return;
+    const minutes = Math.max(1, Math.min(1440, Number(config.intervalMinutes) || 60));
+    scheduler.setIntervalTask(taskName(id), minutes * 60000, () => refreshAccountCode(id, 'timer'), { preventOverlap: true });
   }
-
-  function stopAccount(accountId) {
-    scheduler.clear(getTaskName(accountId));
-  }
-
-  return {
-    refreshAccountCode,
-    scheduleAccount,
-    rescheduleAll,
-    stopAccount,
-  };
+  function rescheduleAll() { scheduler.clearAll(); for (const account of getAccounts().accounts || []) scheduleAccount(account.id); }
+  function close() { scheduler.clearAll(); for (const id of pending.keys()) stopAccount(id); }
+  return { refreshAccountCode, scheduleAccount, rescheduleAll, stopAccount, close };
 }
 
 module.exports = { createAutoCodeRefreshService };

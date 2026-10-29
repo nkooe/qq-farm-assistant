@@ -328,3 +328,12 @@ test('refresh errors redact credentials before persistence and when returned to 
   }
   assert.match(finished.results[0].error, /api_key=\[已隐藏\]/);
 });
+
+test('native QQ accounts with a stale wxid never enter the WX batch refresh queue', async () => {
+  let calls = 0;
+  const routes = setup([{ id: 'qq-1', username: 'alice', platform: 'qq', wxid: 'old-wxid', loginType: 'manual' }], async () => { calls++; return { ok: true }; });
+  const started = await startRefresh(routes, { username: 'alice', role: 'user' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(calls, 0);
+  assert.equal(started.body.data.total, 0);
+});

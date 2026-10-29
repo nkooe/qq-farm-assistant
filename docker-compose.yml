@@ -6,6 +6,11 @@ services:
       args:
         # 可选：yyb-go 为私有仓库时传入具备 read 权限的 token；公开仓库留空即可
         - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+        # Optional mirrors; keep the matching checksum when changing a URL.
+        - QQ_LOGIN_DEB_URL=${QQ_LOGIN_DEB_URL:-}
+        - QQ_LOGIN_DEB_SHA256=${QQ_LOGIN_DEB_SHA256:-}
+        - QQ_LOGIN_NAPCAT_URL=${QQ_LOGIN_NAPCAT_URL:-}
+        - QQ_LOGIN_NAPCAT_SHA256=${QQ_LOGIN_NAPCAT_SHA256:-6801f93e533846cea05f4f531874a0e84371ab2331c5585b57cd7e3b869cf96b}
     image: qq-farm-bot:latest
     container_name: qq-farm-bot
     restart: unless-stopped
@@ -21,6 +26,9 @@ services:
       - TZ=${TZ:-Asia/Shanghai}
       - NODE_ENV=production
       - ADMIN_PORT=3007
+      - QQ_LOGIN_ENABLED=${QQ_LOGIN_ENABLED:-1}
+      - QQ_LOGIN_MAX_SESSIONS=${QQ_LOGIN_MAX_SESSIONS:-1}
+      - QQ_LOGIN_SOCKS_PROXY=${QQ_LOGIN_SOCKS_PROXY:-}
       # ===== 应用宝 Go 服务（同容器内，单镜像共用 3007 出口）=====
       # Node 代理会把 /api/yyb/* 转发到下面的地址；无需在 Web 端再填外部地址
       - YYB_API_URL=http://127.0.0.1:8450

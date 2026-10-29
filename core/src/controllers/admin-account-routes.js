@@ -21,7 +21,18 @@ function hasWxRefreshIdentity(account) {
   if (!account) return false;
   const hasYybIdentity = account.loginType === "yyb"
     && !!String(account.yybOpenid || "").trim();
+  if (account.platform === 'qq' && !hasYybIdentity) return false;
   return hasYybIdentity || !!String(account.wxid || "").trim();
+}
+
+function publicAccountData(data) {
+  if (!data || !Array.isArray(data.accounts)) return data;
+  return { ...data, accounts: data.accounts.map(account => {
+    const row = { ...account, qqAutoCodeAvailable: !!account.qqLoginProfile };
+    delete row.qqLoginProfile;
+    if (row.thirdparty?.apiToken) row.thirdparty = { ...row.thirdparty, apiToken: '***' };
+    return row;
+  }) };
 }
 
 function registerAdminAccountRoutes({
@@ -181,19 +192,8 @@ function registerAdminAccountRoutes({
       } else {
         data = { accounts: [], nextId: 1 };
       }
-      // 脱敏：第三方应用宝配置的 apiToken 不外泄到前端
-      if (data && Array.isArray(data.accounts)) {
-        data = {
-          ...data,
-          accounts: data.accounts.map((a) => {
-            if (a && a.thirdparty && a.thirdparty.apiToken) {
-              return { ...a, thirdparty: { ...a.thirdparty, apiToken: "***" } };
-            }
-            return a;
-          }),
-        };
-      }
-      res.json({ ok: true, data });
+      // Native profile references and third-party credentials stay server-side.
+      res.json({ ok: true, data: publicAccountData(data) });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
     }
@@ -329,7 +329,7 @@ function registerAdminAccountRoutes({
       if (provider && provider.addAccountLog) {
         provider.addAccountLog("update", `更新账号备注: ${  remark}`, accountId, remark);
       }
-      res.json({ ok: true, data });
+      res.json({ ok: true, data: publicAccountData(data) });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
     }
@@ -340,7 +340,13 @@ function registerAdminAccountRoutes({
       const body = req.body && typeof req.body === "object" ? req.body : {};
       const currentUser = req.currentUser;
       const isUpdate = !!body.id;
+      delete body.qqLoginProfile;
       const isAdmin = isAdminUser(currentUser);
+
+      // Old cached clients must refresh to use the trusted session importer.
+      if (body.qqScanSessionId) {
+        return res.status(409).json({ ok: false, error: 'QQ 扫码登录已升级，请刷新页面后重试' });
+      }
 
       if (isUpdate && currentUser && !isAdmin) {
         if (!canAccessAccount(req, resolveAccountReference(body.id))) {
@@ -438,7 +444,7 @@ function registerAdminAccountRoutes({
         provider.restartAccount(nextAccount.id);
       }
 
-      res.json({ ok: true, data });
+      res.json({ ok: true, data: publicAccountData(data) });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
     }
@@ -488,9 +494,9 @@ function registerAdminAccountRoutes({
 
       // 无论在线/离线都让新 code 生效：在线重启（断开旧连接用新 code 连），离线直接启动
       if (wasRunning) {
-        provider.restartAccount(accountId);
+        provider.restartAccount(accountId, { skipQqRefresh: true });
       } else {
-        provider.startAccount(accountId);
+        provider.startAccount(accountId, { skipQqRefresh: true });
       }
 
       if (provider.addAccountLog) {
@@ -532,6 +538,9 @@ function registerAdminAccountRoutes({
       }
       provider.stopAccount(accountId);
       const data = deleteAccount(accountId);
+      if (account.qqLoginProfile) {
+        try { require('../services/qq-login-service').getQqLoginService().discardProfile(account.qqLoginProfile); } catch { /* The account is already removed. */ }
+      }
       if (provider.addAccountLog) {
         provider.addAccountLog(
           "delete",
@@ -540,7 +549,7 @@ function registerAdminAccountRoutes({
           account ? account.name : "",
         );
       }
-      res.json({ ok: true, data });
+      res.json({ ok: true, data: publicAccountData(data) });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
     }

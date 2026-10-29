@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import api from '@/api'
+import QqScanLogin from '@/components/QqScanLogin.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseTextarea from '@/components/ui/BaseTextarea.vue'
@@ -10,7 +11,7 @@ const props = defineProps<{
   show: boolean
   editData?: any
   // 打开时默认选中的登录方式
-  defaultTab?: 'manual' | 'yyb'
+  defaultTab?: 'manual' | 'yyb' | 'qq'
   // 更新已有应用宝账号时，禁止扫码后误新增其他微信身份
   yybUpdateOnly?: boolean
 }>()
@@ -18,7 +19,7 @@ const props = defineProps<{
 const emit = defineEmits(['close', 'saved', 'refresh'])
 const CODE_QUERY_RE = /[?&]code=([^&]+)/i
 
-type AccountTab = 'manual' | 'yyb'
+type AccountTab = 'manual' | 'yyb' | 'qq'
 type YybLoginStage = 'idle' | 'creating' | 'pending' | 'scanned' | 'unknown' | 'authorized' | 'importing' | 'starting' | 'success' | 'expired' | 'error'
 
 interface YybAccountResult {
@@ -558,7 +559,7 @@ onBeforeUnmount(() => {
             type="button"
             role="tab"
             :aria-selected="activeTab === 'manual'"
-            class="min-h-11 flex-1 px-1 text-center text-sm font-medium transition-colors"
+            class="min-h-11 flex-1 whitespace-nowrap px-1 text-center text-xs font-medium transition-colors sm:text-sm"
             :class="activeTab === 'manual' ? 'border-b-2' : 'opacity-60'"
             :style="{
               color: activeTab === 'manual' ? 'var(--theme-primary)' : 'var(--theme-text)',
@@ -569,10 +570,22 @@ onBeforeUnmount(() => {
             手动填码
           </button>
           <button
+            v-if="!editData"
+            type="button"
+            role="tab"
+            :aria-selected="activeTab === 'qq'"
+            class="min-h-11 flex-1 whitespace-nowrap px-1 text-center text-xs font-medium transition-colors sm:text-sm"
+            :class="activeTab === 'qq' ? 'border-b-2' : 'opacity-60'"
+            :style="{ color: activeTab === 'qq' ? 'var(--theme-primary)' : 'var(--theme-text)', borderColor: 'var(--theme-primary)' }"
+            @click="activeTab = 'qq'"
+          >
+            QQ 扫码登录
+          </button>
+          <button
             type="button"
             role="tab"
             :aria-selected="activeTab === 'yyb'"
-            class="min-h-11 flex-1 px-1 text-center text-sm font-medium transition-colors"
+            class="min-h-11 flex-1 whitespace-nowrap px-1 text-center text-xs font-medium transition-colors sm:text-sm"
             :class="activeTab === 'yyb' ? 'border-b-2' : 'opacity-60'"
             :style="{
               color: activeTab === 'yyb' ? 'var(--theme-primary)' : 'var(--theme-text)',
@@ -583,6 +596,8 @@ onBeforeUnmount(() => {
             应用宝扫码
           </button>
         </div>
+
+        <QqScanLogin v-if="show && activeTab === 'qq' && !editData" @saved="(accountId: string) => emit('refresh', accountId)" @close="close" />
 
         <div v-if="activeTab === 'yyb'" class="space-y-4">
           <template v-if="yybSuccess">
@@ -624,7 +639,7 @@ onBeforeUnmount(() => {
           <template v-else>
             <div
               v-if="yybUpdateOnly"
-              class="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200"
+              class="border border-blue-200 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800 leading-5 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200"
             >
               此操作只更新当前应用宝账号。请使用原微信扫码；若扫码身份不匹配，不会新增账号。
             </div>
@@ -641,8 +656,8 @@ onBeforeUnmount(() => {
                 <select
                   v-model="yybProxyMode"
                   :disabled="yybProxyLoading || !yybProxyReady || yybProxyLocked"
+                  class="min-h-11 w-full border border-gray-200 rounded-lg bg-transparent px-3 text-sm outline-none disabled:cursor-not-allowed dark:border-gray-700 disabled:opacity-50"
                   @change="changeYybProxy"
-                  class="min-h-11 w-full border border-gray-200 rounded-lg bg-transparent px-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700"
                 >
                   <option value="direct">直连</option>
                   <option value="static">静态代理</option>
@@ -653,8 +668,8 @@ onBeforeUnmount(() => {
                 <select
                   v-model.number="yybProxyProfileId"
                   :disabled="yybProxyMode !== 'static' || yybProxyLoading || !yybProxyReady || yybProxyLocked"
+                  class="min-h-11 w-full border border-gray-200 rounded-lg bg-transparent px-3 text-sm outline-none disabled:cursor-not-allowed dark:border-gray-700 disabled:opacity-50"
                   @change="changeYybProxy"
-                  class="min-h-11 w-full border border-gray-200 rounded-lg bg-transparent px-3 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700"
                 >
                   <option :value="null">{{ yybProxyProfiles.length ? '请选择代理' : '请先到代理设置添加' }}</option>
                   <option v-for="profile in yybProxyProfiles" :key="profile.id" :value="profile.id">
@@ -666,7 +681,9 @@ onBeforeUnmount(() => {
 
             <div v-if="yybProxyError" role="alert" class="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-900/20 dark:text-red-300">
               <p>{{ yybProxyError }}。为避免出口改变，暂不生成二维码。</p>
-              <BaseButton variant="outline" class="mt-2" :loading="yybProxyLoading" @click="retryYybProxyOptions">重新读取代理设置</BaseButton>
+              <BaseButton variant="outline" class="mt-2" :loading="yybProxyLoading" @click="retryYybProxyOptions">
+                重新读取代理设置
+              </BaseButton>
             </div>
             <div class="rounded-lg px-3 py-2 text-xs leading-5" style="background-color: color-mix(in srgb, var(--theme-primary) 8%, transparent); color: var(--theme-text);">
               扫码、凭据刷新、Code 获取和协议连接均使用此账号出口；静态代理故障时不会自动回退直连。

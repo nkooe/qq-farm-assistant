@@ -58,6 +58,14 @@ func generateSessionID() string {
 }
 
 func requireAuth(w http.ResponseWriter, r *http.Request) bool {
+	if r.URL.Path == "/internal/proxy-url" {
+		w.Header().Set("Cache-Control", "no-store")
+		if ApiToken != "" && r.Header.Get("Authorization") == "Bearer "+ApiToken {
+			return true
+		}
+		writeError(w, http.StatusUnauthorized, "local service authentication required")
+		return false
+	}
 	// Paths that don't need auth
 	if r.URL.Path == "/login" || r.URL.Path == "/health" || r.URL.Path == "/token" {
 		return true

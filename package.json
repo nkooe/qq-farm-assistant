@@ -1,8 +1,9 @@
  {
   "name": "qq-farm-bot-ui",
-  "version": "1.1502.13",
-  "appVersion": "1.15.02.013",
+  "version": "1.1502.14",
+  "appVersion": "1.15.02.014",
   "packageManager": "pnpm@10.30.2",
+  "engines": { "node": "^22.12.0 || ^24.0.0" },
   "scripts": {
     "dev:core": "pnpm -C core dev",
     "dev:web": "pnpm -C web dev",
@@ -12,10 +13,13 @@
     "lint:web": "pnpm -C web lint",
     "build:web": "pnpm -C web build",
     "build": "pnpm build:web",
-    "package:win": "pnpm build:web && pnpm -C core build:win",
-    "package:linux": "pnpm build:web && pnpm -C core build:linux",
+    "start": "node scripts/farm.cjs serve",
+    "doctor": "node scripts/farm.cjs doctor",
+    "stop": "node scripts/farm.cjs stop",
+    "package:win": "pnpm build:web && node scripts/package-platform.cjs win32-x64",
+    "package:linux": "node scripts/package-platform.cjs linux-docker",
     "package:mac": "pnpm build:web && pnpm -C core build:mac",
-    "package:release": "pnpm build:web && pnpm -C core build:release",
+    "package:release": "pnpm build:web && node scripts/package-platform.cjs win32-x64 && node scripts/package-platform.cjs linux-docker",
     "install:all": "pnpm install -r"
   },
   "pnpm": {

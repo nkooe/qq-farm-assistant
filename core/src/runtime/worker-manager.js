@@ -1,5 +1,6 @@
 const path = require('node:path');
 const { createScheduler } = require('../services/scheduler');
+const { createLoginRecovery, LoginRecoveryError, classifyLoginError, loginIdentity, requestDeadline } = require('../services/login-recovery');
 
 function safeRuntimeError(message) {
     return String(message || '')
@@ -26,6 +27,8 @@ function createWorkerManager(deps) {
         addAccountLog,
         normalizeStatusForPanel,
         buildConfigSnapshotForAccount,
+        resolveAccountProxy = account => require('../services/account-proxy').resolveProxyURL(account),
+        refreshQqCode,
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
         addOrUpdateAccount,
@@ -36,8 +39,10 @@ function createWorkerManager(deps) {
 
     const scheduler = createScheduler('worker_manager');
     const startingWorkers = new Map();
+    const restartingWorkers = new Map();
     const startupResults = new Map();
     const reconnectPlans = new Map();
+    const loginRecovery = deps.loginRecovery || createLoginRecovery();
 
     function getWorkerRuntime(accountId) {
         const worker = workers[accountId];
@@ -55,7 +60,7 @@ function createWorkerManager(deps) {
             state = error || (last?.updatedAt && Date.now() - last.updatedAt > 90000) ? 'failed' : 'starting';
             if (state === 'failed' && !error) error = '连接游戏超时，请检查网络后重试启动';
         } else if (error) state = 'failed';
-        return { state, connected, running: !!worker, error: safeRuntimeError(error), updatedAt: last?.updatedAt || null,
+        return { state, connected, running: !!worker, error: safeRuntimeError(error), updatedAt: last?.updatedAt || null, login: loginRecovery.getState(accountId),
             reconnect: reconnect ? { ...reconnect, reason: safeRuntimeError(reconnect.reason) } : null };
     }
 
@@ -244,33 +249,39 @@ function createWorkerManager(deps) {
      * 调应用宝接口用 openid 换新的 code，覆盖 account.code。
      * 失败时保留账号并返回诊断，由启动状态提示重试。
      */
-    async function refreshYybCodeIfNeeded(account) {
+    function refreshYybCodeIfNeeded(account, options = {}) {
+        return loginRecovery.run(account, 'yyb', ({ signal }) => requestYybCode(account, signal), options);
+    }
+
+    async function requestYybCode(account, signal) {
         if (!account || account.loginType !== 'yyb' || !account.yybOpenid) {
             return { ok: false, error: '账号不是有效的应用宝账号' };
         }
+        const request = requestDeadline(signal, 45000);
         try {
+            if (request.signal.aborted) throw new LoginRecoveryError('取码已取消', 'cancelled', 410);
             // 第三方 YYB：直接调第三方接口换 code（与内置 yyb-go 同协议、可刷新）
-            if (account.provider === 'thirdparty' && account.thirdparty
-                && account.thirdparty.apiBase && account.thirdparty.apiToken) {
+            if (account.provider === 'thirdparty') {
                 const { getThirdpartyYybCode } = require('../utils/thirdpartyYyb');
                 const result = await getThirdpartyYybCode({
-                    apiBase: account.thirdparty.apiBase,
-                    apiToken: account.thirdparty.apiToken,
-                    openid: account.thirdparty.openid || account.yybOpenid,
+                    apiBase: account.thirdparty?.apiBase,
+                    apiToken: account.thirdparty?.apiToken,
+                    openid: account.thirdparty?.openid || account.yybOpenid,
                     forceRefresh: false,
+                    signal: request.signal,
                 });
                 if (result.ok && result.code) {
-                    account.code = result.code;
+                    if (signal?.aborted) throw new LoginRecoveryError('取码已取消', 'cancelled', 410);
                     log('系统', `账号 ${account.name} 第三方应用宝 code 已自动刷新`, {
                         accountId: String(account.id),
                     });
                     return { ok: true, code: result.code, source: 'yyb' };
                 }
                 const error = result.error || '第三方应用宝刷新失败';
-                log('系统', `账号 ${account.name} 第三方应用宝 code 刷新失败: ${error}`, {
+                log('系统', `账号 ${account.name} 第三方应用宝 code 刷新失败: ${safeRuntimeError(error)}`, {
                         accountId: String(account.id),
                 });
-                return { ok: false, error, source: 'yyb' };
+                return { ok: false, error: safeRuntimeError(error), source: 'yyb', kind: result.kind || (result.status === 401 || result.status === 403 ? 'configuration' : 'temporary') };
             }
             // 内置 YYB（走 yyb-go）
             const store = require('../models/store');
@@ -282,7 +293,7 @@ function createWorkerManager(deps) {
                 log('系统', `账号 ${account.name} 应用宝接口未配置，启动已暂停`, {
                     accountId: String(account.id),
                 });
-                return { ok: false, error, source: 'yyb' };
+                return { ok: false, error, source: 'yyb', kind: 'configuration' };
             }
             // 规范化 apiBase：去掉尾部斜杠和可能误带的路径后缀
             const rawBase = yybApiBase.replace(/\/+$/, '');
@@ -295,27 +306,32 @@ function createWorkerManager(deps) {
                     Authorization: `Bearer ${yybApiKey}`,
                 },
                 body: JSON.stringify({ ref: account.yybOpenid, app_id: appId }),
-                signal: AbortSignal.timeout(45000),
+                signal: request.signal,
             });
             const data = await resp.json();
-            if (data && data.code === 0 && data.data && data.data.result && data.data.result.code) {
-                account.code = data.data.result.code;
+            if (signal?.aborted) throw new LoginRecoveryError('取码已取消', 'cancelled', 410);
+            if (resp.ok !== false && data && data.code === 0 && typeof data.data?.result?.code === 'string' && data.data.result.code.trim()) {
                 log('系统', `账号 ${account.name} 应用宝 code 已自动刷新`, {
                     accountId: String(account.id),
                 });
-                return { ok: true, code: account.code, source: 'yyb' };
+                return { ok: true, code: String(data.data.result.code), source: 'yyb' };
             }
             const error = (data && data.msg) || '应用宝未返回 Code';
-            log('系统', `账号 ${account.name} 应用宝 code 刷新失败: ${error}`, {
+            log('系统', `账号 ${account.name} 应用宝 code 刷新失败: ${safeRuntimeError(error)}`, {
                 accountId: String(account.id),
                 yybCode: data && data.code,
             });
-            return { ok: false, error, source: 'yyb' };
+            const status = Number(resp.ok === false ? resp.status : data?.code);
+            return { ok: false, error: safeRuntimeError(error), source: 'yyb',
+                kind: status === 409 ? 'rescan' : status === 401 || status === 403 ? 'configuration' : status === 429 ? 'busy' : 'temporary' };
         } catch (e) {
-            log('系统', `账号 ${account.name} 应用宝 code 刷新异常: ${e.message}`, {
+            if (signal?.aborted) throw new LoginRecoveryError('取码已取消', 'cancelled', 410);
+            log('系统', `账号 ${account.name} 应用宝 code 刷新异常: ${safeRuntimeError(e.message)}`, {
                 accountId: String(account.id),
             });
-            return { ok: false, error: e.message || '应用宝 Code 刷新异常', source: 'yyb' };
+            return { ok: false, error: safeRuntimeError(e.message || '应用宝 Code 刷新异常'), source: 'yyb', kind: request.signal.aborted ? 'timeout' : classifyLoginError(e) };
+        } finally {
+            request.close();
         }
     }
 
@@ -327,13 +343,18 @@ function createWorkerManager(deps) {
         if (workers[account.id]) return false;
 
         const pending = startingWorkers.get(account.id);
-        if (pending && !pending.cancelled) return pending.promise;
+        if (pending && !pending.cancelled) {
+            if (pending.identity === loginIdentity(account)) return pending.promise;
+            pending.cancelled = true;
+            pending.controller.abort();
+        }
         // 手动启动接管已有重试计划，避免刷新期间定时器再次消耗重连次数。
         scheduler.clear(`reconnect_attempt_${account.id}`);
         reconnectPlans.delete(account.id);
         clearCredentialRecoveryIfIdle();
         if (!options.automatic) reconnectAttemptsMap.delete(account.id);
-        const start = { cancelled: false, promise: null };
+        if (!options.automatic) loginRecovery.cancel(account.id);
+        const start = { cancelled: false, promise: null, controller: new AbortController(), identity: loginIdentity(account) };
         startingWorkers.set(account.id, start);
         startupResults.set(account.id, { updatedAt: Date.now(), error: '' });
         // 所有并发调用共享完整启动结果（包括异常处理和重试调度）。
@@ -343,9 +364,11 @@ function createWorkerManager(deps) {
                 started = await performStartWorker(account, start, options);
                 return started;
             } catch (error) {
+                const current = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(account.id));
+                if (current && loginIdentity(current) !== start.identity) start.cancelled = true;
                 if (!start.cancelled) {
-                    startupResults.set(account.id, { updatedAt: Date.now(), error: error.message || '启动失败', category: error.startupCategory || '' });
-                    log('错误', `账号 ${account.name} 启动失败: ${error.message}`, { accountId: String(account.id) });
+                    startupResults.set(account.id, { updatedAt: Date.now(), error: safeRuntimeError(error.message || '启动失败'), category: error.startupCategory || '', kind: classifyLoginError(error) });
+                    log('错误', `账号 ${account.name} 启动失败: ${safeRuntimeError(error.message)}`, { accountId: String(account.id) });
                 }
                 return false;
             } finally {
@@ -353,7 +376,7 @@ function createWorkerManager(deps) {
                     startingWorkers.delete(account.id);
                     // Code 刷新发生在 Worker 创建之前，失败时也必须进入有上限的重连流程。
                     // 保留失败诊断；不能调用 stopWorker，否则会把本次失败当作用户取消。
-                    if (!started && !start.cancelled && !workers[account.id] && account.loginType === 'yyb') {
+                    if (!started && !start.cancelled && !workers[account.id] && (account.loginType === 'yyb' || isNativeQq(account))) {
                         void scheduleReconnect(account.id, 'startup_failed', { stopCurrent: false });
                     }
                 }
@@ -363,6 +386,15 @@ function createWorkerManager(deps) {
     }
 
     async function performStartWorker(account, start, options) {
+        const identity = loginIdentity(account);
+        const storedAtStart = require('../models/store').getAccounts().accounts.some(a => String(a.id) === String(account.id));
+        const isCurrent = () => {
+            const current = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(account.id));
+            const valid = !storedAtStart || (current && loginIdentity(current) === identity);
+            if (!valid) start.cancelled = true;
+            return valid;
+        };
+        let freshCode;
 
         log('系统', `正在启动账号: ${  account.name}`, {
             accountId: String(account.id),
@@ -371,10 +403,29 @@ function createWorkerManager(deps) {
 
         // 应用宝账号：启动前自动刷新 code
         if (!options.skipYybRefresh && account.loginType === 'yyb') {
-            const refreshed = await refreshYybCodeIfNeeded(account);
-            if (!refreshed.ok) throw Object.assign(new Error(refreshed.error || '应用宝 Code 刷新失败，请重试启动'), { startupCategory: 'credentials' });
+            const refreshed = await refreshYybCodeIfNeeded(account, { signal: start.controller.signal });
+            if (!refreshed.ok) throw Object.assign(new LoginRecoveryError(refreshed.error || '应用宝 Code 刷新失败，请重试启动', refreshed.kind), { startupCategory: 'credentials' });
+            if (start.cancelled || !isCurrent()) return false;
+            freshCode = refreshed.code;
         }
-        if (start.cancelled || workers[account.id]) return false;
+        if (isNativeQq(account) && account.qqLoginProfile && !options.skipQqRefresh) {
+            if (typeof refreshQqCode !== 'function') throw Object.assign(new LoginRecoveryError('QQ 登录态服务不可用，请检查服务配置', 'configuration'), { startupCategory: 'credentials' });
+            const code = await loginRecovery.run(account, 'qq', ({ signal, mark }) => refreshQqCode(account, { signal, mark }), { signal: start.controller.signal });
+            if (start.cancelled || workers[account.id]) return false;
+            if (!isCurrent()) return false;
+            freshCode = code;
+            log('系统', 'QQ 原生登录态已获取新 Code', { accountId: String(account.id) });
+        }
+        // Resolve before creating a worker; an unavailable selected proxy must
+        // never turn a configured account into a direct connection.
+        let proxyURL;
+        try { proxyURL = account.proxyMode === 'static' ? await resolveAccountProxy(account) : ''; }
+        catch { throw new LoginRecoveryError('账号代理不可用，请检查所选代理配置', 'proxy'); }
+        if (start.cancelled || workers[account.id] || !isCurrent()) return false;
+        if (freshCode !== undefined) {
+            account = { ...account, code: freshCode };
+            if (storedAtStart) addOrUpdateAccount({ id: account.id, code: freshCode });
+        }
 
         let proc = null;
         try {
@@ -421,7 +472,7 @@ function createWorkerManager(deps) {
         // 发送启动配置
         proc.send({
             type: 'start',
-            config: { ...buildConfigSnapshotForAccount(account.id), code: account.code, platform: account.platform }
+            config: { ...buildConfigSnapshotForAccount(account.id), code: account.code, platform: account.platform, proxyURL }
         });
 
         // 发送配置快照
@@ -492,14 +543,19 @@ function createWorkerManager(deps) {
      *   否则每次断线都会被清零，导致 maxAttempts 永远不触发、无限重连。
      */
     function stopWorker(accountId, opts = {}) {
-        const { resetReconnect = true } = opts;
+        const { resetReconnect = true, preserveRestart = false } = opts;
+        if (!preserveRestart) {
+            restartingWorkers.delete(accountId);
+            scheduler.clear(`restart_fallback_${accountId}`);
+        }
         if (resetReconnect) {
             startupResults.delete(accountId);
             reconnectPlans.delete(accountId);
             clearCredentialRecoveryIfIdle();
         }
         const pending = startingWorkers.get(accountId);
-        if (pending) pending.cancelled = true;
+        if (pending) { pending.cancelled = true; pending.controller?.abort(); }
+        loginRecovery.cancel(accountId);
 
         // 取消尚未触发的离线重连计划
         scheduler.clear(`reconnect_attempt_${accountId}`);
@@ -524,8 +580,8 @@ function createWorkerManager(deps) {
         scheduler.setTimeoutTask(`force_kill_${  accountId}`, 1000, () => {
             const current = workers[accountId];
             if (current && current.process === targetProc) {
-                current.process.kill();
                 delete workers[accountId];
+                current.process.kill();
             }
         });
     }
@@ -543,11 +599,17 @@ function createWorkerManager(deps) {
 
         const targetProc = wrk.process;
         let restarted = false;
+        const restart = { identity: loginIdentity(account) };
+        const storedAtStart = require('../models/store').getAccounts().accounts.some(a => String(a.id) === String(accountId));
+        restartingWorkers.set(accountId, restart);
 
         const doRestart = async () => {
-            if (restarted) return;
+            if (restarted || restartingWorkers.get(accountId) !== restart) return;
             restarted = true;
+            restartingWorkers.delete(accountId);
             scheduler.clear(`restart_fallback_${  accountId}`);
+            const stored = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(accountId));
+            if (storedAtStart && (!stored || loginIdentity(stored) !== restart.identity)) return;
 
             const current = workers[accountId];
             if (!current) return startWorker(account, options);
@@ -560,8 +622,8 @@ function createWorkerManager(deps) {
         const forceKill = () => {
             const current = workers[accountId];
             if (!current || current.process !== targetProc) return false;
-            try { current.process.kill(); } catch { }
             delete workers[accountId];
+            try { current.process.kill(); } catch { }
             return true;
         };
 
@@ -572,11 +634,11 @@ function createWorkerManager(deps) {
 
         // 先尝试正常停止，再等待退出事件
         targetProc.once('exit', doRestart);
-        stopWorker(accountId);
+        stopWorker(accountId, { preserveRestart: true });
 
         // 1500ms 超时回退
         scheduler.setTimeoutTask(`restart_fallback_${  accountId}`, 1500, () => {
-            if (restarted) return;
+            if (restarted || restartingWorkers.get(accountId) !== restart) return;
             forceKill();
             doRestart();
         });
@@ -595,7 +657,19 @@ function createWorkerManager(deps) {
      * 第三方账号（provider==='thirdparty'）优先使用账号级独立配置（thirdparty.*），
      * 未设置账号级配置时回退到全局 wxConfig（与内置 YYB 一致）。
      */
+    function isNativeQq(account) {
+        return account?.platform === 'qq' && account.loginType !== 'yyb' && !account.yybOpenid;
+    }
+
+    function reconnectLabel(account) {
+        return isNativeQq(account) ? 'QQ 原生登录态重连' : account?.loginType === 'yyb' ? '应用宝离线重连' : '账号重连';
+    }
+
     function resolveReconnectConfig(account) {
+        if (isNativeQq(account)) {
+            return { autoReconnect: !!account.qqLoginProfile && account.qqAutoReconnect !== false,
+                reconnectDelayMin: 0.5, reconnectMaxAttempts: 3, source: 'qq' };
+        }
         const store = require('../models/store');
         const wxConfig = store.getGlobalWxConfig ? store.getGlobalWxConfig() : null;
         const globalCfg = {
@@ -657,10 +731,20 @@ function createWorkerManager(deps) {
                 return;
             }
             const cfg = resolveReconnectConfig(account);
+            const kind = startupResults.get(accountId)?.kind || 'temporary';
+            if (['rescan', 'configuration', 'cancelled'].includes(kind)) {
+                scheduler.clear(`reconnect_attempt_${accountId}`);
+                reconnectPlans.set(accountId, { state: kind === 'rescan' ? 'needs_rescan' : 'blocked',
+                    attempt: reconnectAttemptsMap.get(accountId) || 0, maxAttempts: cfg.reconnectMaxAttempts, nextRetryAt: null, reason, kind });
+                log('系统', `账号 ${name} ${kind === 'rescan' ? '需要扫码更新，已暂停自动重试' : '需要检查登录配置，已暂停自动重试'}`, { accountId: String(accountId) });
+                return;
+            }
 
             if (!cfg.autoReconnect || !(cfg.reconnectDelayMin > 0)) {
                 reconnectPlans.delete(accountId);
-                log('系统', `账号 ${name} 未启用应用宝离线重连，已停止`);
+                if (isNativeQq(account) && !account.qqLoginProfile) reconnectPlans.set(accountId, { state: 'needs_rescan', attempt: 0, maxAttempts: cfg.reconnectMaxAttempts, nextRetryAt: null, reason, kind: 'rescan' });
+                const hint = isNativeQq(account) && !account.qqLoginProfile ? '缺少可恢复的 QQ 登录态，请使用 QQ 扫码更新一次' : `未启用${  reconnectLabel(account)}`;
+                log('系统', `账号 ${name} ${hint}，已停止`, { accountId: String(accountId) });
                 return;
             }
 
@@ -686,14 +770,15 @@ function createWorkerManager(deps) {
             }
 
             // 记录重连计数（先自增，作为下一次判断基准）
-            const nextAttempt = currentAttempt + 1;
+            const nextAttempt = kind === 'busy' ? currentAttempt : currentAttempt + 1;
             reconnectAttemptsMap.set(accountId, nextAttempt);
 
-            const delayMs = cfg.reconnectDelayMin * 60 * 1000;
-            reconnectPlans.set(accountId, { state: 'scheduled', attempt: nextAttempt, maxAttempts, nextRetryAt: Date.now() + delayMs, reason });
-            log('系统', `账号 ${name} 将在 ${cfg.reconnectDelayMin} 分钟后自动重连 (${nextAttempt}/${maxAttempts})${cfg.source === 'account' ? ' [账号级配置]' : ' [全局配置]'}`, {
+            const baseDelay = cfg.reconnectDelayMin * 60 * 1000;
+            const delayMs = kind === 'busy' ? Math.min(baseDelay, 15000) : Math.min(baseDelay * 2 ** Math.max(0, nextAttempt - 1), Math.max(baseDelay, 15 * 60000));
+            reconnectPlans.set(accountId, { state: 'scheduled', attempt: nextAttempt, maxAttempts, nextRetryAt: Date.now() + delayMs, reason, kind });
+            log('系统', `账号 ${name} 将在 ${delayMs / 1000} 秒后自动重连 (${nextAttempt}/${maxAttempts})${cfg.source === 'qq' ? ' [QQ 独立配置]' : cfg.source === 'account' ? ' [账号级配置]' : ' [全局配置]'}`, {
                 accountId: String(accountId),
-                delayMin: cfg.reconnectDelayMin,
+                delayMin: delayMs / 60000,
                 attempt: nextAttempt,
                 maxAttempts,
             });
@@ -729,7 +814,7 @@ function createWorkerManager(deps) {
                             }
                         });
                         addAccountLog('reconnect_success',
-                            `账号 ${name} 已发起应用宝离线重连，等待游戏连接确认 (${nextAttempt}/${cfg.reconnectMaxAttempts})`,
+                            `账号 ${name} 已发起${reconnectLabel(account2)}，等待游戏连接确认 (${nextAttempt}/${cfg.reconnectMaxAttempts})`,
                             accountId, name, { attempt: nextAttempt, maxAttempts: cfg.reconnectMaxAttempts });
                     }
                 } catch (e) {
@@ -907,8 +992,9 @@ function createWorkerManager(deps) {
                 reason: `ws_reconnect_failed:${  reason}`,
                 offlineMs: 0
             });
+            const account = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(accountId));
             addAccountLog('ws_reconnect_failed',
-                `账号 ${  wrk.name  } 连接中断，交由应用宝离线重连处理`,
+                `账号 ${wrk.name} 连接中断，交由${reconnectLabel(account)}处理`,
                 accountId, wrk.name, { reason });
             scheduleReconnect(accountId, `ws_reconnect_failed:${  reason}`);
         } else if (msg.type === 'known_friend_gids_sync') {

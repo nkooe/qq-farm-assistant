@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { Account } from '@/stores/account'
 import { useIntervalFn } from '@vueuse/core'
 import { storeToRefs } from 'pinia'
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
@@ -16,6 +17,7 @@ import AccountModal from '@/components/AccountModal.vue'
 import ModalOverlay from '@/components/ui/ModalOverlay.vue'
 import CareerModal from '@/components/CareerModal.vue'
 import UpdateCodeModal from '@/components/UpdateCodeModal.vue'
+import QqScanUpdateModal from '@/components/QqScanUpdateModal.vue'
 import { useAccountStore } from '@/stores/account'
 import { useBagStore } from '@/stores/bag'
 import { useStatusStore } from '@/stores/status'
@@ -55,6 +57,7 @@ const showCareerModal = ref(false)
 const accountModalDefaultTab = ref<'manual' | 'yyb' | undefined>(undefined)
 // —— 更新 Code 并重连 ——
 const showUpdateCodeModal = ref(false)
+const qqScanAccount = ref<Account | null>(null)
 const appStore = useAppStore()
 const startBtnStyle = computed(() => appStore.isDark
   ? { background: 'linear-gradient(135deg, #1e3a8a, #3730a3)', boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.4)' }
@@ -104,6 +107,11 @@ function openYybScanUpdate() {
   accountToEdit.value = account
   accountModalDefaultTab.value = 'yyb'
   showAccountModal.value = true
+}
+
+function openQqScanUpdate() {
+  if (currentAccount.value?.platform === 'qq' && !currentAccount.value.yybOpenid)
+    qqScanAccount.value = { ...currentAccount.value }
 }
 
 // 一键启动
@@ -1053,6 +1061,14 @@ useIntervalFn(updateCountdowns, 1000)
           <div class="text-sm text-gray-400">请先运行账号或检查网络连接。若被手机登录顶掉，可更新 Code 后重连。</div>
           <div class="flex flex-wrap justify-center gap-2">
             <BaseButton
+              v-if="currentAccount?.platform === 'qq' && !currentAccount?.yybOpenid"
+              variant="outline"
+              @click="openQqScanUpdate"
+            >
+              <span class="i-carbon-qr-code" />
+              QQ 扫码更新
+            </BaseButton>
+            <BaseButton
               v-if="currentAccount?.yybOpenid"
               variant="outline"
               @click="openYybScanUpdate"
@@ -1382,6 +1398,12 @@ useIntervalFn(updateCountdowns, 1000)
       @refresh="handleAccountRefreshed"
     />
     <CareerModal :show="showCareerModal" @close="showCareerModal = false" />
+    <QqScanUpdateModal
+      :show="!!qqScanAccount"
+      :account="qqScanAccount"
+      @close="qqScanAccount = null"
+      @saved="handleAccountRefreshed"
+    />
     <UpdateCodeModal
       :show="showUpdateCodeModal"
       :account="currentAccount"

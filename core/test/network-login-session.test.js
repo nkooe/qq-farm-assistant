@@ -161,6 +161,24 @@ test('missing player data fails closed before attempting a scene', async t => {
     assert.equal(ready, 0); assert.equal(h.sockets[0].frames.length, 1); assert.equal(h.api.isConnected(), false);
 });
 
+test('legacy identity lookup uses the selected proxy and closes before scene login or automation', async t => {
+    const h = harness(t); let identity;
+    h.api.connect('probe-code', value => { identity = value; }, { identityOnly: true, proxyURL: 'http://fixture-proxy:8080' });
+    assert.ok(h.sockets[0].options.agent);
+    await h.player();
+    assert.equal(identity.gid, '123'); assert.equal(identity.openId, 'fixture-user');
+    assert.equal(h.sockets[0].frames.length, 1);
+    assert.equal(h.api.isConnected(), false); assert.equal(h.timers.size, 0);
+});
+
+test('explicit reconnect with a fresh Code retains the configured proxy', async t => {
+    const h = harness(t);
+    h.api.connect('proxy-first-code', () => {}, { proxyURL: 'http://fixture-proxy:8080' });
+    assert.equal(h.api.reconnect('proxy-second-code'), true);
+    assert.ok(h.sockets[1].options.agent);
+    assert.equal(h.sockets[1].options.agent.proxy.hostname, 'fixture-proxy');
+});
+
 test('a stopped or replaced scene response cannot complete login or tear down the new connection', async t => {
     const h = harness(t); let ready = 0;
     h.api.connect('old-code', () => ready++); await h.player();

@@ -9,6 +9,7 @@ const expanded = ref(!!props.defaultExpanded)
 const loading = ref(false)
 const health = ref<any>(null)
 const error = ref('')
+const now = ref(Date.now())
 let requestVersion = 0
 let controller: AbortController | null = null
 
@@ -19,14 +20,33 @@ const runtimeLabel = computed(() => {
 })
 const reconnect = computed(() => props.account && 'runtimeReconnect' in props.account ? props.account.runtimeReconnect : health.value?.runtime?.reconnect)
 const runtimeError = computed(() => props.account?.runtimeState ? props.account.runtimeError || '' : health.value?.runtime?.error)
+const loginState = computed(() => props.account && 'runtimeLogin' in props.account ? props.account.runtimeLogin : health.value?.runtime?.login)
+const loginLabel = computed(() => {
+  const task = loginState.value
+  if (!task)
+    return ''
+  if (task.state === 'queued')
+    return '等待取码：正在排队，尚未开始登录'
+  if (task.state === 'requesting')
+    return '正在恢复登录并获取新 Code'
+  if (task.state === 'cancelled')
+    return '取码已取消'
+  if (task.state === 'success')
+    return `最近取码成功，用时 ${Math.ceil((task.durationMs || 0) / 1000)} 秒`
+  return ({ rescan: '登录态需要重新验证，请扫码更新', proxy: '代理异常，请检查所选代理', busy: '取码服务忙碌，等待重试', timeout: '取码超时，等待重试', configuration: '登录配置异常，请检查设置' } as Record<string, string>)[task.kind] || '取码暂时失败，请查看连接错误'
+})
 const reconnectLabel = computed(() => {
   const plan = reconnect.value
   if (!plan)
     return ''
   if (plan.state === 'scheduled') {
-    const seconds = Math.max(0, Math.ceil((plan.nextRetryAt - Date.now()) / 1000))
-    return `第 ${plan.attempt}/${plan.maxAttempts} 次重连，约 ${seconds} 秒后执行`
+    const seconds = Math.max(0, Math.ceil((plan.nextRetryAt - now.value) / 1000))
+    return plan.kind === 'busy' ? `取码服务忙碌，约 ${seconds} 秒后重试，不计入失败次数` : `第 ${plan.attempt}/${plan.maxAttempts} 次重连，约 ${seconds} 秒后执行`
   }
+  if (plan.state === 'needs_rescan')
+    return '需要扫码更新，自动重试已暂停'
+  if (plan.state === 'blocked')
+    return '请检查登录配置，自动重试已暂停'
   return plan.state === 'waiting_credentials' ? '游戏重试已结束，等待后台凭据恢复后自动启动' : `自动重连已达上限（${plan.attempt}/${plan.maxAttempts}）`
 })
 const credentialLabel = computed(() => {
@@ -81,6 +101,9 @@ watch([() => props.account?.id, expanded], () => {
   void loadHealth()
 }, { immediate: true })
 useIntervalFn(() => void loadHealth(), 30000)
+useIntervalFn(() => {
+  now.value = Date.now()
+}, 1000)
 onBeforeUnmount(() => {
   requestVersion++
   controller?.abort()
@@ -110,10 +133,20 @@ onBeforeUnmount(() => {
         {{ error }}
       </p>
       <template v-if="health">
+        <p v-if="loginLabel" role="status">
+          {{ loginLabel }}
+        </p>
+        <p v-if="loginState?.lastSuccessAt" class="text-xs opacity-70">
+          最近取码成功：{{ formatTime(loginState.lastSuccessAt / 1000) }}
+        </p>
         <p v-if="runtimeError" class="text-red-700 dark:text-red-300">
           {{ runtimeError }}
         </p>
-        <template v-if="health.supported">
+        <template v-if="account?.platform === 'qq' && account?.loginType !== 'yyb' && !account?.yybOpenid">
+          <p>QQ 自动取码：{{ account?.qqAutoCodeAvailable ? '已保存登录态，登录失效后按需重新获取 Code' : '尚未保存登录态，请使用 QQ 扫码更新一次' }}</p>
+          <p>QQ 登录态被退出或失效时需要重新扫码；使用原账号代理，不走微信应用宝接口。</p>
+        </template>
+        <template v-else-if="health.supported">
           <p>应用宝服务：{{ health.yyb?.available ? '正常' : '暂时不可用' }}</p>
           <p>凭据状态：{{ credentialLabel }}</p>
           <template v-if="health.credentials">

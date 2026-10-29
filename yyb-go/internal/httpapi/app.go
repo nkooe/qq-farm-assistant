@@ -152,6 +152,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/accounts/proxy", gin.WrapF(a.handleAccountProxy))
 	router.Any("/proxy-profiles", gin.WrapF(a.handleProxyProfiles))
 	router.Any("/proxy-profiles/test", gin.WrapF(a.handleProxyProfileTest))
+	router.Any("/internal/proxy-url", gin.WrapF(a.handleInternalProxyURL))
 	router.Any("/wxapp/getCode", gin.WrapF(a.handleGetCode))
 	router.Any("/wxapp/getPhoneNumber", gin.WrapF(a.handleGetPhoneNumber))
 	router.Any("/wxapp/operateWxData", gin.WrapF(a.handleOperateWXData))

@@ -84,3 +84,26 @@ test('legacy wxid refresh still uses the existing refresh service', async () => 
   });
   assert.equal(refreshed, '2:manual');
 });
+
+test('two manual YYB refreshes perform one request and one restart', async () => {
+  let finish; let count = 0;
+  const h = harness([{ id: '1', loginType: 'yyb', yybOpenid: 'wx-a', code: 'old' }], {
+    workers: { 1: {} }, refreshYybCodeIfNeeded: async () => { count++; return new Promise(resolve => { finish = resolve; }); },
+  });
+  const first = h.provider.refreshAccountCode('1'); const second = h.provider.refreshAccountCode('1');
+  await new Promise(resolve => setImmediate(resolve));
+  finish({ ok: true, code: 'new' }); await Promise.all([first, second]);
+  assert.equal(count, 1); assert.equal(h.calls.filter(call => call[0] === 'restart').length, 1);
+});
+
+test('manual YYB refresh cannot undo a user stop or restore a deleted account', async () => {
+  let finish; let signal;
+  const h = harness([{ id: '1', loginType: 'yyb', yybOpenid: 'wx-a', code: 'old' }], {
+    workers: { 1: {} }, refreshYybCodeIfNeeded: async (_account, options) => { signal = options.signal; return new Promise(resolve => { finish = resolve; }); },
+  });
+  const pending = h.provider.refreshAccountCode('1'); await new Promise(resolve => setImmediate(resolve));
+  h.provider.stopAccount('1'); assert(signal.aborted);
+  finish({ ok: true, code: 'late' });
+  assert.equal((await pending).ok, false); assert.equal(h.accounts[0].code, 'old');
+  assert.equal(h.calls.some(call => call[0] === 'restart'), false);
+});

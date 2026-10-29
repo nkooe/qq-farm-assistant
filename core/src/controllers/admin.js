@@ -57,6 +57,8 @@ const { registerAdminBagRoutes } = require("./admin-bag-routes");
 const { registerAdminCardRoutes } = require("./admin-card-routes");
 const { registerAdminCurrentUserRoutes } = require("./admin-current-user-routes");
 const { registerAdminYybRoutes } = require("./admin-yyb-routes");
+const { registerAdminQqLoginRoutes } = require("./admin-qq-login-routes");
+const { getQqLoginService } = require("../services/qq-login-service");
 const {
   registerAdminFarmOperationRoutes,
 } = require("./admin-farm-operation-routes");
@@ -547,6 +549,17 @@ function startAdminServer(dataProvider) {
     requireAdminToken,
     sendProviderError,
   });
+  const qqLogin = getQqLoginService();
+  qqLogin.start();
+  registerAdminQqLoginRoutes({ app, requireAdminToken, qqLogin, provider, addOrUpdateAccount, userStore });
+  const stopQqLogin = () => qqLogin.close();
+  process.once('exit', stopQqLogin);
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.once(signal, () => {
+      stopQqLogin();
+      setTimeout(() => process.exit(0), 1800).unref();
+    });
+  }
   registerAdminAccountRoutes({
     app,
     provider,

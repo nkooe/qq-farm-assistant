@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ===== Node 构建阶段（安装全量依赖 + 构建前端）=====
-FROM node:20-alpine AS builder
+FROM node:24-bookworm-slim AS builder
 
 WORKDIR /app
 
@@ -40,20 +40,39 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /out/yyb-go .
 RUN mkdir -p /out/resource && cp -r /src/resource/. /out/resource/
 
 # ===== 运行阶段 =====
-FROM node:20-alpine AS runner
+FROM node:24-bookworm-slim AS runner
 
 WORKDIR /app/core
 
 ENV NODE_ENV=production
 ENV TZ=Asia/Shanghai
+ENV QQ_LOGIN_ENABLED=1 \
+    QQ_LOGIN_COMPONENT_DIR=/app/core/qq-login \
+    QQ_LOGIN_RUNTIME_DIR=/opt/qq-login \
+    QQ_LOGIN_EXECUTABLE=/opt/QQ/qq \
+    QQ_LOGIN_ELECTRON=1 \
+    LD_LIBRARY_PATH=/opt/QQ/resources/app/sharp-lib:/opt/QQ/resources/app:/opt/QQ
 
-RUN apk add --no-cache tzdata tini && \
+ARG QQ_LOGIN_DEB_URL=
+ARG QQ_LOGIN_DEB_SHA256=
+ARG QQ_LOGIN_NAPCAT_URL=
+ARG QQ_LOGIN_NAPCAT_SHA256=6801f93e533846cea05f4f531874a0e84371ab2331c5585b57cd7e3b869cf96b
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata tini ca-certificates curl unzip xvfb xauth x11-utils \
+    libglib2.0-0 libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 \
+    libx11-xcb1 libxcb-dri3-0 libdrm2 libxkbcommon0 libgbm1 libasound2 \
+    libxcomposite1 libxdamage1 libxrandr2 libgtk-3-0 libsecret-1-0 \
+    fonts-wqy-zenhei && \
     cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && \
-    echo "Asia/Shanghai" > /etc/timezone && \
-    apk del tzdata
+    echo "Asia/Shanghai" > /etc/timezone
 
 # 直接拷贝 builder 全量（含 node_modules），避免 pnpm symlink / 多阶段覆盖坑
 COPY --from=builder /app /app
+
+# Install only program files into the image; login profiles are created per scan.
+RUN sh /app/core/qq-login/install-linux.sh && \
+    rm -rf /var/lib/apt/lists/*
 
 # 应用宝 Go 服务：二进制 + 运行时资源
 COPY --from=yyb-builder /out/yyb-go /usr/local/bin/yyb-go

@@ -35,7 +35,7 @@ function isValidHttpUrl(base) {
  * 返回 string 或 null。
  */
 function extractCode(data) {
-    if (!data || typeof data !== 'object') return null;
+    if (!data || typeof data !== 'object' || data.success === false || data.ok === false) return null;
     const tries = [
         data.data && data.data.code,
         data.data && data.data.result && data.data.result.code,
@@ -44,8 +44,7 @@ function extractCode(data) {
         data.token,
     ];
     for (const c of tries) {
-        if (typeof c === 'string' && c.length >= 4) return c;
-        if (typeof c === 'number' && c > 0) return String(c);
+        if (typeof c === 'string' && c.trim().length >= 4) return c.trim();
     }
     return null;
 }
@@ -55,31 +54,26 @@ function extractOpenid(data) {
     return (data.data && data.data.openid) || data.openid;
 }
 
-function safePreview(data, max = 200) {
-    try {
-        const s = JSON.stringify(data);
-        return s.length > max ? s.slice(0, max) + '…' : s;
-    } catch {
-        return String(data).slice(0, max);
-    }
-}
-
 /**
  * 用 openid 向第三方接口换取登录 code
  * @param {{apiBase?:string, apiToken?:string, openid?:string, forceRefresh?:boolean}} params
- * @returns {Promise<{ok:boolean, code?:string, openid?:string, error?:string, status?:number}>}
+ * @returns {Promise<{ok:boolean, code?:string, openid?:string, error?:string, status?:number}>} 取码结果与错误分类。
  */
-async function getThirdpartyYybCode({ apiBase, apiToken, openid, forceRefresh = false, debug = false } = {}) {
+async function getThirdpartyYybCode({ apiBase, apiToken, openid, forceRefresh = false, debug = false, signal } = {}) {
     const base = normalizeApiBase(apiBase);
-    if (!base) return { ok: false, error: '第三方接口地址未配置' };
-    if (!isValidHttpUrl(base)) return { ok: false, error: '第三方接口地址必须为 http/https' };
-    if (!apiToken) return { ok: false, error: '第三方 API Token 未配置' };
-    if (!openid) return { ok: false, error: '缺少 openid' };
+    if (!base) return { ok: false, kind: 'configuration', error: '第三方接口地址未配置' };
+    if (!isValidHttpUrl(base)) return { ok: false, kind: 'configuration', error: '第三方接口地址必须为 http/https' };
+    if (!apiToken) return { ok: false, kind: 'configuration', error: '第三方 API Token 未配置' };
+    if (!openid) return { ok: false, kind: 'configuration', error: '缺少 openid' };
 
     const url = `${base}/api/open/v1/farm/code`;
     const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
     try {
+        if (controller.signal.aborted) return { ok: false, kind: 'cancelled', error: '取码已取消' };
         const resp = await fetch(url, {
             method: 'POST',
             headers: {
@@ -90,11 +84,9 @@ async function getThirdpartyYybCode({ apiBase, apiToken, openid, forceRefresh = 
             signal: controller.signal,
         });
 
-        if (resp.status === 401) {
-            return { ok: false, status: 401, error: '第三方 API Token 无效（401 未授权）' };
-        }
         if (!resp.ok) {
-            return { ok: false, status: resp.status, error: `第三方接口返回 HTTP ${resp.status}` };
+            const kind = resp.status === 401 || resp.status === 403 ? 'configuration' : resp.status === 409 ? 'rescan' : resp.status === 429 ? 'busy' : 'temporary';
+            return { ok: false, status: resp.status, kind, error: `第三方接口返回 HTTP ${resp.status}` };
         }
 
         let data = null;
@@ -109,16 +101,15 @@ async function getThirdpartyYybCode({ apiBase, apiToken, openid, forceRefresh = 
         if (code) {
             return { ok: true, code: String(code), openid: extractOpenid(data) || openid };
         }
-        // 第三方返回了，但没有可识别的 code 字段：回显原始响应便于排查
-        const preview = safePreview(data);
-        return { ok: false, error: `第三方接口未返回 code${preview ? `（响应: ${preview}）` : ''}` };
+        return { ok: false, error: '第三方接口未返回有效 Code' };
     } catch (e) {
         if (e && e.name === 'AbortError') {
-            return { ok: false, error: `第三方接口请求超时（>${DEFAULT_TIMEOUT_MS}ms）` };
+            return { ok: false, kind: signal?.aborted ? 'cancelled' : 'timeout', error: signal?.aborted ? '取码已取消' : `第三方接口请求超时（>${DEFAULT_TIMEOUT_MS}ms）` };
         }
-        return { ok: false, error: `第三方接口请求失败: ${e && e.message ? e.message : e}` };
+        return { ok: false, kind: 'temporary', error: '第三方接口连接失败，请检查网络与接口配置' };
     } finally {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
     }
 }
 

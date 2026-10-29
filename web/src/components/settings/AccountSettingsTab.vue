@@ -317,7 +317,7 @@ function refreshStateLabel(job: RefreshWxCodesJob | null, loading: boolean, warn
           </div>
         </div>
 
-        <AccountHealthPanel v-if="acc.yybOpenid || hasPendingAccountRecovery(acc)" :account="acc" class="mt-3" />
+        <AccountHealthPanel v-if="acc.platform === 'qq' || acc.yybOpenid || hasPendingAccountRecovery(acc)" :account="acc" class="mt-3" />
 
         <div class="mt-3 flex items-center justify-between border-t border-gray-100 pt-3 sm:mt-4 dark:border-gray-700 sm:pt-4">
           <div class="hidden items-center gap-2 text-sm text-gray-500 sm:flex">

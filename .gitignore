@@ -40,6 +40,9 @@ core/data/*.before-*.json
 __pycache__/
 *.pyc
 
+# Native QQ programs are packaged separately; account sessions stay in core/data.
+core/qq-login/native/
+
 # Local credentials and run-time artifacts
 *.pem
 *.key
@@ -58,3 +61,8 @@ __pycache__/
 /docs/server-audit-*.md
 /docs/server-sync-*.md
 /assets/screenshots/
+
+/README.md
+/RELEASE_NOTES*
+/docs/
+/core/docs/

@@ -21,6 +21,7 @@ const { TsdkRuntime } = require('./tsdk-runtime');
 const { GatewayRequestQueue, isGatewayHealthyForBusiness, isGatewayIdleForBackground } = require('./request-queue');
 const { getAmbientRequestSignal } = require('./request-context');
 const { createClientProfile, usesPlayerSceneLogin } = require('./client-profile');
+const { createProxyAgent } = require('../services/account-proxy');
 
 // 延迟加载 warehouse 模块避免循环依赖
 let warehouseModule = null;
@@ -604,6 +605,12 @@ async function sendLogin(session, onLoginSuccess) {
     const reply = (modern ? types.PlayerLoginReply : types.LoginReply).decode(body);
     if (!reply.basic || toNum(reply.basic.gid) <= 0) throw new Error('登录回包缺少有效玩家信息');
     const openId = String(reply.basic.open_id || '').trim();
+    if (session.identityOnly) {
+        const identity = { gid: String(reply.basic.gid), openId };
+        stopNetwork('身份核验完成');
+        onLoginSuccess?.(identity);
+        return;
+    }
     if (tsdkRuntime && openId) {
         tsdkRuntime.bindUser(openId);
         initialGamePackInfo = tsdkRuntime.getEncryptedInitInfo();
@@ -688,6 +695,7 @@ function startHeartbeat(session) {
 // ============ WebSocket 连接 ============
 let savedLoginCallback = null;
 let savedCode = null;
+let savedConnectionOptions = {};
 let reconnectAttempts = 0;
 let networkStopped = false;
 let reconnectFailedReported = false;
@@ -742,7 +750,7 @@ function finishSession(session, reason, code = reason) {
     reportReconnectFailed(reason);
 }
 
-function connect(code, onLoginSuccess) {
+function connect(code, onLoginSuccess, options = {}) {
     if (!String(code || '').trim()) throw new Error('登录需要新的 Code');
     if (currentSession) currentSession.finalized = true;
     cleanup('建立新连接');
@@ -751,6 +759,7 @@ function connect(code, onLoginSuccess) {
     reconnectFailedReported = false;
     savedLoginCallback = onLoginSuccess;
     savedCode = String(code).trim();
+    savedConnectionOptions = { ...options };
     userState.gid = 0;
     heartbeatMissCount = 0;
     clientSeq = 1;
@@ -769,11 +778,12 @@ function connect(code, onLoginSuccess) {
     for (const [key, value] of Object.entries({ platform: profile.platform, os: profile.os,
         ver: profile.clientVersion, code: savedCode, openID: '' })) url.searchParams.set(key, value);
     const socket = new WebSocket(url.toString(), {
+        ...(options.proxyURL ? { agent: createProxyAgent(options.proxyURL) } : {}),
         handshakeTimeout: 20000,
         headers: { 'User-Agent': userAgent, 'Origin': 'https://gate-obt.nqf.qq.com' },
     });
     ws = socket;
-    const session = { socket, profile, phase: 'handshake', finalized: false, startedAt: performance.now() };
+    const session = { socket, profile, phase: 'handshake', finalized: false, startedAt: performance.now(), identityOnly: options.identityOnly === true };
     currentSession = session;
     socket.binaryType = 'arraybuffer';
     networkScheduler.setTimeoutTask('connection_login_timeout', 60000, () => finishSession(session, 'login_timeout'));
@@ -825,7 +835,7 @@ function cleanup(reason = '网络清理') {
 function reconnect(newCode) {
     if (networkStopped || !savedLoginCallback) return false;
     if (!String(newCode || '').trim() || String(newCode).trim() === savedCode) return false;
-    connect(newCode, savedLoginCallback);
+    connect(newCode, savedLoginCallback, savedConnectionOptions);
     return true;
 }
 
@@ -837,6 +847,7 @@ function stopNetwork(reason = '停止网络') {
         currentSession.closedAt = performance.now();
     }
     savedCode = null;
+    savedConnectionOptions = {};
     savedLoginCallback = null;
     reconnectAttempts = 0;
     stopSecurityRuntime(reason);

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +14,33 @@ import (
 
 	"yyb_go/internal/protocol"
 )
+
+// Only the local core service may resolve credentials, never a browser route.
+func (a *App) handleInternalProxyURL(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || !net.ParseIP(host).IsLoopback() || ApiToken == "" || r.Header.Get("Authorization") != "Bearer "+ApiToken {
+		writeError(w, http.StatusForbidden, "local service authentication required")
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var input struct {
+		ProfileID *int64 `json:"proxy_profile_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+	_, value, _, err := a.resolveRequestedProxy(r.Context(), "static", input.ProfileID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "proxy profile unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": value})
+}
 
 type proxyProfileInput struct {
 	ID       int64  `json:"id"`

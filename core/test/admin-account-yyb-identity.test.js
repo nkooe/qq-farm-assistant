@@ -7,7 +7,7 @@ function harness() {
   const calls = [];
   const routes = new Map();
   registerAdminAccountRoutes({
-    app: { get() {}, post(path, handler) { routes.set(path, handler); }, delete() {} },
+    app: { get(path, handler) { routes.set('GET ' + path, handler); }, post(path, handler) { routes.set(path, handler); }, delete() {} },
     provider: {
       getAccounts: () => ({ accounts }),
       isAccountRunning: () => true,
@@ -24,6 +24,11 @@ function harness() {
   });
   return {
     accounts, calls,
+    read() {
+      const res = { json(value) { this.body = value; return this; }, status() { return this; } };
+      routes.get('GET /api/accounts')({ currentUser: { role: 'admin', username: 'admin' } }, res);
+      return res;
+    },
     save(body) {
       const res = { statusCode: 200, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; return this; } };
       routes.get('/api/accounts')({ body, currentUser: { role: 'admin', username: 'admin' } }, res);
@@ -64,4 +69,33 @@ test('same YYB identity cannot be added twice', () => {
   assert.equal(res.statusCode, 409);
   assert.equal(h.accounts.length, 1);
   assert.deepEqual(h.calls, []);
+});
+
+test('cached QQ clients cannot bypass trusted session import by posting a Code', () => {
+  const h = harness();
+  const payload = { platform: 'qq', loginType: 'manual', name: 'QQ scan', code: 'fixture_QQ_CODE_12345678', qqScanSessionId: 'scan-a' };
+  assert.equal(h.save({ ...payload }).statusCode, 409);
+  assert.equal(h.accounts.length, 1);
+  assert.equal(h.calls.length, 0);
+});
+
+test('cached QQ imports leave other panel users untouched', () => {
+  const h = harness();
+  h.accounts.push({ id: '2', platform: 'qq', username: 'someone-else', code: 'fixture_OTHER_CODE_12345678' });
+  const payload = { platform: 'qq', code: 'fixture_OTHER_CODE_12345678', qqScanSessionId: 'scan-b' };
+  assert.equal(h.save({ ...payload }).statusCode, 409);
+  assert.equal(h.accounts.length, 2);
+  assert.equal(h.accounts[1].username, 'someone-else');
+});
+
+test('account save hides native profile references and rejects browser-provided replacements', () => {
+  const h = harness();
+  h.accounts[0].qqLoginProfile = 'private-server-profile';
+  const response = h.save({ id: '1', name: 'Renamed', qqLoginProfile: 'injected-profile' });
+  assert.equal(response.body.ok, true);
+  assert.equal(h.accounts[0].qqLoginProfile, 'private-server-profile');
+  assert.equal(response.body.data.accounts[0].qqAutoCodeAvailable, true);
+  assert.equal('qqLoginProfile' in response.body.data.accounts[0], false);
+  assert.equal(h.read().body.data.accounts[0].qqAutoCodeAvailable, true);
+  assert.equal('qqLoginProfile' in h.read().body.data.accounts[0], false);
 });

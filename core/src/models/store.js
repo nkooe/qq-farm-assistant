@@ -1569,6 +1569,8 @@ function addOrUpdateAccount(account) {
             code: account.code || '',
             platform: account.platform || 'qq',
             loginType: account.loginType || 'manual',
+            proxyMode: account.proxyMode === 'static' ? 'static' : 'direct',
+            proxyProfileId: account.proxyMode === 'static' ? Number(account.proxyProfileId) : null,
             provider: account.provider === 'thirdparty' ? 'thirdparty' : 'builtin',
             thirdparty: account.provider === 'thirdparty' && account.thirdparty
                 ? sanitizeThirdparty(account.thirdparty, null)
@@ -1581,6 +1583,8 @@ function addOrUpdateAccount(account) {
             avatar: nextAvatar || '',
             username: account.username || '',
             yybOpenid: account.yybOpenid ? String(account.yybOpenid) : '',
+            qqLoginProfile: account.qqLoginProfile || '',
+            qqAutoReconnect: account.qqAutoReconnect !== false,
             autoStart: account.autoStart !== false,
             createdAt: Date.now(),
             updatedAt: Date.now()

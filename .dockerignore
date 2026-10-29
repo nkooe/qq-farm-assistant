@@ -13,6 +13,7 @@ Thumbs.db
 core/data/logs/*
 !core/data/logs/.gitkeep
 core/data/*.json
+core/data/**
 !core/data/.gitkeep
 web/dist
 web/node_modules
@@ -21,6 +22,7 @@ web/node_modules
 /.tmp/
 web/test-results/
 web/playwright-report/
+core/qq-login/native/
 core/data/capture-*
 coverage
 .nyc_output

@@ -10,6 +10,7 @@ const { createDataProvider } = require('./data-provider');
 const { createReloginReminderService } = require('./relogin-reminder');
 const { createRuntimeState } = require('./runtime-state');
 const { createWorkerManager } = require('./worker-manager');
+const { createLoginRecovery } = require('../services/login-recovery');
 
 function getRestorableAccounts(accounts) {
     return (Array.isArray(accounts) ? accounts : [])
@@ -46,7 +47,8 @@ function createRuntimeEngine(options = {}) {
     const startAdminServer = typeof options.startAdminServer === 'function' ? options.startAdminServer : null;
 
     // Worker 启动/重启的引用占位
-    const engine = { startWorker: null, restartWorker: null };
+    const engine = { startWorker: null, restartWorker: null, getWorkerRuntime: null };
+    const loginRecovery = createLoginRecovery();
 
     // 创建运行时状态
     const runtimeState = createRuntimeState({
@@ -79,6 +81,7 @@ function createRuntimeEngine(options = {}) {
     const { getOfflineAutoDeleteMs, triggerOfflineReminder } = reloginReminder;
 
     const autoCodeRefresh = createAutoCodeRefreshService({
+        loginRecovery,
         store,
         getAccounts: store.getAccounts,
         addOrUpdateAccount: store.addOrUpdateAccount,
@@ -96,6 +99,7 @@ function createRuntimeEngine(options = {}) {
         refreshYybCodeIfNeeded,
         callWorkerApi
     } = createWorkerManager({
+        loginRecovery,
         fork,
         WorkerThread: Worker,
         runtimeMode,
@@ -113,6 +117,7 @@ function createRuntimeEngine(options = {}) {
         triggerOfflineReminder,
         addOrUpdateAccount: store.addOrUpdateAccount,
         deleteAccount: store.deleteAccount,
+        refreshQqCode: (account, options) => require('../services/qq-login-service').getQqLoginService().refreshAccountCode(account, options),
         onStatusSync: (accountId, status, accountName) => {
             runtimeEvents.emit('status', { accountId, status, accountName });
             if (onStatusSync) onStatusSync(accountId, status, accountName);
@@ -125,6 +130,7 @@ function createRuntimeEngine(options = {}) {
 
     engine.startWorker = startWorker;
     engine.restartWorker = restartWorker;
+    engine.getWorkerRuntime = getWorkerRuntime;
 
     // 创建数据提供器
     const dataProviderDeps = {
@@ -146,6 +152,7 @@ function createRuntimeEngine(options = {}) {
         restartWorker,
         refreshYybCodeIfNeeded,
         scheduleAutoCodeRefresh: autoCodeRefresh.scheduleAccount,
+        cancelCodeRefresh: autoCodeRefresh.stopAccount,
         refreshAccountCode: autoCodeRefresh.refreshAccountCode
     };
     const dataProvider = createDataProvider(dataProviderDeps);
@@ -235,7 +242,10 @@ function createRuntimeEngine(options = {}) {
 
     /** 停止所有账号 */
     function stopAllAccounts() {
-        for (const id of Object.keys(workers)) {
+        autoCodeRefresh.close();
+        loginRecovery.clear();
+        const ids = new Set([...Object.keys(workers), ...store.getAccounts().accounts.map(account => account.id)]);
+        for (const id of ids) {
             stopWorker(id);
         }
     }

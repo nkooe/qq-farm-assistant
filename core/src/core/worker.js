@@ -754,7 +754,7 @@ async function startBot(config) {
     };
 
     // 建立连接
-    connect(code, onReady);
+    connect(code, onReady, { proxyURL: config.proxyURL || '' });
 
     // 定期同步状态
     workerScheduler.setIntervalTask('status_sync', 5000, syncStatus, { preventOverlap: true });
