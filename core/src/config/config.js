@@ -4,13 +4,6 @@ const process = require('node:process');
 const DEFAULT_CLIENT_VERSION = '1.15.1.4_20261001';
 const DEFAULT_WX_CLIENT_VERSION = '1.15.1.4_20261001';
 
-// Only migrate defaults shipped by earlier releases; retain custom overrides.
-function migrateStoredClientVersion(value, platform = 'qq') {
-    const version = String(value || '').trim();
-    return !version || ['1.13.0.4_20260723', '1.12.5.29_20260721', '1.15.0.1_20261001', '1.15.0.2_20261001'].includes(version)
-        ? (['wx', 'wechat'].includes(platform) ? DEFAULT_WX_CLIENT_VERSION : DEFAULT_CLIENT_VERSION) : version;
-}
-
 // 默认系统配置
 const DEFAULT_SYSTEM_CONFIG = {
     serverUrl: 'wss://gate-obt.nqf.qq.com/prod/ws',
@@ -107,7 +100,6 @@ const PHASE_NAMES = ['未知', '种子', '发芽', '小叶', '大叶', '开花',
 module.exports = {
     DEFAULT_CLIENT_VERSION,
     DEFAULT_WX_CLIENT_VERSION,
-    migrateStoredClientVersion,
     CONFIG,
     PlantPhase,
     PHASE_NAMES,

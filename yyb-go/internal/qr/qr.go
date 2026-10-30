@@ -53,6 +53,8 @@ type Session struct {
 	LoginBuffers   *protocol.LoginBufferClient
 	Status         string
 	Error          string
+	OwnerUserID    int64
+	OwnerRole      string
 	mu             sync.Mutex
 }
 

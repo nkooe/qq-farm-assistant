@@ -9,16 +9,6 @@ export interface SystemConfig {
   os: string
 }
 
-export interface WxConfig {
-  enabled: boolean
-  apiBase: string
-  apiKey: string
-  proxyApiUrl: string
-  appId: string
-  autoAddAccount: boolean
-  userIsolation: boolean
-}
-
 export interface LoginLinks {
   logoUrl: string
   title: string
@@ -40,16 +30,6 @@ const defaultSystemConfigValues: SystemConfig = {
   os: 'iOS',
 }
 
-const defaultWxConfig: WxConfig = {
-  enabled: true,
-  apiBase: 'https://code.z74d.top/api',
-  apiKey: '',
-  proxyApiUrl: 'https://code.z74d.top/api',
-  appId: 'wx5306c5978fdb76e4',
-  autoAddAccount: true,
-  userIsolation: true,
-}
-
 const defaultLoginLinks: LoginLinks = {
   logoUrl: '',
   title: 'QQ农场智能助手',
@@ -62,19 +42,15 @@ const defaultLoginLinks: LoginLinks = {
 export function useAdminSystemConfig(options: UseAdminSystemConfigOptions) {
   const systemConfigSaving = ref(false)
   const systemConfigLoading = ref(false)
-  const wxConfigSaving = ref(false)
   const loginLinksSaving = ref(false)
   const loginLogoUploading = ref(false)
 
   const showResetSystemConfirm = ref(false)
   const showSaveSystemConfirm = ref(false)
   const showResetLoginLinksConfirm = ref(false)
-  const showResetWxConfigConfirm = ref(false)
-  const showSaveWxConfigConfirm = ref(false)
 
   const localSystemConfig = ref<SystemConfig>({ ...defaultSystemConfigValues })
   const defaultSystemConfig = ref<SystemConfig>({ ...defaultSystemConfigValues })
-  const localWxConfig = ref<WxConfig>({ ...defaultWxConfig })
   const localLoginLinks = ref<LoginLinks>({ ...defaultLoginLinks })
 
   async function loadLoginLinks() {
@@ -180,52 +156,6 @@ export function useAdminSystemConfig(options: UseAdminSystemConfigOptions) {
     { label: 'Android', value: 'Android' },
   ]
 
-  async function loadWxConfig() {
-    try {
-      const { data } = await api.get('/api/admin/wx-config')
-      if (data?.ok && data.data)
-        localWxConfig.value = { ...data.data }
-    }
-    catch (e: any) {
-      console.error('加载微信配置失败:', e)
-    }
-  }
-
-  async function handleSaveWxConfig() {
-    showSaveWxConfigConfirm.value = false
-    wxConfigSaving.value = true
-    try {
-      const { data } = await api.post('/api/admin/wx-config', {
-        ...localWxConfig.value,
-        confirmed: true,
-      })
-      if (data?.ok)
-        options.showAlert('微信配置已保存，全局应用生效', 'primary')
-      else
-        options.showAlert(data?.error || '保存失败', 'danger')
-    }
-    catch (e: any) {
-      options.showAlert(`保存失败: ${e.message || '未知错误'}`, 'danger')
-    }
-    finally {
-      wxConfigSaving.value = false
-    }
-  }
-
-  async function handleResetWxConfig() {
-    showResetWxConfigConfirm.value = false
-    localWxConfig.value = { ...defaultWxConfig }
-    options.showAlert('微信配置已重置为默认值', 'primary')
-  }
-
-  function openResetWxConfigConfirm() {
-    showResetWxConfigConfirm.value = true
-  }
-
-  function openSaveWxConfigConfirm() {
-    showSaveWxConfigConfirm.value = true
-  }
-
   async function loadSystemConfig() {
     systemConfigLoading.value = true
     try {
@@ -254,7 +184,7 @@ export function useAdminSystemConfig(options: UseAdminSystemConfigOptions) {
         confirmed: true,
       })
       if (data?.ok)
-        options.showAlert('系统配置已保存，连接参数在下次取得新 Code 登录时生效；当前在线账号继续运行', 'primary')
+        options.showAlert('已保存，下次登录生效', 'primary')
       else
         options.showAlert(data?.error || '保存失败', 'danger')
     }
@@ -300,30 +230,21 @@ export function useAdminSystemConfig(options: UseAdminSystemConfigOptions) {
   return {
     systemConfigSaving,
     systemConfigLoading,
-    wxConfigSaving,
     loginLinksSaving,
     loginLogoUploading,
     showResetSystemConfirm,
     showSaveSystemConfirm,
     showResetLoginLinksConfirm,
-    showResetWxConfigConfirm,
-    showSaveWxConfigConfirm,
     localSystemConfig,
     defaultSystemConfig,
-    localWxConfig,
     localLoginLinks,
     platformOptions,
     osOptions,
-    loadWxConfig,
     loadLoginLinks,
     handleSaveLoginLinks,
     handleResetLoginLinks,
     openResetLoginLinksConfirm,
     handleUploadLoginLogo,
-    handleSaveWxConfig,
-    handleResetWxConfig,
-    openResetWxConfigConfirm,
-    openSaveWxConfigConfirm,
     loadSystemConfig,
     handleSaveSystemConfig,
     handleResetSystemConfig,

@@ -8,7 +8,8 @@ function harness(t, overrides = {}) {
   const calls = []; const runtime = { connected: false }; let reply; let signal;
   const scheduler = createScheduler('auto_code_refresh'); scheduler.clearAll();
   const service = createAutoCodeRefreshService({
-    store: { getGlobalWxConfig: () => ({}), getAutoCodeRefresh: () => ({ enabled: true, intervalMinutes: 1 }) },
+    getAccountAccessRejection: () => null,
+    store: { getUserWxConfig: () => ({}), getAutoCodeRefresh: () => ({ enabled: true, intervalMinutes: 1 }) },
     getAccounts: () => ({ accounts }),
     addOrUpdateAccount: patch => { calls.push(['save', patch]); Object.assign(accounts[0], patch); },
     resolveWorkerControls: () => ({ getWorkerRuntime: () => runtime, restartWorker: async account => calls.push(['restart', account]) }),
@@ -50,6 +51,20 @@ test('online timer never mints a Code or disconnects a healthy game', async t =>
   const h = harness(t); h.runtime.connected = true;
   assert.equal(await h.service.refreshAccountCode('1', 'timer'), false);
   assert.deepEqual(h.calls, []);
+});
+
+test('revoked owners neither request a WX code nor commit an already requested code', async t => {
+  let revoked = false;
+  const h = harness(t, { getAccountAccessRejection: () => revoked ? { reason: 'banned' } : null });
+  const pending = h.service.refreshAccountCode('1', 'manual');
+  revoked = true; h.reply('late-after-ban');
+  assert.equal(await pending, false);
+  assert.equal(h.calls.some(call => call[0] === 'save' || call[0] === 'restart'), false);
+  const count = h.calls.length;
+  h.service.scheduleAccount('1');
+  assert.equal(h.scheduler.has('refresh_1'), false);
+  assert.equal(await h.service.refreshAccountCode('1', 'manual'), false);
+  assert.equal(h.calls.length, count);
 });
 
 for (const change of ['stop', 'deleted', 'identity', 'code', 'proxy', 'became_online']) {

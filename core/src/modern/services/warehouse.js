@@ -11,7 +11,6 @@ const { sendMsgAsync, networkEvents, getUserState } = require('../utils/network'
 const { types } = require('../utils/proto');
 const { toLong, toNum, toTimeSec, log, logWarn, sleep, getSystemDateKey } = require('../utils/utils');
 const { getSellConditionContext } = require('./activity-windows');
-const { updateStatusGold } = require('./status');
 const SELL_BATCH_SIZE = 15;
 const LOCKABLE_ITEM_TYPES = new Set([17, 6, 5]);
 const FERTILIZER_RELATED_IDS = new Set([
@@ -36,8 +35,8 @@ let fertilizerGiftLastOpenAt = 0;
 let charitySettlementGiftLastOpenAt = 0;
 let pendingBagRequest = null;
 // ============ API ============
-async function getBag() {
-    if (pendingBagRequest)
+async function getBag({ fresh = false } = {}) {
+    if (!fresh && pendingBagRequest)
         return pendingBagRequest;
     const request = (async () => {
         const body = types.BagRequest.encode(types.BagRequest.create({})).finish();
@@ -78,7 +77,7 @@ async function performSellItems(items) {
     if (requested.length === 0)
         throw new Error('没有可出售的物品');
     const baseContext = await getSellConditionContext();
-    const bagItems = getBagItems(await getBag());
+    const bagItems = getBagItems(await getBag({ fresh: true }));
     const seenUids = new Set();
     for (const item of requested) {
         const id = toNum(item && item.id);
@@ -108,52 +107,74 @@ async function performSellItems(items) {
     const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', 'Sell', body);
     return types.SellReply.decode(replyBody);
 }
-async function useItem(itemId, count = 1, landIds = [], uid = 0) {
-    if (landIds.length > 0)
-        throw new Error('新版物品使用协议不再接受 landIds');
-    const bagReply = await getBag();
-    const matchingItems = getBagItems(bagReply).filter((item) => (toNum(item && item.id) === itemId && (uid <= 0 || toNum(item && item.uid) === uid)));
-    const candidates = matchingItems.filter((item) => !isItemLocked(item));
-    const available = candidates.reduce((sum, item) => sum + Math.max(0, toNum(item && item.count)), 0);
-    if (available < count) {
-        const lockedCount = matchingItems
-            .filter((item) => isItemLocked(item))
-            .reduce((sum, item) => sum + Math.max(0, toNum(item && item.count)), 0);
-        const suffix = lockedCount > 0 ? `，另有 ${lockedCount} 个已锁定` : '';
-        throw new Error(`物品可用数量不足: 需要 ${count}，当前 ${available}${suffix}`);
-    }
-    const item = candidates.find((entry) => toNum(entry && entry.count) >= count);
-    if (!item && candidates.length > 1) {
+function validateUseEntry(itemId, count, uid) {
+    if (!Number.isSafeInteger(itemId) || itemId <= 0
+        || !Number.isSafeInteger(count) || count <= 0
+        || !Number.isSafeInteger(uid) || uid < 0)
+        throw new Error('使用物品参数无效');
+}
+function allocateUseItems(bagItems, requested) {
+    const remainingByStack = new Map();
+    const allocated = new Map();
+    for (const entry of requested) {
+        const { itemId, count, uid = 0 } = entry || {};
+        validateUseEntry(itemId, count, uid);
         let remaining = count;
-        const items = [];
-        for (const candidate of candidates) {
-            const useCount = Math.min(remaining, Math.max(0, toNum(candidate && candidate.count)));
-            if (useCount <= 0)
-                continue;
-            items.push({ itemId, count: useCount, uid: toNum(candidate.uid) });
+        let lockedCount = 0;
+        for (const item of bagItems) {
+            if (toNum(item.id) !== itemId || (uid > 0 && toNum(item.uid) !== uid)) continue;
+            if (isItemLocked(item)) { lockedCount += Math.max(0, toNum(item.count)); continue; }
+            const available = remainingByStack.has(item) ? remainingByStack.get(item) : Math.max(0, toNum(item.count));
+            const useCount = Math.min(remaining, available);
+            if (useCount <= 0) continue;
+            remainingByStack.set(item, available - useCount);
+            const current = allocated.get(item);
+            if (current) current.count += useCount;
+            else allocated.set(item, { itemId, count: useCount, uid: toNum(item.uid) });
             remaining -= useCount;
-            if (remaining === 0)
-                break;
+            if (remaining === 0) break;
         }
-        return batchUseItems(items);
+        if (remaining > 0) {
+            const suffix = lockedCount > 0 ? `，另有 ${lockedCount} 个已锁定` : '';
+            throw new Error(`物品可用数量不足: 需要 ${count}，当前 ${count - remaining}${suffix}`);
+        }
     }
-    if (!item)
-        throw new Error(`背包中未找到物品 ${itemId}`);
+    return Array.from(allocated.values());
+}
+function useItem(itemId, count = 1, landIds = [], uid = 0) {
+    return serializeInventory(() => performUseItem(itemId, count, landIds, uid));
+}
+async function performUseItem(itemId, count, landIds, uid) {
+    validateUseEntry(itemId, count, uid);
+    if (!Array.isArray(landIds) || landIds.length > 0)
+        throw new Error('新版物品使用协议不再接受 landIds');
+    const items = allocateUseItems(getBagItems(await getBag({ fresh: true })), [{ itemId, count, uid }]);
+    if (items.length > 1) return sendBatchUseItems(items);
+    const item = items[0];
     const body = types.UseRequest.encode(types.UseRequest.create({
         item: {
             id: toLong(itemId),
             count: toLong(count),
-            uid: toLong(toNum(item.uid)),
+            uid: toLong(item.uid),
         },
     })).finish();
     const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', 'Use', body);
     return types.UseReply.decode(replyBody);
 }
-async function batchUseItems(items) {
-    const payload = (items || []).map((it) => ({
+function batchUseItems(items) {
+    return serializeInventory(() => performBatchUseItems(items));
+}
+async function performBatchUseItems(items) {
+    if (!Array.isArray(items) || items.length === 0) throw new Error('没有可使用的物品');
+    for (const item of items) validateUseEntry(item?.itemId, item?.count, item?.uid ?? 0);
+    const allocated = allocateUseItems(getBagItems(await getBag({ fresh: true })), items);
+    return sendBatchUseItems(allocated);
+}
+async function sendBatchUseItems(items) {
+    const payload = items.map((it) => ({
         id: toLong(it.itemId),
-        count: toLong(it.count || 1),
-        uid: toLong(it.uid || 0),
+        count: toLong(it.count),
+        uid: toLong(it.uid),
     }));
     const body = types.BatchUseRequest.encode(types.BatchUseRequest.create({ items: payload })).finish();
     const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', 'BatchUse', body);
@@ -187,7 +208,7 @@ async function performSetItemsLocked(itemUids, locked) {
     const requestedUids = normalizeItemUids(itemUids);
     if (requestedUids.length === 0)
         throw new Error('缺少物品 UID');
-    const bagItems = getBagItems(await getBag());
+    const bagItems = getBagItems(await getBag({ fresh: true }));
     const byUid = new Map(bagItems
         .filter((item) => toNum(item?.uid) > 0)
         .map((item) => [toNum(item.uid), item]));
@@ -280,6 +301,8 @@ function collectFertilizerUsePayload(items) {
     for (const it of (items || [])) {
         const id = toNum(it && it.id);
         const count = Math.max(0, toNum(it && it.count));
+        if (isItemLocked(it))
+            continue;
         if (id <= 0 || count <= 0)
             continue;
         if (!isFertilizerRelatedItemId(id))
@@ -459,22 +482,6 @@ function getGoldFromItems(items) {
         }
     }
     return 0;
-}
-function deriveGoldGainFromSellReply(reply, lastKnownGold) {
-    const gainFromGetItems = getGoldFromItems((reply && reply.get_items) || []);
-    if (gainFromGetItems > 0) {
-        // get_items 通常就是本次获得值
-        return { gain: gainFromGetItems, nextKnownGold: lastKnownGold };
-    }
-    // 兼容旧 proto/旧结构
-    const currentOrDelta = getGoldFromItems((reply && (reply.items || reply.sell_items)) || []);
-    if (currentOrDelta <= 0)
-        return { gain: 0, nextKnownGold: lastKnownGold };
-    // 协议在不同场景下可能返回"当前总金币"或"本次变化值"
-    if (lastKnownGold > 0 && currentOrDelta >= lastKnownGold) {
-        return { gain: currentOrDelta - lastKnownGold, nextKnownGold: currentOrDelta };
-    }
-    return { gain: currentOrDelta, nextKnownGold: lastKnownGold };
 }
 function getCurrentTotals() {
     const state = getUserState() || {};
@@ -682,84 +689,24 @@ async function sellAllFruits() {
             return;
         }
         const totalsBefore = getCurrentTotals();
-        const goldBefore = totalsBefore.gold;
         let serverGoldTotal = 0;
-        let knownGold = goldBefore;
         for (let i = 0; i < toSell.length; i += SELL_BATCH_SIZE) {
             const batch = toSell.slice(i, i + SELL_BATCH_SIZE);
             try {
                 const reply = await sellItems(batch);
-                const inferred = deriveGoldGainFromSellReply(reply, knownGold);
-                const gained = Math.max(0, toNum(inferred.gain));
-                knownGold = inferred.nextKnownGold;
+                const gained = getGoldFromItems(reply.get_items || []);
                 if (gained > 0)
                     serverGoldTotal += gained;
             }
-            catch (batchErr) {
-                // A timeout may follow a successful sale; never replay an ambiguous mutation.
-                if (!(batchErr instanceof require('../utils/network').GatewayError)) throw batchErr;
-                // 某个条目可能参数非法，降级为逐个出售，跳过错误条目
-                logWarn('仓库', `批量出售失败，改为逐个重试: ${batchErr.message}`);
-                for (const it of batch) {
-                    try {
-                        const singleReply = await sellItems([it]);
-                        const inferred = deriveGoldGainFromSellReply(singleReply, knownGold);
-                        const gained = Math.max(0, toNum(inferred.gain));
-                        knownGold = inferred.nextKnownGold;
-                        if (gained > 0)
-                            serverGoldTotal += gained;
-                    }
-                    catch (singleErr) {
-                        const sid = toNum(it.id);
-                        const sc = toNum(it.count);
-                        logWarn('仓库', `跳过不可售物品: ID=${sid} x${sc} (${singleErr.message})`, {
-                            module: 'warehouse',
-                            event: '跳过不可售物品',
-                            result: 'skip',
-                            itemId: sid,
-                            count: sc,
-                        });
-                    }
-                }
-            }
+            catch (error) { throw error; }
             if (i + SELL_BATCH_SIZE < toSell.length)
                 await sleep(300);
         }
-        // 等待金币通知更新（最多 2s）
-        let goldAfter = goldBefore;
-        const startWait = Date.now();
-        while (Date.now() - startWait < 2000) {
-            const currentGold = (getUserState() && getUserState().gold) ? getUserState().gold : goldAfter;
-            if (currentGold !== goldBefore) {
-                goldAfter = currentGold;
-                break;
-            }
-            await sleep(200);
-        }
+        // 余额只由服务端通知维护；出售统计只使用该次 RPC 确认的收益。
         const totalsAfter = getCurrentTotals();
-        const totalGoldDelta = goldAfter > goldBefore ? (goldAfter - goldBefore) : 0;
         const totalsDeltaGold = totalsAfter.gold - totalsBefore.gold;
         const totalsDeltaExp = totalsAfter.exp - totalsBefore.exp;
-        // 通知缺失时，尝试从背包读取金币做最终兜底
-        let bagDelta = 0;
-        if (totalGoldDelta <= 0 && serverGoldTotal <= 0) {
-            try {
-                const bagAfter = await getBag();
-                const bagGold = getGoldFromItems(getBagItems(bagAfter));
-                if (bagGold > goldBefore)
-                    bagDelta = bagGold - goldBefore;
-            }
-            catch { }
-        }
-        const totalGoldEarned = Math.max(serverGoldTotal, totalGoldDelta, bagDelta);
-        if (totalGoldDelta <= 0 && totalGoldEarned > 0) {
-            // 某些情况下 ItemNotify 丢失，使用出售回包做金币兜底同步
-            const state = getUserState();
-            if (state) {
-                state.gold = Number(state.gold || 0) + totalGoldEarned;
-                updateStatusGold(state.gold);
-            }
-        }
+        const totalGoldEarned = serverGoldTotal;
         log('仓库', `出售 ${names.join(', ')}${totalGoldEarned > 0 ? `，获得 ${totalGoldEarned} 金币` : ''}`, {
             module: 'warehouse',
             event: totalGoldEarned > 0 ? 'sell_success' : 'sell_done',
@@ -778,6 +725,7 @@ async function sellAllFruits() {
     }
     catch (e) {
         logWarn('仓库', `出售失败: ${e.message}`);
+        throw e;
     }
 }
 async function getBagSeeds() {

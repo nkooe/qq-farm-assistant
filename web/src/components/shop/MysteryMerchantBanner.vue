@@ -6,7 +6,9 @@ import { useRouter } from 'vue-router'
 import { useAccountStore } from '@/stores/account'
 import { useShopStore } from '@/stores/shop'
 import { useToastStore } from '@/stores/toast'
+import { useUserStore } from '@/stores/user'
 
+const userStore = useUserStore()
 const accountStore = useAccountStore()
 const shopStore = useShopStore()
 const toast = useToastStore()
@@ -17,7 +19,7 @@ const { mysteryOffer, mysteryOfferAccountId, mysteryLoading } = storeToRefs(shop
 
 const MYSTERY_OFFER_REFRESH_INTERVAL = 3 * 60 * 60 * 1000
 const now = ref(Date.now())
-const notifiedOfferKeys = useStorage<Record<string, string>>('mystery_merchant_notified_offer_keys', {})
+const notifiedOfferKeys = useStorage<Record<string, string>>(computed(() => `mystery_merchant_notified_offer_keys:${userStore.userId}`), {})
 
 function getTimestampMs(timestamp?: number) {
   const value = Number(timestamp || 0)

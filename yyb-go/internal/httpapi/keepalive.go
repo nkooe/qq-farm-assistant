@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -20,8 +21,7 @@ func envDuration(name string, fallback time.Duration) time.Duration {
 	}
 	value, err := time.ParseDuration(raw)
 	if err != nil || value < 0 {
-		log.Printf("invalid %s=%q, using %s", name, raw, fallback)
-		return fallback
+		panic(fmt.Sprintf("invalid %s: expected a non-negative duration", name))
 	}
 	return value
 }
@@ -48,6 +48,8 @@ func (a *App) startKeepalive() {
 }
 
 func (a *App) runKeepalive(ctx context.Context) {
+	a.userDataMu.RLock()
+	defer a.userDataMu.RUnlock()
 	accounts, err := a.db.ListAccounts(ctx)
 	if err != nil {
 		log.Printf("YYB keepalive list accounts: %v", err)
@@ -67,7 +69,7 @@ func (a *App) runKeepalive(ctx context.Context) {
 			continue
 		}
 		creds := protocol.CredentialsFromMap(acc.Credentials)
-		setting, settingErr := a.db.GetAccountProxySetting(ctx, acc.ID)
+		setting, settingErr := a.db.GetAccountProxySetting(ctx, acc.ID, acc.OwnerRole, acc.OwnerUserID)
 		if settingErr != nil {
 			continue
 		}

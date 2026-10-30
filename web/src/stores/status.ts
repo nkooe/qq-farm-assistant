@@ -2,9 +2,10 @@ import type { Socket } from 'socket.io-client'
 import { useStorage } from '@vueuse/core'
 import { defineStore } from 'pinia'
 import { io } from 'socket.io-client'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import api from '@/api'
 import { useAccountStore } from '@/stores/account'
+import { useUserStore } from '@/stores/user'
 
 // Define interfaces for better type checking
 interface DailyGift {
@@ -105,12 +106,14 @@ export const useStatusStore = defineStore('status', () => {
   }
 
   function clearAccountScopedData() {
+    dropPendingLogs()
     status.value = null
     statusAccountId.value = ''
     logs.value = []
     accountLogs.value = []
     dailyGifts.value = null
     error.value = ''
+    loading.value = false
   }
 
   function normalizeLogEntry(input: any) {
@@ -390,6 +393,14 @@ export const useStatusStore = defineStore('status', () => {
   function setRealtimeLogsEnabled(enabled: boolean) {
     realtimeLogsEnabled.value = !!enabled
   }
+
+  const user = useUserStore()
+  const account = useAccountStore()
+  watch([() => user.token, () => user.userId, () => account.currentAccountId], () => {
+    disconnectRealtime()
+    currentRealtimeAccountId.value = ''
+    clearAccountScopedData()
+  }, { flush: 'sync' })
 
   return {
     status,

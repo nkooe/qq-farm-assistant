@@ -71,10 +71,10 @@ func httpPost(path, host string, body []byte) []byte {
 	return append([]byte(head), body...)
 }
 
-func send0RTT(ctx context.Context, targets []Target, entry pskEntry, recvKey, envelope []byte, timeout time.Duration, tcpProxy string, fallbackDirect bool) ([]byte, []byte, error) {
+func send0RTT(ctx context.Context, targets []Target, entry pskEntry, recvKey, envelope []byte, timeout time.Duration, tcpProxy string) ([]byte, []byte, error) {
 	var last error
 	for _, t := range targets {
-		code, resp, err := send0RTTRaw(ctx, t, entry, recvKey, envelope, timeout, tcpProxy, fallbackDirect)
+		code, resp, err := send0RTTRaw(ctx, t, entry, recvKey, envelope, timeout, tcpProxy)
 		if err == nil && (len(code) > 0 || len(resp) > 0) {
 			return code, resp, nil
 		}
@@ -90,14 +90,14 @@ func send0RTT(ctx context.Context, targets []Target, entry pskEntry, recvKey, en
 	return nil, nil, fmt.Errorf("all ShortLink targets failed; last error: %w", last)
 }
 
-func send0RTTRaw(ctx context.Context, target Target, entry pskEntry, recvKey, envelope []byte, timeout time.Duration, tcpProxy string, fallbackDirect bool) ([]byte, []byte, error) {
+func send0RTTRaw(ctx context.Context, target Target, entry pskEntry, recvKey, envelope []byte, timeout time.Duration, tcpProxy string) ([]byte, []byte, error) {
 	body, psk, pskCH, type8, err := build0RTTRequest(entry, envelope)
 	if err != nil {
 		return nil, nil, err
 	}
 	path := fmt.Sprintf("/mmtls/%08x", uint32(time.Now().Unix()))
 	req := httpPost(path, "shortcloud.weixin.com", body)
-	conn, err := dialTCP(ctx, target.IP, target.Port, timeout, tcpProxy, fallbackDirect)
+	conn, err := dialTCP(ctx, target.IP, target.Port, timeout, tcpProxy)
 	if err != nil {
 		return nil, nil, err
 	}

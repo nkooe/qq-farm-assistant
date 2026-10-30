@@ -59,6 +59,7 @@ const resetPasswordTouched = ref(false)
 
 const showRenewalModal = ref(false)
 const renewalUsername = ref('')
+const renewalPassword = ref('')
 const renewalCardCode = ref('')
 const renewalError = ref('')
 const renewalSuccess = ref('')
@@ -227,6 +228,7 @@ function toggleMode() {
 
 function openRenewal() {
   renewalUsername.value = username.value.trim()
+  renewalPassword.value = ''
   renewalCardCode.value = ''
   renewalError.value = ''
   renewalSuccess.value = ''
@@ -237,6 +239,7 @@ function closeRenewalModal() {
   if (renewalLoading.value)
     return
   showRenewalModal.value = false
+  renewalPassword.value = ''
   renewalError.value = ''
   renewalSuccess.value = ''
 }
@@ -244,6 +247,10 @@ function closeRenewalModal() {
 async function submitRenewal() {
   if (!renewalUsername.value.trim()) {
     renewalError.value = '请输入用户名'
+    return
+  }
+  if (!renewalPassword.value) {
+    renewalError.value = '请输入账号密码'
     return
   }
   if (!renewalCardCode.value.trim()) {
@@ -257,6 +264,7 @@ async function submitRenewal() {
   try {
     const { data } = await api.post('/api/public/renew', {
       username: renewalUsername.value.trim(),
+      password: renewalPassword.value,
       cardCode: renewalCardCode.value.trim(),
     })
     if (!data.ok) {
@@ -270,6 +278,7 @@ async function submitRenewal() {
       ? '续费成功，账号额度已更新'
       : `续费成功，有效期已更新${card?.expiresAt ? `至 ${new Date(card.expiresAt).toLocaleString('zh-CN')}` : ''}`
     username.value = renewalUsername.value.trim()
+    renewalPassword.value = ''
   }
   catch (e: any) {
     renewalError.value = e?.response?.data?.error || e?.message || '续费失败'
@@ -724,6 +733,7 @@ async function fetchGameVersion() {
       v-model:reset-confirm-password="resetConfirmPassword"
       v-model:reset-password-touched="resetPasswordTouched"
       v-model:renewal-username="renewalUsername"
+      v-model:renewal-password="renewalPassword"
       v-model:renewal-card-code="renewalCardCode"
       :claim-modal-content="claimModalContent"
       :reset-error="resetError"

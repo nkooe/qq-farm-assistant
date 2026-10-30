@@ -3,6 +3,7 @@ package httpapi
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 )
 
 type resources struct {
@@ -31,8 +32,8 @@ func ensureResources(root string) (resources, error) {
 	return res, nil
 }
 
-func (r resources) avatarPath(openid string) string {
-	return filepath.Join(r.Avatars, safeName(openid)+".jpg")
+func (r resources) avatarPath(userID int64, openid string) string {
+	return filepath.Join(r.Avatars, strconv.FormatInt(userID, 10)+"-"+safeName(openid)+".jpg")
 }
 
 func (r resources) qrPath(sessionID string) string {

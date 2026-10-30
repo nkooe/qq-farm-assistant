@@ -1,11 +1,17 @@
 const { validateFarmSelection } = require('./farm-selection');
+const { createFarmOperationGuard, farmOperationGuard } = require('./farm-operation-guard');
 
 // One instance per account worker. No retries: a missing reply may still have consumed resources.
 function createSelectedFarmOperations({ getAllLands, buildLandMap, getDisplayLandContext,
-    getCurrentPhase, getServerTimeSec, toNum, toTimeSec, PlantPhase, mutate, recordOperation, log }) {
+    getCurrentPhase, getServerTimeSec, toNum, toTimeSec, PlantPhase, mutate, recordOperation, log,
+    runExclusive = createFarmOperationGuard().run }) {
     let pending = false;
 
     async function operate(action, input) {
+        return runExclusive(() => perform(action, input));
+    }
+
+    async function perform(action, input) {
         const selected = validateFarmSelection(action, input);
         if (pending) throw new Error('选地操作正在进行，请稍后再试');
         pending = true;
@@ -97,6 +103,7 @@ function selectedFarmOperations() {
         const { PlantPhase } = require('../config/config');
         const { recordOperation } = require('./stats');
         instance = createSelectedFarmOperations({ ...api, ...analyzer, ...utils, PlantPhase, recordOperation,
+            runExclusive: farmOperationGuard.run,
             mutate: (action, ids) => action.startsWith('fertilize')
                 ? api.fertilizeBatch(ids, action === 'fertilizeNormal' ? 1011 : 1012)
                 : action === 'clear' ? api.farming(ids)

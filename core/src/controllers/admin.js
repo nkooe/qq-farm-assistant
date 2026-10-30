@@ -24,21 +24,8 @@ const {
 } = require("../config/config");
 const { getDataFile, getResourcePath } = require("../config/runtime-paths");
 const store = require("../models/store");
-const { addOrUpdateAccount, deleteAccount } = store;
+const { addOrUpdateAccount } = store;
 const { findAccountByRef } = require("../services/account-resolver");
-
-// 保险：单个异步请求处理器抛错（如路由里漏传依赖导致 TypeError）会变成
-// unhandledRejection 并默认终止整个进程，连锁拖垮所有账号会话与在线账号。
-// 这里只记录、不让进程退出，避免出现「一个坏请求 → 全服重启 → 全部掉线」的雪崩。
-process.on("unhandledRejection", (reason, promise) => {
-  try {
-    const msg = reason && reason.stack ? reason.stack : String(reason);
-    // eslint-disable-next-line no-console
-    console.error("[unhandledRejection] 已捕获并忽略，进程继续运行:", msg);
-  } catch {
-    /* noop */
-  }
-});
 
 const { createModuleLogger } = require("../services/logger");
 const { registerAdminActivityRoutes } = require("./admin-activity-routes");
@@ -70,7 +57,6 @@ const { registerAdminLoginLogRoutes } = require("./admin-login-log-routes");
 const {
   registerAdminPlantBlacklistRoutes,
 } = require("./admin-plant-blacklist-routes");
-const { registerAdminProxyRoutes } = require("./admin-proxy-routes");
 const { registerAdminPublicInfoRoutes } = require("./admin-public-info-routes");
 const { createAdminRouteHelpers } = require("./admin-route-helpers");
 const { registerAdminSettingsRoutes } = require("./admin-settings-routes");
@@ -88,7 +74,6 @@ const DEFAULT_ALLOWED_ORIGINS = [
 ];
 const PUBLIC_API_PATHS = new Set([
   "/login",
-  "/proxy",
   "/card-claim/status",
   "/card-claim/claim",
   "/game-version",
@@ -102,7 +87,6 @@ const PUBLIC_API_PATHS = new Set([
   "/health",
 ]);
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
-const LOG_SNAPSHOT_LIMIT = 100;
 const HTTP_REQUEST_TIMEOUT_MS = 120 * 1000;
 const HTTP_HEADERS_TIMEOUT_MS = 16 * 1000;
 const HTTP_KEEP_ALIVE_TIMEOUT_MS = 5 * 1000;
@@ -113,31 +97,26 @@ let app = null;
 let server = null;
 let provider = null;
 let io = null;
+let realtime = null;
+const { createAdminRealtime } = require("./admin-realtime");
 
 function emitRealtimeStatus(accountId, status) {
   if (!io) return;
   accountId = String(accountId || "").trim();
   if (!accountId) return;
-  io.to(`account:${  accountId}`).emit("status:update", {
-    accountId,
-    status,
-  });
+  realtime.emit(accountId, "status:update", { accountId, status });
 }
 
 function emitRealtimeLog(logEntry) {
   if (!io) return;
-  const safeLogEntry = logEntry && typeof logEntry === "object" ? logEntry : {};
-  const accountId = String(safeLogEntry.accountId || "").trim();
-  if (!accountId) return;
-  io.to(`account:${  accountId}`).emit("log:new", safeLogEntry);
+  const accountId = String(logEntry.accountId || '');
+  if (accountId) realtime.emit(accountId, 'log:new', logEntry);
 }
 
 function emitRealtimeAccountLog(logEntry) {
   if (!io) return;
-  const safeLogEntry = logEntry && typeof logEntry === "object" ? logEntry : {};
-  const accountId = String(safeLogEntry.accountId || "").trim();
-  if (!accountId) return;
-  io.to(`account:${  accountId}`).emit("account-log:new", safeLogEntry);
+  const accountId = String(logEntry.accountId || '');
+  if (accountId) realtime.emit(accountId, 'account-log:new', logEntry);
 }
 
 function configureCorsMiddleware(expressApp) {
@@ -162,14 +141,8 @@ function configureCorsMiddleware(expressApp) {
 }
 
 function configureStaticAssets(expressApp, webDist) {
-  if (fs.existsSync(webDist)) {
-    expressApp.use(express.static(webDist));
-    return;
-  }
-  adminLogger.warn("web build not found", { webDist });
-  expressApp.get("/", (req, res) =>
-    res.send("web build not found. Please build the web project."),
-  );
+  if (!fs.existsSync(path.join(webDist, 'index.html'))) throw new Error('前端构建缺失，请先执行 pnpm -C web build');
+  expressApp.use(express.static(webDist));
 }
 
 function registerAuthGate(expressApp, requireAdminToken) {
@@ -225,12 +198,7 @@ function registerSpaFallback(expressApp, webDist) {
         error: "Not Found",
       });
     }
-    if (fs.existsSync(webDist)) {
-      return res.sendFile(path.join(webDist, "index.html"));
-    }
-    return res
-      .status(404)
-      .send("web build not found. Please build the web project.");
+    return res.sendFile(path.join(webDist, "index.html"));
   });
 }
 
@@ -282,16 +250,6 @@ function trackHttpConnections(httpServer) {
   });
 }
 
-function leaveAccountRooms(socket) {
-  for (const room of socket.rooms) {
-    if (room.startsWith("account:")) socket.leave(room);
-  }
-}
-
-function hasElevatedAdminRole(session) {
-  return session.role === "admin";
-}
-
 function getSocketHandshakeToken(socket) {
   const authToken =
     socket.handshake.auth && socket.handshake.auth.token
@@ -308,11 +266,12 @@ function startAdminServer(dataProvider) {
   if (app) return;
   provider = dataProvider;
   app = express();
-  app.set("trust proxy", true);
+  app.set("trust proxy", false);
   app.use(express.json({ limit: "256kb" }));
 
   const adminSessionManager = createAdminSessionManager({
     logger: adminLogger,
+    getUser: userStore.getUser,
     getIo: () => io,
   });
   const {
@@ -419,6 +378,7 @@ function startAdminServer(dataProvider) {
     requireAdminToken,
     createAdminSession,
     updateAdminSessions,
+    invalidateAdminSessions,
   });
   registerHealthRoute(app);
   registerAuthGate(app, requireAdminToken);
@@ -426,8 +386,8 @@ function startAdminServer(dataProvider) {
   registerAdminPublicInfoRoutes({
     app,
     provider,
-    store,
     userStore,
+    requireAdminRole,
     getAccountIdFromRequest,
     canAccessAccount,
     sendProviderError,
@@ -512,6 +472,7 @@ function startAdminServer(dataProvider) {
     requireAdminRole,
     cleanupInvalidAdminSessions,
     requireDangerConfirmation,
+    enforceUserAccess: () => userAccessMonitor.reconcile(),
     getDefaultSystemConfig,
     getRuntimeConfig,
     updateRuntimeConfig,
@@ -526,12 +487,18 @@ function startAdminServer(dataProvider) {
     userStore,
     adminLogger,
   });
+  const { createUserDeletion } = require("../services/user-deletion");
+  const deleteUserData = createUserDeletion({ userStore, store, provider, qqLogin: getQqLoginService(),
+    invalidateSessions: invalidateAdminSessions, purgeRefreshJobs: (userId, ids) => accountRoutes.purgeUserJobs(userId, ids),
+    purgeYybState: userId => yybRoutes.purgeUserState(userId) });
   registerAdminUserRoutes({
     app,
     requireAdminToken,
     requireAdminRole,
     requireDangerConfirmation,
     getAdminUserMutationError,
+    deleteUserData,
+    enforceUserAccess: () => userAccessMonitor.reconcile(),
     userStore,
     adminLogger,
     invalidateAdminSessions,
@@ -544,10 +511,17 @@ function startAdminServer(dataProvider) {
     userStore,
     store,
   });
-  registerAdminYybRoutes({
+  const yybRoutes = registerAdminYybRoutes({
     app,
     requireAdminToken,
     sendProviderError,
+    getAccountsForUser,
+    canAccessAccount,
+    onProxyProfileChanged: async (profileId, apiBase) => {
+      const normalized = value => String(value || '').replace(/\/+$/, '');
+      if (normalized(apiBase) !== normalized(process.env.YYB_API_URL)) return;
+      await Promise.all([provider.reloadProxyProfile(profileId), qqLogin.invalidateProxyProfile(profileId)]);
+    },
   });
   const qqLogin = getQqLoginService();
   qqLogin.start();
@@ -560,13 +534,12 @@ function startAdminServer(dataProvider) {
       setTimeout(() => process.exit(0), 1800).unref();
     });
   }
-  registerAdminAccountRoutes({
+  const accountRoutes = registerAdminAccountRoutes({
     app,
     provider,
     refreshJobStore: createRefreshJobStore(),
-    getIo: () => io,
+    broadcastLogSnapshot: accountId => realtime.refreshLogs(accountId),
     addOrUpdateAccount,
-    deleteAccount,
     findAccountByRef,
     getAccountsForUser,
     getAccountIdFromRequest,
@@ -576,10 +549,17 @@ function startAdminServer(dataProvider) {
     userStore,
     sendProviderError,
   });
+  const { createUserAccessMonitor } = require('../services/user-access-monitor');
+  const userAccessMonitor = createUserAccessMonitor({
+    userStore, provider, qqLogin, yybRoutes,
+    cancelUserJobs: (userId, ids) => accountRoutes.cancelUserJobs(userId, ids),
+    cleanupSessions: cleanupInvalidAdminSessions, logger: adminLogger,
+  });
+  userAccessMonitor.start();
+  process.once('exit', () => userAccessMonitor.close());
   registerAdminFriendRoutes({ app, provider, store, getAccountIdFromRequest, canAccessAccount, sendProviderError });
   registerAdminDogRoutes({ app, provider, getAccountIdFromRequest, canAccessAccount, sendProviderError });
   registerAdminCareerRoutes({ app, provider, getAccountIdFromRequest, canAccessAccount, sendProviderError });
-  registerAdminProxyRoutes({ app, logger: adminLogger });
   registerAdminLoginLogRoutes({
     app,
     userStore,
@@ -590,96 +570,11 @@ function startAdminServer(dataProvider) {
   });
   registerSpaFallback(app, webDist);
 
-  const subscribeSocketToAccount = (socket, accountRef = "") => {
-    const rawAccountRef = String(accountRef || "").trim();
-    const accountId =
-      rawAccountRef && rawAccountRef !== "all"
-        ? resolveAccountReference(rawAccountRef)
-        : "";
-    const token = socket.data.adminToken;
-    const session = token ? getAdminSession(token) : null;
-
-    if (accountId && session && !hasElevatedAdminRole(session)) {
-      const accounts = getAccountsForUser();
-      const account = accounts.find((item) => item.id === accountId);
-      if (!account || account.username !== session.username) {
-        socket.emit("subscribed", {
-          accountId: "all",
-          error: "无权访问此账号",
-        });
-        leaveAccountRooms(socket);
-        socket.join("account:all");
-        socket.data.accountId = "";
-        return;
-      }
-    }
-
-    leaveAccountRooms(socket);
-    if (accountId) {
-      socket.join(`account:${  accountId}`);
-      socket.data.accountId = accountId;
-    } else {
-      socket.join("account:all");
-      socket.data.accountId = "";
-    }
-    socket.emit("subscribed", {
-      accountId: socket.data.accountId || "all",
-    });
-
-    try {
-      const subscribedAccountId = socket.data.accountId || "";
-      const socketUser = socket.data.user;
-      if (
-        subscribedAccountId &&
-        provider &&
-        typeof provider.getStatus === "function"
-      ) {
-        const status = provider.getStatus(subscribedAccountId);
-        socket.emit("status:update", {
-          accountId: subscribedAccountId,
-          status,
-        });
-      }
-      if (provider && typeof provider.getLogs === "function") {
-        let logs = provider.getLogs(subscribedAccountId, {
-          limit: LOG_SNAPSHOT_LIMIT,
-        });
-        if (!Array.isArray(logs)) logs = [];
-        if (socketUser) {
-          const accessibleAccountIds = getAccessibleAccountIdsForUser(socketUser);
-          logs = logs.filter((logEntry) => {
-            const logAccountId = logEntry.accountId || logEntry.id;
-            if (!logAccountId) return true;
-            return accessibleAccountIds.includes(logAccountId);
-          });
-        }
-        socket.emit("logs:snapshot", {
-          accountId: subscribedAccountId || "all",
-          logs,
-        });
-      }
-      if (provider && typeof provider.getAccountLogs === "function") {
-        let accountLogs = provider.getAccountLogs(LOG_SNAPSHOT_LIMIT);
-        if (!Array.isArray(accountLogs)) accountLogs = [];
-        if (subscribedAccountId) {
-          accountLogs = accountLogs.filter((logEntry) => {
-            const logAccountId = String(logEntry.accountId || logEntry.id || "");
-            return logAccountId === subscribedAccountId;
-          });
-        }
-        if (socketUser) {
-          const accessibleAccountIds = getAccessibleAccountIdsForUser(socketUser);
-          accountLogs = accountLogs.filter((logEntry) => {
-            const logAccountId = logEntry.accountId || logEntry.id;
-            return accessibleAccountIds.includes(logAccountId);
-          });
-        }
-        socket.emit("account-logs:snapshot", {
-          logs: accountLogs,
-        });
-      }
-    } catch {}
-  };
+  realtime = createAdminRealtime({
+    provider, getIo: () => io, getSession: getAdminSession,
+    getSessionRejection: adminSessionManager.getAdminSessionRejection,
+    getAccessibleAccountIdsForUser, resolveAccountReference,
+  });
 
   // 默认端口 3900：Windows 系统端口排除区间（Hyper-V/WSL NAT 保留 3002-3101）会拒绝 3007 监听（EACCES）
   const adminPort = CONFIG.adminPort || 3900;
@@ -736,11 +631,11 @@ function startAdminServer(dataProvider) {
       (socket.handshake.auth && socket.handshake.auth.accountId) ||
       (socket.handshake.query && socket.handshake.query.accountId) ||
       "";
-    subscribeSocketToAccount(socket, initialAccountId);
+    realtime.subscribe(socket, initialAccountId);
     socket.emit("ready", { ok: true, ts: Date.now() });
     socket.on("subscribe", (payload) => {
       const safePayload = payload && typeof payload === "object" ? payload : {};
-      subscribeSocketToAccount(socket, safePayload.accountId || "");
+      realtime.subscribe(socket, safePayload.accountId || "");
     });
   });
 }

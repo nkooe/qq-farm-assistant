@@ -22,15 +22,16 @@ const router = useRouter()
 type SettingsTabKey = 'account' | 'proxy' | 'default-plan' | 'user'
 
 function getInitialSettingsTab(): SettingsTabKey {
-  const saved = localStorage.getItem('settings-active-tab')
+  const saved = localStorage.getItem(`settings-active-tab:${userStore.userId}`)
   return saved === 'proxy' || saved === 'default-plan' || saved === 'user'
     ? saved
     : 'account'
 }
 
 const activeTab = ref<SettingsTabKey>(getInitialSettingsTab())
+watch(() => userStore.userId, () => { activeTab.value = getInitialSettingsTab() }, { flush: 'sync' })
 watch(activeTab, (newTab) => {
-  localStorage.setItem('settings-active-tab', newTab)
+  localStorage.setItem(`settings-active-tab:${userStore.userId}`, newTab)
 })
 
 const tabs = [

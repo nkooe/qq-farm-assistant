@@ -13,27 +13,31 @@ const now = ref(Date.now())
 let requestVersion = 0
 let controller: AbortController | null = null
 
-const runtimeLabel = computed(() => {
-  const state = props.account?.runtimeState || health.value?.runtime?.state
-  return ({ online: '游戏已上线', starting: '正在连接游戏', reconnecting: '等待自动重连', failed: '连接失败', stopped: '已停止', stopping: '正在停止' } as Record<string, string>)[state]
-    || (props.account?.connected ? '游戏已上线' : props.account?.running ? '正在连接游戏' : '已停止')
-})
-const reconnect = computed(() => props.account && 'runtimeReconnect' in props.account ? props.account.runtimeReconnect : health.value?.runtime?.reconnect)
-const runtimeError = computed(() => props.account?.runtimeState ? props.account.runtimeError || '' : health.value?.runtime?.error)
-const loginState = computed(() => props.account && 'runtimeLogin' in props.account ? props.account.runtimeLogin : health.value?.runtime?.login)
+// Connection and recovery details must come from the same runtime snapshot.
+const runtime = computed(() => props.account?.runtimeState
+  ? { state: props.account.runtimeState, error: props.account.runtimeError, reconnect: props.account.runtimeReconnect, login: props.account.runtimeLogin }
+  : health.value?.runtime)
+const online = computed(() => runtime.value?.state === 'online')
+const runtimeLabel = computed(() => ({ online: '在线', starting: '连接中', reconnecting: '等待重连', failed: '连接失败', stopped: '已停止', stopping: '停止中' } as Record<string, string>)[runtime.value?.state] || '状态未知')
+const reconnect = computed(() => online.value ? null : runtime.value?.reconnect)
+const runtimeError = computed(() => online.value ? '' : runtime.value?.error)
+const loginState = computed(() => runtime.value?.login)
 const loginLabel = computed(() => {
+  // A completed login attempt is history once the game has connected.
+  if (online.value)
+    return ''
   const task = loginState.value
   if (!task)
     return ''
   if (task.state === 'queued')
-    return '等待取码：正在排队，尚未开始登录'
+    return '排队取码中'
   if (task.state === 'requesting')
-    return '正在恢复登录并获取新 Code'
+    return '正在取码'
   if (task.state === 'cancelled')
     return '取码已取消'
   if (task.state === 'success')
-    return `最近取码成功，用时 ${Math.ceil((task.durationMs || 0) / 1000)} 秒`
-  return ({ rescan: '登录态需要重新验证，请扫码更新', proxy: '代理异常，请检查所选代理', busy: '取码服务忙碌，等待重试', timeout: '取码超时，等待重试', configuration: '登录配置异常，请检查设置' } as Record<string, string>)[task.kind] || '取码暂时失败，请查看连接错误'
+    return `取码成功，用时 ${Math.ceil((task.durationMs || 0) / 1000)} 秒`
+  return ({ rescan: '登录失效，请扫码', proxy: '代理异常，请检查', busy: '服务繁忙，等待重试', timeout: '取码超时，等待重试', configuration: '登录配置异常' } as Record<string, string>)[task.kind] || '取码失败，请查看错误'
 })
 const reconnectLabel = computed(() => {
   const plan = reconnect.value
@@ -41,25 +45,25 @@ const reconnectLabel = computed(() => {
     return ''
   if (plan.state === 'scheduled') {
     const seconds = Math.max(0, Math.ceil((plan.nextRetryAt - now.value) / 1000))
-    return plan.kind === 'busy' ? `取码服务忙碌，约 ${seconds} 秒后重试，不计入失败次数` : `第 ${plan.attempt}/${plan.maxAttempts} 次重连，约 ${seconds} 秒后执行`
+    return plan.kind === 'busy' ? `服务繁忙，${seconds} 秒后重试` : `重连 ${plan.attempt}/${plan.maxAttempts}，${seconds} 秒后重试`
   }
   if (plan.state === 'needs_rescan')
-    return '需要扫码更新，自动重试已暂停'
+    return '请扫码，重试已暂停'
   if (plan.state === 'blocked')
-    return '请检查登录配置，自动重试已暂停'
-  return plan.state === 'waiting_credentials' ? '游戏重试已结束，等待后台凭据恢复后自动启动' : `自动重连已达上限（${plan.attempt}/${plan.maxAttempts}）`
+    return '配置异常，重试已暂停'
+  return plan.state === 'waiting_credentials' ? '等待登录恢复' : `重连已达上限（${plan.attempt}/${plan.maxAttempts}）`
 })
 const credentialLabel = computed(() => {
   const credentials = health.value?.credentials
   if (!credentials)
-    return '暂时无法读取'
+    return '读取失败'
   if (credentials.needs_rescan)
-    return '凭据被拒绝，需要重扫'
+    return '已失效，请扫码'
   if (credentials.refresh?.last_error)
     return '续期待重试'
   if (credentials.status === 'alive')
-    return '凭据可用'
-  return '状态待确认'
+    return '有效'
+  return '待确认'
 })
 
 function formatTime(seconds?: number) {
@@ -78,13 +82,13 @@ async function loadHealth() {
     if (version !== requestVersion)
       return
     if (data?.ok !== true)
-      throw new Error('无法读取账号健康信息')
+      throw new Error('状态读取失败')
     health.value = data.data
   }
   catch (err: any) {
     if (version !== requestVersion || err?.code === 'ERR_CANCELED')
       return
-    error.value = '健康信息读取失败，请点击刷新重试'
+    error.value = '读取失败，请刷新'
   }
   finally {
     if (version === requestVersion)
@@ -115,11 +119,11 @@ onBeforeUnmount(() => {
     <div class="flex flex-wrap items-center justify-between gap-2">
       <button type="button" class="min-h-11 flex items-center gap-2 text-left font-medium focus-visible:outline-2 focus-visible:outline-blue-500" :aria-expanded="expanded" @click="expanded = !expanded">
         <span class="i-carbon-activity" aria-hidden="true" />
-        账号健康 · {{ runtimeLabel }}
+        状态检查 · {{ runtimeLabel }}
         <span class="text-xs opacity-70">{{ expanded ? '收起' : '展开' }}</span>
       </button>
       <BaseButton v-if="expanded" size="sm" variant="outline" :loading="loading" @click="loadHealth">
-        刷新状态
+        刷新
       </BaseButton>
     </div>
     <p v-if="reconnectLabel" class="mt-2 text-amber-800 dark:text-amber-300" role="status">
@@ -127,7 +131,7 @@ onBeforeUnmount(() => {
     </p>
     <div v-if="expanded" class="mt-2 break-words space-y-2" aria-live="polite">
       <p v-if="loading && !health">
-        正在读取健康信息…
+        检查中…
       </p>
       <p v-if="error" role="alert" class="text-red-700 dark:text-red-300">
         {{ error }}
@@ -137,21 +141,20 @@ onBeforeUnmount(() => {
           {{ loginLabel }}
         </p>
         <p v-if="loginState?.lastSuccessAt" class="text-xs opacity-70">
-          最近取码成功：{{ formatTime(loginState.lastSuccessAt / 1000) }}
+          最近取码：{{ formatTime(loginState.lastSuccessAt / 1000) }}
         </p>
         <p v-if="runtimeError" class="text-red-700 dark:text-red-300">
           {{ runtimeError }}
         </p>
         <template v-if="account?.platform === 'qq' && account?.loginType !== 'yyb' && !account?.yybOpenid">
-          <p>QQ 自动取码：{{ account?.qqAutoCodeAvailable ? '已保存登录态，登录失效后按需重新获取 Code' : '尚未保存登录态，请使用 QQ 扫码更新一次' }}</p>
-          <p>QQ 登录态被退出或失效时需要重新扫码；使用原账号代理，不走微信应用宝接口。</p>
+          <p>登录态：{{ account?.qqAutoCodeAvailable ? '已保存' : '未保存' }}</p>
         </template>
         <template v-else-if="health.supported">
-          <p>应用宝服务：{{ health.yyb?.available ? '正常' : '暂时不可用' }}</p>
-          <p>凭据状态：{{ credentialLabel }}</p>
+          <p>应用宝服务：{{ health.yyb?.available ? '正常' : '不可用' }}</p>
+          <p>登录凭据：{{ credentialLabel }}</p>
           <template v-if="health.credentials">
-            <p>Access token 到期：{{ formatTime(health.credentials.expires_at) }}</p>
-            <p>最近续期成功：{{ formatTime(health.credentials.refresh?.last_success_at) }}</p>
+            <p>凭据到期：{{ formatTime(health.credentials.expires_at) }}</p>
+            <p>最近续期：{{ formatTime(health.credentials.refresh?.last_success_at) }}</p>
             <p>后台续期：{{ health.credentials.keepalive_enabled ? '已开启' : '已关闭' }}</p>
             <p v-if="health.credentials.refresh?.retry_at">
               下次重试：{{ formatTime(health.credentials.refresh.retry_at) }}
@@ -164,12 +167,6 @@ onBeforeUnmount(() => {
             {{ health.credentialError }}
           </p>
         </template>
-        <p v-else class="opacity-70">
-          此账号可查看游戏连接状态；凭据续期详情仅支持内置应用宝账号。
-        </p>
-        <p class="text-xs opacity-70">
-          展开时每 30 秒更新；凭据可用与游戏在线分别检测。
-        </p>
       </template>
     </div>
   </div>

@@ -148,7 +148,7 @@ export function useAccountSettings(showAlert: (message: string, type?: AlertType
   }
 
   function refreshJobStorageKey() {
-    return `refresh-wx-codes-job:${userStore.username || 'unknown'}`
+    return `refresh-wx-codes-job:${userStore.userId || 'unknown'}`
   }
 
   function clearRefreshPollTimer() {
@@ -316,7 +316,7 @@ export function useAccountSettings(showAlert: (message: string, type?: AlertType
         return
       }
       refreshWxCodesLoading.value = true
-      refreshWxCodesPollWarning.value = '提交结果未确认，正在用同一请求号重试；不会重复启动刷新'
+      refreshWxCodesPollWarning.value = '提交结果未确认，正在重试'
       scheduleRefreshRequestRetry(requestId, generation, failedAttempts + 1)
     }
   }

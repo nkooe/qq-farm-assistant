@@ -31,6 +31,7 @@ const {
     fertilize,
     removePlant
 } = require('../services/farm');
+const { farmOperationGuard } = require('../services/farm-operation-guard');
 const {
     checkFriends,
     startFriendCheckLoop,
@@ -523,7 +524,7 @@ function applyRuntimeConfig(config, syncStatusAfter = false) {
                 workerScheduler.setTimeoutTask('fertilizer_immediate_after_save', 1000, async () => {
                     if (!loginReady) return;
                     try {
-                        await runFertilizerByConfig([], { skipNormal: true });
+                        await farmOperationGuard.run(() => runFertilizerByConfig([], { skipNormal: true }));
                     } catch (err) {
                         log('施肥', `保存配置后立即施肥失败: ${  err.message}`, {
                             module: 'farm', event: '施肥', result: 'error'
@@ -754,7 +755,7 @@ async function startBot(config) {
     };
 
     // 建立连接
-    connect(code, onReady, { proxyURL: config.proxyURL || '' });
+    connect(code, onReady, { proxyURL: config.proxyURL || '', deviceProtocol: config.deviceProtocol });
 
     // 定期同步状态
     workerScheduler.setIntervalTask('status_sync', 5000, syncStatus, { preventOverlap: true });
@@ -964,8 +965,10 @@ async function handleApiCall(msg) {
                 result = await require('../services/farm-selected-operations').selectedFarmOperations().operate(args[0], args[1]);
                 break;
             case 'buyFertilizer': {
-                const fertType = args[0] || 'organic';
-                const count = Number(args[1]) || 1;
+                const fertType = args[0];
+                const count = args[1];
+                if (!['organic', 'normal'].includes(fertType) || !Number.isSafeInteger(count) || count <= 0)
+                    throw new Error('化肥类型或购买数量无效');
                 result = await autoBuyFertilizer(true, fertType, count);
                 break;
             }
@@ -991,7 +994,7 @@ async function handleApiCall(msg) {
             }
             case 'getMallGoods': {
                 const { getMallGoodsList } = require('../services/mall');
-                result = await getMallGoodsList(0);
+                result = await getMallGoodsList(1);
                 break;
             }
             case 'buyMallGoods': {
@@ -1145,7 +1148,7 @@ async function handleApiCall(msg) {
                     log('施肥', `正在对土地 ${  landId  } 使用有机肥料催熟`, {
                         module: 'farm', event: '催熟', landId
                     });
-                    const fertilizeCount = await fertilize([landId], ORGANIC_FERTILIZER_ID);
+                    const fertilizeCount = await farmOperationGuard.run(() => fertilize([landId], ORGANIC_FERTILIZER_ID));
                     if (fertilizeCount > 0) {
                         log('施肥', `土地 ${  landId  } 催熟成功`, {
                             module: 'farm', event: '催熟', result: 'ok', landId
@@ -1165,26 +1168,28 @@ async function handleApiCall(msg) {
                 if (!landId) {
                     error = '无效的土地ID';
                 } else {
-                    result = await removePlant([landId]);
+                    result = await farmOperationGuard.run(() => removePlant([landId]));
                 }
                 break;
             }
             case 'removeAllPlants': {
-                const landsDetail = await getLandsDetail();
-                const lands = landsDetail?.lands || [];
-                const occupiedLands = lands
-                    .filter(l => l && l.unlocked && !l.occupiedByMaster && l.status !== 'empty' && l.status !== 'locked')
-                    .map(l => l.id);
+                result = await farmOperationGuard.run(async () => {
+                    const landsDetail = await getLandsDetail();
+                    const lands = landsDetail?.lands || [];
+                    const occupiedLands = lands
+                        .filter(l => l && l.unlocked && !l.occupiedByMaster && l.status !== 'empty' && l.status !== 'locked')
+                        .map(l => l.id);
 
-                if (occupiedLands.length === 0) {
-                    result = { removed: 0, message: '没有可铲除的作物' };
-                } else {
-                    await removePlant(occupiedLands);
-                    log('铲除', `已铲除 ${  occupiedLands.length  } 块土地上的作物`, {
-                        module: 'farm', event: '一键铲除', result: 'ok', count: occupiedLands.length
-                    });
-                    result = { removed: occupiedLands.length };
-                }
+                    if (occupiedLands.length === 0) {
+                        return { removed: 0, message: '没有可铲除的作物' };
+                    } else {
+                        await removePlant(occupiedLands);
+                        log('铲除', `已铲除 ${  occupiedLands.length  } 块土地上的作物`, {
+                            module: 'farm', event: '一键铲除', result: 'ok', count: occupiedLands.length
+                        });
+                        return { removed: occupiedLands.length };
+                    }
+                });
                 break;
             }
             default:

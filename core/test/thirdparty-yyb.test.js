@@ -18,7 +18,7 @@ for (const [status, kind] of [[401, 'configuration'], [403, 'configuration'], [4
 }
 
 test('third party accepts a string Code and forwards cancellation to the request', async t => {
-  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ success: true, data: { code: 'fresh-code' } }) }));
+  t.mock.method(globalThis, 'fetch', async () => ({ ok: true, json: async () => ({ success: true, data: { code: 'fresh-code', openid: params.openid } }) }));
   assert.equal((await getThirdpartyYybCode(params)).code, 'fresh-code');
   const controller = new AbortController(); let signal;
   t.mock.method(globalThis, 'fetch', async (_url, options) => { signal = options.signal; return new Promise((_, reject) => signal.addEventListener('abort', () => reject(Object.assign(new Error('request aborted'), { name: 'AbortError' })))); });

@@ -1,4 +1,4 @@
-import { useStorage } from '@vueuse/core'
+import { StorageSerializers, useStorage } from '@vueuse/core'
 import { defineStore } from 'pinia'
 import { computed } from 'vue'
 import api from '@/api'
@@ -16,6 +16,7 @@ export interface UserCard {
 }
 
 export interface User {
+  id: number
   username: string
   role: 'admin' | 'user'
   card: UserCard | null
@@ -36,7 +37,7 @@ export interface LoginResult {
     card: UserCard | null
     cardVerificationEnabled?: boolean
     accountLimit: number
-    user: { username: string }
+    user: { id: number, username: string }
     mustChangePassword?: boolean
   }
 }
@@ -52,7 +53,8 @@ export interface Card {
   isPermanent?: boolean
   type: 'time' | 'quota'
   enabled: boolean
-  usedBy: string | null
+  usedBy: number | null
+  claimedAt?: number | null
   usedAt: number | null
   createdAt: number
 }
@@ -106,9 +108,12 @@ export function formatCardValue(card: Card) {
 
 export const useUserStore = defineStore('user', () => {
   const token = useStorage('admin_token', '')
-  const userInfo = useStorage<User | null>('user_info', null)
+  const userInfo = useStorage<User | null>('user_info', null, undefined, {
+    serializer: StorageSerializers.object,
+  })
   const isLoggedIn = computed(() => !!token.value)
-  const isAdmin = computed(() => userInfo.value?.role === 'admin')
+  const isAdmin = computed(() => userInfo.value?.id === 1000 && userInfo.value.role === 'admin')
+  const userId = computed(() => userInfo.value?.id ?? null)
   const username = computed(() => userInfo.value?.username || '')
   const userCard = computed(() => userInfo.value?.card)
   const accountLimit = computed(() => userInfo.value?.accountLimit ?? 2)
@@ -142,6 +147,7 @@ export const useUserStore = defineStore('user', () => {
       if (res.data.ok) {
         token.value = res.data.data.token
         userInfo.value = {
+          id: res.data.data.user.id,
           username: res.data.data.user.username,
           role: res.data.data.role,
           card: res.data.data.card,
@@ -178,18 +184,26 @@ export const useUserStore = defineStore('user', () => {
     finally {
       token.value = ''
       userInfo.value = null
+      localStorage.removeItem('current_account_id')
+      localStorage.removeItem('current_account_owner')
     }
   }
 
   async function fetchUserInfo() {
+    const requestedToken = token.value
     try {
       const res = await api.get('/api/user/me')
-      if (res.data.ok) {
-        userInfo.value = res.data.data
-      }
+      if (token.value !== requestedToken)
+        return { ok: false }
+      const user = res.data?.data
+      if (!res.data?.ok || !user?.username || !Number.isSafeInteger(user.id) || user.id < 1000 || (user.id === 1000 ? user.role !== 'admin' : user.role !== 'user'))
+        throw new Error('用户身份无效')
+      userInfo.value = user
       return res.data
     }
     catch {
+      if (token.value === requestedToken)
+        userInfo.value = null
       return { ok: false }
     }
   }
@@ -242,18 +256,18 @@ export const useUserStore = defineStore('user', () => {
     return res.data
   }
 
-  async function updateUser(username: string, updates: Partial<UserCard>, payload?: { confirmed?: boolean, confirmText?: string }) {
-    const res = await api.post(`/api/admin/users/${username}`, { ...updates, ...payload })
+  async function updateUser(userId: number, updates: Partial<UserCard>, payload?: { confirmed?: boolean, confirmText?: string }) {
+    const res = await api.post(`/api/admin/users/${userId}`, { ...updates, ...payload })
     return res.data
   }
 
-  async function deleteUser(username: string, payload?: { confirmed?: boolean, confirmText?: string }) {
-    const res = await api.delete(`/api/admin/users/${username}`, { data: payload })
+  async function deleteUser(userId: number, payload?: { confirmed?: boolean, confirmText?: string }) {
+    const res = await api.delete(`/api/admin/users/${userId}`, { data: payload })
     return res.data
   }
 
-  async function renewUser(username: string, cardCode: string, payload?: { confirmed?: boolean, confirmText?: string }) {
-    const res = await api.post(`/api/admin/users/${username}/renew`, { cardCode, ...payload })
+  async function renewUser(userId: number, cardCode: string, payload?: { confirmed?: boolean, confirmText?: string }) {
+    const res = await api.post(`/api/admin/users/${userId}/renew`, { cardCode, ...payload })
     return res.data
   }
 
@@ -300,6 +314,7 @@ export const useUserStore = defineStore('user', () => {
     isLoggedIn,
     isAdmin,
     username,
+    userId,
     userCard,
     accountLimit,
     avatar,

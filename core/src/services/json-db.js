@@ -48,12 +48,12 @@ function ensureParentDir(filePath) {
  * @param {string} filePath - 文件路径
  * @param {string} fallback - 文件不存在时的默认值
  */
-function readTextFile(filePath, fallback = '') {
+function readTextFile(filePath, initialValue) {
   try {
-    if (!fs.existsSync(filePath)) return fallback;
     return fs.readFileSync(filePath, 'utf8');
-  } catch {
-    return fallback;
+  } catch (error) {
+    if (error.code === 'ENOENT' && initialValue !== undefined) return initialValue;
+    throw storageError('读取', filePath, error);
   }
 }
 
@@ -62,16 +62,9 @@ function readTextFile(filePath, fallback = '') {
  * @param {string} filePath - 文件路径
  * @param {Function|*} fallbackFactory - 文件不存在时的默认值（函数则调用取值）
  */
-function readJsonFile(filePath, fallbackFactory = () => ({})) {
-  const fallback = typeof fallbackFactory === 'function' ? fallbackFactory() : fallbackFactory;
-  try {
-    if (!fs.existsSync(filePath)) return fallback;
-    const content = fs.readFileSync(filePath, 'utf8');
-    if (!content || !content.trim()) return fallback;
-    return JSON.parse(content);
-  } catch {
-    return fallback;
-  }
+function readJsonFile(filePath, initialValue) {
+  return readJsonFileStrict(filePath, initialValue === undefined ? undefined
+    : typeof initialValue === 'function' ? initialValue : () => initialValue);
 }
 
 function storageError(action, filePath, cause) {

@@ -7,7 +7,9 @@ const path = require('node:path');
 test('all successful Enter paths record current pet truth; errors and malformed briefs never become no-dog', async t => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'farm-pet-enter-'));
     const oldDir = process.env.FARM_DATA_DIR, oldId = process.env.FARM_ACCOUNT_ID;
-    process.env.FARM_DATA_DIR = dir; process.env.FARM_ACCOUNT_ID = 'pet-enter-account';
+    process.env.FARM_DATA_DIR = dir;
+    require('../src/models/store/config-storage').createConfigStorage(path.join(dir, 'store.json')).load();
+    process.env.FARM_ACCOUNT_ID = 'pet-enter-account';
     const network = require('../src/utils/network'), original = network.sendMsgAsync;
     const { types, loadProto } = require('../src/utils/proto');
     await loadProto();

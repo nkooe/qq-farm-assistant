@@ -1,3 +1,4 @@
+const { parseUserId } = require('../models/user-id');
 function registerAdminUserRoutes({
   app,
   requireAdminToken,
@@ -8,12 +9,14 @@ function registerAdminUserRoutes({
   adminLogger,
   invalidateAdminSessions,
   updateAdminSessions,
+  deleteUserData,
+  enforceUserAccess,
 }) {
   app.get("/api/admin/users", requireAdminToken, requireAdminRole, (req, res) => {
     try {
       res.json({ ok: true, data: userStore.getAllUsers() });
     } catch (error) {
-      res.status(500).json({ ok: false, error: error.message });
+      res.status(error.status || 500).json({ ok: false, error: error.message });
     }
   });
 
@@ -21,73 +24,79 @@ function registerAdminUserRoutes({
     "/api/admin/users/clear-expired",
     requireAdminToken,
     requireAdminRole,
-    (req, res) => {
+    async (req, res) => {
       try {
         if (!requireDangerConfirmation(req, res, "CLEAR_EXPIRED_USERS")) return;
-        const result = userStore.clearExpiredUsers();
+        const deletedUsers = [];
+        for (const userId of userStore.getExpiredUserIds()) {
+          await deleteUserData(userId);
+          deletedUsers.push(userId);
+        }
+        const result = { ok: true, deletedCount: deletedUsers.length, deletedUsers };
         if (result.ok && result.deletedCount > 0) {
-          for (const username of result.deletedUsers) {
-            invalidateAdminSessions((session) => session.username === username);
+          for (const userId of result.deletedUsers) {
+            invalidateAdminSessions((session) => session.id === userId);
           }
           adminLogger.info("清理到期用户", {
-            admin: req.currentUser.username,
+            admin: req.currentUser.id,
             deletedCount: result.deletedCount,
-            deletedUsers: result.deletedUsers,
           });
         }
         res.json(result);
       } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
+        res.status(error.status || 500).json({ ok: false, error: error.message });
       }
     },
   );
 
   app.post(
-    "/api/admin/users/:username",
+    "/api/admin/users/:userId",
     requireAdminToken,
     requireAdminRole,
-    (req, res) => {
+    async (req, res) => {
       try {
         if (!requireDangerConfirmation(req, res, "UPDATE_USER_STATUS")) return;
-        const { username } = req.params;
+        const userId = parseUserId(req.params.userId);
         const mutationError = getAdminUserMutationError(
           req.currentUser,
-          username,
+          userId,
         );
         if (mutationError) {
           return res.status(403).json({ ok: false, error: mutationError });
         }
 
-        const user = userStore.updateUser(username, req.body || {});
+        const user = userStore.updateUser(userId, req.body || {});
         if (!user) {
           return res.status(404).json({ ok: false, error: "用户不存在" });
         }
+        invalidateAdminSessions(session => session.id === userId);
+        if (enforceUserAccess) await enforceUserAccess();
 
         adminLogger.warn("更新用户状态", {
-          admin: req.currentUser?.username || "",
-          username,
+          admin: req.currentUser?.id || "",
+          userId,
           enabled: user && user.card ? user.card.enabled !== false : null,
           expiresAt: user && user.card ? user.card.expiresAt || null : null,
           confirmation: "UPDATE_USER_STATUS",
         });
         res.json({ ok: true, data: user });
       } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
+        res.status(error.status || 500).json({ ok: false, error: error.message });
       }
     },
   );
 
   app.post(
-    "/api/admin/users/:username/edit",
+    "/api/admin/users/:userId/edit",
     requireAdminToken,
     requireAdminRole,
-    (req, res) => {
+    async (req, res) => {
       try {
         if (!requireDangerConfirmation(req, res, "EDIT_USER")) return;
-        const { username } = req.params;
+        const userId = parseUserId(req.params.userId);
         const mutationError = getAdminUserMutationError(
           req.currentUser,
-          username,
+          userId,
         );
         if (mutationError) {
           return res.status(403).json({ ok: false, error: mutationError });
@@ -100,7 +109,7 @@ function registerAdminUserRoutes({
           expiresAt,
           isPermanent,
         } = req.body || {};
-        const result = userStore.editUser(username, {
+        const result = userStore.editUser(userId, {
           newUsername,
           password,
           accountLimit,
@@ -108,11 +117,13 @@ function registerAdminUserRoutes({
           isPermanent,
         });
         if (!result.ok) return res.status(400).json(result);
+        if (password) invalidateAdminSessions(session => session.id === userId);
+        if (enforceUserAccess) await enforceUserAccess();
 
         adminLogger.warn("编辑用户资料", {
-          admin: req.currentUser?.username || "",
-          username,
-          newUsername: result.user?.username || username,
+          admin: req.currentUser?.id || "",
+          userId,
+          newUsername: result.user?.username,
           changedPassword: !!String(password || "").trim(),
           accountLimit: result.user?.accountLimit || accountLimit || null,
           isPermanent: isPermanent === true,
@@ -121,7 +132,7 @@ function registerAdminUserRoutes({
         });
         updateAdminSessions(
           (session) =>
-            session.username === username || session.username === newUsername,
+            session.id === userId,
           (session) => {
             session.username = result.user.username;
             session.card = result.user.card;
@@ -130,65 +141,64 @@ function registerAdminUserRoutes({
         );
         res.json({ ok: true, data: result.user });
       } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
+        res.status(error.status || 500).json({ ok: false, error: error.message });
       }
     },
   );
 
   app.delete(
-    "/api/admin/users/:username",
+    "/api/admin/users/:userId",
     requireAdminToken,
     requireAdminRole,
-    (req, res) => {
+    async (req, res) => {
       try {
         if (!requireDangerConfirmation(req, res, "DELETE_USER")) return;
-        const { username } = req.params;
+        const userId = parseUserId(req.params.userId);
         const currentUser = req.currentUser;
-        if (currentUser && currentUser.username === username) {
+        if (currentUser && currentUser.id === userId) {
           return res
             .status(400)
             .json({ ok: false, error: "不能删除自己的账号" });
         }
 
-        const mutationError = getAdminUserMutationError(currentUser, username);
+        const mutationError = getAdminUserMutationError(currentUser, userId);
         if (mutationError) {
           return res.status(403).json({ ok: false, error: mutationError });
         }
 
-        const result = userStore.deleteUser(username, true);
+        const result = await deleteUserData(userId);
         if (!result.ok) return res.status(400).json(result);
 
         adminLogger.warn("删除用户", {
-          admin: req.currentUser?.username || "",
-          username,
+          admin: req.currentUser?.id || "",
           confirmation: "DELETE_USER",
         });
-        invalidateAdminSessions((session) => session.username === username);
+        invalidateAdminSessions((session) => session.id === userId);
         res.json({ ok: true });
       } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
+        res.status(error.status || 500).json({ ok: false, error: error.message });
       }
     },
   );
 
   app.post(
-    "/api/admin/users/:username/renew",
+    "/api/admin/users/:userId/renew",
     requireAdminToken,
     requireAdminRole,
     (req, res) => {
       try {
         if (!requireDangerConfirmation(req, res, "RENEW_USER")) return;
-        const { username } = req.params;
+        const userId = parseUserId(req.params.userId);
         const { cardCode } = req.body || {};
         if (!cardCode) {
           return res.status(400).json({ ok: false, error: "请提供卡密" });
         }
 
-        const result = userStore.renewUser(username, cardCode);
+        const result = userStore.renewUser(userId, cardCode);
         if (!result.ok) return res.status(400).json(result);
 
         updateAdminSessions(
-          (session) => session.username === username,
+          (session) => session.id === userId,
           (session) => {
             session.card = result.card;
             session.accountLimit = result.accountLimit;
@@ -200,8 +210,8 @@ function registerAdminUserRoutes({
           cardType: result.cardType,
         };
         adminLogger.warn("用户续费", {
-          admin: req.currentUser?.username || "",
-          username,
+          admin: req.currentUser?.id || "",
+          userId,
           cardCode,
           cardType: result.cardType || null,
           accountLimit: result.accountLimit ?? null,
@@ -209,7 +219,7 @@ function registerAdminUserRoutes({
         });
         res.json({ ok: true, data });
       } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
+        res.status(error.status || 500).json({ ok: false, error: error.message });
       }
     },
   );

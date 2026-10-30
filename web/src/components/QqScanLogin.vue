@@ -64,7 +64,7 @@ async function saveCode(version = generation) {
     return
   saving.value = true
   error.value = ''
-  message.value = '已获取 Code，正在识别并保存账号…'
+  message.value = '正在保存账号…'
   try {
     const { data } = await api.post(`/api/qq-login/sessions/${encodeURIComponent(sessionId.value)}/import`, {
       name: accountName.value.trim(),
@@ -77,8 +77,8 @@ async function saveCode(version = generation) {
     saved.value = true
     stage.value = 'success'
     message.value = data.data?.updated
-      ? '已更新原账号 Code 并请求连接，原账号 ID 和设置已保留；QQ 登录态已保存，可用于失效后自动取码'
-      : '账号已添加并请求启动，QQ 登录态已保存，可用于失效后自动取码'
+      ? '已更新原账号，正在连接'
+      : '账号已添加，正在连接'
     const finalCode = String(data.data?.code || newestCode.value)
     if (finalCode !== newestCode.value) {
       // The identity check can consume the initial credential. Display only
@@ -97,8 +97,8 @@ async function saveCode(version = generation) {
   catch (value: any) {
     if (stopped || version !== generation)
       return
-    error.value = requestError(value, '账号保存结果未确认，请先检查账号列表；Code 已保留，可复制或重试')
-    message.value = '已获取 Code，账号尚未确认保存'
+    error.value = requestError(value, '保存未确认，请检查账号列表')
+    message.value = '待确认保存'
   }
   finally { saving.value = false }
 }
@@ -122,7 +122,7 @@ async function poll(version: number, signal: AbortSignal) {
       if (stage.value === 'success') {
         const code = String(state.code || '')
         if (!/^[\w.~+/=%-]{8,2048}$/.test(code) || /^[-+]?\d+$/.test(code)) {
-          error.value = 'QQ 未返回有效 Code，请重新生成二维码'
+          error.value = 'QQ 未返回有效 Code，请刷新二维码'
           stage.value = 'error'
           return
         }
@@ -143,7 +143,7 @@ async function poll(version: number, signal: AbortSignal) {
       if (signal.aborted || stopped || version !== generation)
         return
       if ([404, 410].includes(value?.response?.status) || ++failures >= 4) {
-        error.value = requestError(value, '查询 QQ 扫码状态失败，请重新生成二维码')
+        error.value = requestError(value, '查询 QQ 扫码状态失败，请刷新二维码')
         stage.value = 'error'
         return
       }
@@ -262,15 +262,13 @@ onBeforeUnmount(() => {
         <option v-for="profile in proxyProfiles" :key="profile.id" :value="String(profile.id)">{{ profile.name }}</option>
       </select>
     </label>
-    <p class="text-sm opacity-70" :style="{ color: 'var(--theme-text)' }">
+    <p v-if="!saved" class="text-sm opacity-70" :style="{ color: 'var(--theme-text)' }">
       <template v-if="account">
-        请使用此账号对应的手机 QQ 扫码。验证成功后更新原账号并重连，保留原账号 ID、备注和设置；扫码账号不符时不会保存。
+        请用原 QQ 扫码。
       </template>
       <template v-else>
-        扫码后自动识别账号：已有账号更新 Code，新账号自动添加。
+        请用手机 QQ 扫码。
       </template>
-      所选代理用于扫码、取码及游戏连接。
-      本次确认会保存独立 QQ 登录态，Code 失效后自动重新取码；QQ 登录态失效时需要重扫。
     </p>
     <div v-if="image && !saved" class="mx-auto max-w-60 w-full border border-gray-200 rounded-lg bg-white p-3">
       <img :src="image" alt="QQ 登录二维码" class="aspect-square w-full object-contain" width="224" height="224">
@@ -302,10 +300,10 @@ onBeforeUnmount(() => {
         {{ saved ? '完成' : '取消' }}
       </BaseButton>
       <BaseButton v-if="newestCode && !saved" variant="primary" :loading="saving" @click="saveCode()">
-        重试保存账号
+        重试保存
       </BaseButton>
       <BaseButton v-if="!account || !saved" variant="primary" :disabled="saving" :loading="stage === 'starting'" @click="proxyReady ? start() : loadProxyOptions()">
-        {{ !proxyReady ? '重试读取代理配置' : saved ? '再扫一个账号' : '重新生成二维码' }}
+        {{ !proxyReady ? '重试加载' : saved ? '再扫一个账号' : '刷新二维码' }}
       </BaseButton>
     </div>
     <div class="text-right text-xs opacity-50" :style="{ color: 'var(--theme-text)' }">

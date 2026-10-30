@@ -147,7 +147,7 @@ const bagPriorityLandTypeOptions = [
           label="优先种植 2×2 作物"
         />
         <p class="mt-2 text-xs text-emerald-700/90 leading-5 dark:text-emerald-300/90">
-          开启后会根据背包中的四格种子预留完整 2×2 区域；预留区收获后暂不补种普通作物，四块全部空闲时自动种植。四格种子不会从商城购买。
+          预留 2×2 空地，仅种背包四格种子。
         </p>
       </div>
 
@@ -178,7 +178,7 @@ const bagPriorityLandTypeOptions = [
             </label>
           </div>
           <p class="mt-2 text-xs text-violet-700/90 leading-5 dark:text-violet-300/90">
-            仅在勾选的品质地块上按背包种子优先级种植；未勾选地块、以及背包种子用完后剩余的空地，都会按上方"第二优先策略"种植。默认全选表示不限制。
+            所选土地优先用背包种子，其余用第二策略。
           </p>
         </div>
 

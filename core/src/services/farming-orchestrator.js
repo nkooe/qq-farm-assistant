@@ -8,8 +8,9 @@ const { getAllLands, harvest, farming, unlockLand, upgradeLand } = require('./fa
 const { analyzeLands, resolveRemovableHarvestedLands } = require('./farm-land-analyzer');
 const { runFertilizerByConfig } = require('./farm-fertilizer');
 const { autoPlantEmptyLands } = require('./planting-service');
-const { startFertilizerBuyCheckTimer, stopFertilizerBuyCheckTimer } = require('./farm-scheduler');
+const { startFertilizerBuyCheckTimer, stopFertilizerBuyCheckTimer, refreshFertilizerBuyCheckTimer } = require('./farm-scheduler');
 const { startMysteryAutoBuyTimer, stopMysteryAutoBuyTimer } = require('./mystery-scheduler');
+const { farmOperationGuard } = require('./farm-operation-guard');
 
 // ─── 状态标记 ───
 
@@ -30,7 +31,7 @@ const farmScheduler = createScheduler('farm');
  */
 async function checkFarm() {
   const userState = getUserState();
-  if (isCheckingFarm || !userState.gid || !isAutomationOn('farm') || !isConnected()) {
+  if (isCheckingFarm || farmOperationGuard.isPending() || !userState.gid || !isAutomationOn('farm') || !isConnected()) {
     return false;
   }
 
@@ -54,6 +55,10 @@ async function checkFarm() {
  * @param {string} opType - 操作类型：'all' | 'harvest' | 'plant' | 'clear' | 'upgrade'
  */
 async function runFarmOperation(opType) {
+  return farmOperationGuard.run(() => performFarmOperation(opType));
+}
+
+async function performFarmOperation(opType) {
   const landsReply = await getAllLands();
   if (!landsReply.lands || landsReply.lands.length === 0) {
     if (opType !== 'all') log('农场', '没有土地数据');
@@ -314,6 +319,7 @@ function stopFarmCheckLoop() {
 
 function refreshFarmCheckLoop(delayMs = 0) {
   if (!farmLoopRunning) return;
+  refreshFertilizerBuyCheckTimer();
   shouldRefresh2x2Plan = true;
   scheduleNextFarmCheck(delayMs);
 }

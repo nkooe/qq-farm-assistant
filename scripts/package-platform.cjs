@@ -22,7 +22,7 @@ const copy = (relative, destination = relative, options = {}) => {
 try {
   for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'UPDATE_README.md', 'docker-compose.yml', '.dockerignore', 'start.bat', 'tingzhi.bat', 'start.sh', 'stop.sh']) copy(file);
   for (const file of ['client.js', 'package.json', 'src', 'docker', 'Dockerfile', 'share.txt']) copy('core/' + file);
-  for (const file of ['host.mjs', 'qq-native-login.mjs', 'patch-napcat.cjs', 'farm-identity-worker.cjs', 'electron-launcher.cjs', 'install-linux.sh', 'licenses']) copy('core/qq-login/' + file);
+  for (const file of ['host.mjs', 'qq-native-login.mjs', 'patch-napcat.cjs', 'electron-launcher.cjs', 'install-linux.sh', 'licenses']) copy('core/qq-login/' + file);
   copy('scripts');
   copy('core/test');
   copy('web/dist');

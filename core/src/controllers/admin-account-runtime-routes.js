@@ -17,9 +17,10 @@ function registerAdminAccountRuntimeRoutes({
         return res.json({ ok: true, data: { runtime, yyb: null, supported: false } });
       }
       const { apiBase, apiKey } = resolveYybCreds();
+      const headers = require('../services/user-identity').trustedUserHeaders(account.userId);
       const [service, credentials] = await Promise.all([
-        callYybApi(apiBase, '/health', apiKey, { signal: AbortSignal.timeout(4000) }),
-        callYybApi(apiBase, `/accounts/health?ref=${encodeURIComponent(account.yybOpenid)}`, apiKey, { signal: AbortSignal.timeout(4000) }),
+        callYybApi(apiBase, '/health', apiKey, { headers, signal: AbortSignal.timeout(4000) }),
+        callYybApi(apiBase, `/accounts/health?ref=${encodeURIComponent(account.yybOpenid)}`, apiKey, { headers, signal: AbortSignal.timeout(4000) }),
       ]);
       return res.json({ ok: true, data: {
         runtime, supported: true,

@@ -1,43 +1,9 @@
 const { getAccessPolicy, getUserAccessRejection } = require('../models/access-policy');
 
 function getClientIp(req) {
-  const cfIp = req.headers["cf-connecting-ip"];
-  if (cfIp) return cfIp.trim();
-
-  const realIp = req.headers["x-real-ip"];
-  if (realIp) return realIp.trim();
-
-  const forwardedFor = req.headers["x-forwarded-for"];
-  if (forwardedFor) {
-    const candidates = forwardedFor
-      .split(",")
-      .map((item) => item.trim())
-      .filter(Boolean);
-    if (candidates.length > 0) return candidates[0];
-  }
-
-  if (req.ip && req.ip !== "::1" && req.ip !== "::ffff:127.0.0.1")
-    return req.ip;
-
-  const remoteAddress =
-    req.connection?.remoteAddress || req.socket?.remoteAddress;
+  const remoteAddress = req.socket?.remoteAddress;
   if (remoteAddress?.startsWith("::ffff:")) return remoteAddress.substring(7);
   return remoteAddress || "unknown";
-}
-
-function isTrustedLocalIp(ip) {
-  // 免登录仅对可信来源开放：本机回环 + 局域网私网段（部署在公网时勿用此接口）
-  if (!ip) return false;
-  const clean = String(ip).replace(/^::ffff:/, "");
-  if (clean === "127.0.0.1" || clean === "::1" || clean === "localhost") return true;
-  const parts = clean.split(".");
-  if (parts.length !== 4) return false;
-  const a = Number(parts[0]);
-  const b = Number(parts[1]);
-  if (a === 10) return true;                 // 10.0.0.0/8
-  if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-  if (a === 192 && b === 168) return true;   // 192.168.0.0/16
-  return false;
 }
 
 function registerAdminAuthRoutes({
@@ -47,46 +13,12 @@ function registerAdminAuthRoutes({
   requireAdminToken,
   createAdminSession,
   updateAdminSessions,
+  invalidateAdminSessions,
 }) {
   app.get('/api/public/access-policy', (_req, res) => {
     res.set('Cache-Control', 'no-store');
     res.json({ ok: true, data: getAccessPolicy() });
   });
-  // 本机/局域网免登录直登：仅对可信来源开放，自动以 admin 身份签发 token。
-  // 用于"打开面板直接进首页"，避免每次手动登录。公网部署请勿暴露此接口。
-  app.post("/api/auto-login", (req, res) => {
-    try {
-      const ip = getClientIp(req);
-      if (!isTrustedLocalIp(ip)) {
-        return res.status(403).json({ ok: false, error: "仅限本机或局域网访问" });
-      }
-      const users = userStore.getAllUsers();
-      const admin = users.find((u) => u.role === "admin");
-      if (!admin) {
-        return res.status(500).json({ ok: false, error: "未找到管理员账号" });
-      }
-      const token = createAdminSession({
-        username: admin.username,
-        role: admin.role,
-        card: admin.card || null,
-        accountLimit: admin.accountLimit || userStore.DEFAULT_ACCOUNT_LIMIT || 2,
-      });
-      logger.info("免登录直登", { username: admin.username, ip });
-      return res.json({
-        ok: true,
-        data: {
-          token,
-          role: admin.role,
-          accountLimit: admin.accountLimit || userStore.DEFAULT_ACCOUNT_LIMIT || 2,
-          user: { username: admin.username },
-        },
-      });
-    } catch (error) {
-      logger.error("免登录直登失败", { error: error.message });
-      res.status(500).json({ ok: false, error: error.message });
-    }
-  });
-
   app.post("/api/login", (req, res) => {
     const { username, password } = req.body || {};
     const ip = getClientIp(req);
@@ -97,6 +29,7 @@ function registerAdminAuthRoutes({
     }
 
     const validationResult = userStore.validateUser(username, password, ip);
+    const loginUserId = userStore.getUserByUsername(username)?.id ?? null;
     if (validationResult && validationResult.error) {
       const status =
         validationResult.error === "rate_limit"
@@ -105,7 +38,7 @@ function registerAdminAuthRoutes({
             ? 423
             : 401;
       logger.warn("登录失败", {
-        username,
+        userId: loginUserId,
         error: validationResult.error,
         ip,
         message: validationResult.message,
@@ -127,7 +60,7 @@ function registerAdminAuthRoutes({
 
     if (!validationResult) {
       logger.warn("登录失败", {
-        username,
+        userId: loginUserId,
         ip,
         reason: "invalid_credentials",
       });
@@ -143,7 +76,7 @@ function registerAdminAuthRoutes({
 
     const rejection = getUserAccessRejection(validationResult);
     if (rejection) {
-      logger.warn("登录拒绝", { username, reason: rejection.reason });
+      logger.warn("登录拒绝", { userId: validationResult.id, reason: rejection.reason });
       return res.status(403).json({ ok: false, error: rejection.error, errorType: rejection.reason });
     }
 
@@ -158,7 +91,7 @@ function registerAdminAuthRoutes({
         cardVerificationEnabled: getAccessPolicy().cardVerificationEnabled,
         accountLimit:
           validationResult.accountLimit || userStore.DEFAULT_ACCOUNT_LIMIT || 2,
-        user: { username: validationResult.username },
+        user: { id: validationResult.id, username: validationResult.username },
         mustChangePassword: validationResult.mustChangePassword || false,
       },
     });
@@ -209,19 +142,19 @@ function registerAdminAuthRoutes({
 
   app.post("/api/user/renew", requireAdminToken, (req, res) => {
     const { cardCode } = req.body || {};
-    const username = req.currentUser?.username;
-    if (!username) {
+    const userId = req.currentUser?.id;
+    if (!userId) {
       return res.status(401).json({ ok: false, error: "未登录" });
     }
     if (!cardCode) {
       return res.status(400).json({ ok: false, error: "请提供卡密" });
     }
 
-    const result = userStore.renewUser(username, cardCode);
+    const result = userStore.renewUser(userId, cardCode);
     if (!result.ok) return res.status(400).json(result);
 
     updateAdminSessions(
-      (session) => session.username === username,
+      (session) => session.id === userId,
       (session) => {
         session.card = result.card;
         session.accountLimit = result.accountLimit;
@@ -240,32 +173,33 @@ function registerAdminAuthRoutes({
   app.post("/api/public/renew", (req, res) => {
     try {
       const ip = getClientIp(req);
-      const rateLimit = userStore.checkRateLimit(ip);
-      if (!rateLimit.allowed) {
-        return res.status(429).json({
-          ok: false,
-          error: rateLimit.message,
-          errorType: "rate_limit",
-          remainingMs: rateLimit.remainingMs,
-        });
-      }
-
-      const { username, cardCode } = req.body || {};
-      if (!username) {
-        return res.status(400).json({ ok: false, error: "请提供用户名" });
+      const { username, password, cardCode } = req.body || {};
+      if (typeof username !== 'string' || !username || typeof password !== 'string' || !password) {
+        return res.status(400).json({ ok: false, error: "请提供用户名和账号密码" });
       }
       if (!cardCode) {
         return res.status(400).json({ ok: false, error: "请提供卡密" });
       }
 
-      const result = userStore.renewUser(username, cardCode);
+      // Expired users can prove their identity without receiving a panel session.
+      const user = userStore.validateUser(username, password, ip);
+      if (!user || user.error) {
+        return res.status(user?.error === 'rate_limit' ? 429 : user?.error === 'locked' ? 423 : 401).json({
+          ok: false, error: user?.message || '用户名或密码错误', errorType: user?.error,
+          remainingMs: user?.remainingMs,
+        });
+      }
+      if (user.role !== 'user' || user.deleting || user.card?.enabled === false) {
+        return res.status(403).json({ ok: false, error: '该账号不支持公开续费，请联系管理员' });
+      }
+      const result = userStore.renewUser(user.id, cardCode);
       if (!result.ok) return res.status(400).json(result);
 
-      logger.info("公开续费成功", { username, cardType: result.cardType, ip });
+      logger.info("公开续费成功", { userId: user.id, cardType: result.cardType, ip });
       res.json({
         ok: true,
         data: {
-          card: result.card,
+          card: result.card ? Object.fromEntries(Object.entries(result.card).filter(([key]) => !['code', 'description'].includes(key))) : null,
           accountLimit: result.accountLimit,
           cardType: result.cardType,
         },
@@ -330,7 +264,9 @@ function registerAdminAuthRoutes({
       );
       if (!result.ok) return res.status(400).json(result);
 
-      logger.info("找回密码重置成功", { username, ip });
+      const userId = userStore.getUserByUsername(username).id;
+      invalidateAdminSessions(session => session.id === userId);
+      logger.info("找回密码重置成功", { userId, ip });
       res.json({ ok: true, message: result.message });
     } catch (error) {
       logger.error("找回密码重置失败", { error: error.message });
@@ -340,15 +276,16 @@ function registerAdminAuthRoutes({
 
   app.post("/api/user/change-password", requireAdminToken, (req, res) => {
     const { oldPassword, newPassword } = req.body || {};
-    const username = req.currentUser?.username;
-    if (!username) {
+    const userId = req.currentUser?.id;
+    if (!userId) {
       return res.status(401).json({ ok: false, error: "未登录" });
     }
     if (!oldPassword || !newPassword) {
       return res.status(400).json({ ok: false, error: "请提供原密码和新密码" });
     }
 
-    const result = userStore.changePassword(username, oldPassword, newPassword);
+    const result = userStore.changePassword(userId, oldPassword, newPassword);
+    if (result.ok) invalidateAdminSessions(session => session.id === userId);
     res.json(result);
   });
 }

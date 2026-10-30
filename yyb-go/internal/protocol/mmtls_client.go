@@ -321,8 +321,8 @@ func (m *mmtlsClient) recvApp() (shortlinkPacket, error) {
 	return parseShortlink(pt)
 }
 
-func connectMmtls(ctx context.Context, target Target, timeout time.Duration, tcpProxy string, fallbackDirect bool) (*mmtlsClient, error) {
-	conn, err := dialTCP(ctx, target.IP, target.Port, timeout, tcpProxy, fallbackDirect)
+func connectMmtls(ctx context.Context, target Target, timeout time.Duration, tcpProxy string) (*mmtlsClient, error) {
+	conn, err := dialTCP(ctx, target.IP, target.Port, timeout, tcpProxy)
 	if err != nil {
 		return nil, err
 	}

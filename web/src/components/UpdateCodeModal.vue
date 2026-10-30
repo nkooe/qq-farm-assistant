@@ -84,7 +84,7 @@ async function paste() {
           <template v-else>（离线，将用新 Code 启动）</template>
         </p>
         <p class="mt-2 text-xs leading-relaxed opacity-60" :style="{ color: 'var(--theme-text)' }">
-          登录失效后，粘贴新的登录 Code 即可更新账号并自动重连。应用宝账号也可使用“应用宝扫码更新”。
+          粘贴新 Code 后重连，也可扫码更新。
         </p>
         <div class="mt-3 flex gap-2">
           <input

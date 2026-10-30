@@ -510,7 +510,7 @@ function getFriendStatusHint(friend: any) {
     return `当前可偷 ${plant.stealNum} 块地，适合优先展开查看。`
   if (Number(plant.dryNum || 0) > 0 || Number(plant.weedNum || 0) > 0 || Number(plant.insectNum || 0) > 0)
     return '当前有可帮忙状态，可展开查看浇水、除草和除虫详情。'
-  return '当前没有明显的手动互动提示，可先作为普通好友资料查看。'
+  return '暂无互动提示。'
 }
 
 function getFriendLevel(friend: any) {
@@ -933,7 +933,7 @@ async function handleBatchAddKnownFriendGids() {
 
         <div class="rounded-lg bg-white p-4 shadow dark:bg-gray-800">
           <p class="text-sm text-gray-500 dark:text-gray-400">
-            加入黑名单的好友默认在自动偷菜和帮助时都会被跳过，也可单独关闭「不偷」或「不帮忙」中的某一项。
+            黑名单默认不偷、不帮，可单独调整。
           </p>
         </div>
 
@@ -943,7 +943,7 @@ async function handleBatchAddKnownFriendGids() {
             暂无黑名单好友
           </div>
           <p class="mt-2 text-sm text-gray-400">
-            被加入黑名单的好友会在自动偷菜和帮助时被跳过，只有明确不想互动的对象才建议放进来。
+            黑名单默认跳过偷菜与帮助。
           </p>
         </div>
 
@@ -1078,7 +1078,7 @@ async function handleBatchAddKnownFriendGids() {
             暂无访客记录
           </div>
           <p class="mt-2 text-sm text-gray-400">
-            有新访客后会同步展示在这里，QQ 账号也会用它补充已知 GID；如果这里长期为空，好友同步也会相对受限。
+            新访客会自动补充到好友同步列表。
           </p>
         </div>
 
@@ -1133,7 +1133,7 @@ async function handleBatchAddKnownFriendGids() {
 
       <div v-else-if="activeTab === 'delete'" class="space-y-4">
         <div class="rounded-lg bg-amber-50 p-3 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
-          删除为不可恢复操作，请谨慎操作。护主犬标记依赖已获取的狗信息：若列表未准确显示护主犬，请先到「好友列表」页点击「获取狗信息」再回来筛选。
+          删除不可恢复。护主犬筛选前请先获取狗信息。
         </div>
 
         <div class="flex flex-col items-center justify-center rounded-lg bg-white p-10 text-center shadow dark:bg-gray-800">
@@ -1142,7 +1142,7 @@ async function handleBatchAddKnownFriendGids() {
             一键删除好友
           </div>
           <p class="mt-2 max-w-md text-sm text-gray-400">
-            按等级批量删除好友，可选择保留有护主犬的好友，并需要二级密码验证身份。
+            按等级删除，需验证二级密码。
           </p>
           <button
             class="mt-5 rounded-lg px-5 py-2.5 text-sm text-white transition"

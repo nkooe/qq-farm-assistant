@@ -14,7 +14,7 @@ const { createLoginRecovery } = require('../services/login-recovery');
 
 function getRestorableAccounts(accounts) {
     return (Array.isArray(accounts) ? accounts : [])
-        .filter(account => account && account.autoStart !== false);
+        .filter(account => account && account.autoStart === true && !account.deleting);
 }
 
 /** 操作类型键列表 */
@@ -95,6 +95,7 @@ function createRuntimeEngine(options = {}) {
         getWorkerRuntime,
         startWorker,
         stopWorker,
+        stopWorkerAndWait,
         restartWorker,
         refreshYybCodeIfNeeded,
         callWorkerApi
@@ -116,7 +117,7 @@ function createRuntimeEngine(options = {}) {
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
         addOrUpdateAccount: store.addOrUpdateAccount,
-        deleteAccount: store.deleteAccount,
+        deleteAccount: id => engine.deleteAccount(id),
         refreshQqCode: (account, options) => require('../services/qq-login-service').getQqLoginService().refreshAccountCode(account, options),
         onStatusSync: (accountId, status, accountName) => {
             runtimeEvents.emit('status', { accountId, status, accountName });
@@ -149,6 +150,7 @@ function createRuntimeEngine(options = {}) {
         broadcastConfigToWorkers,
         startWorker,
         stopWorker,
+        stopWorkerAndWait,
         restartWorker,
         refreshYybCodeIfNeeded,
         scheduleAutoCodeRefresh: autoCodeRefresh.scheduleAccount,
@@ -156,6 +158,9 @@ function createRuntimeEngine(options = {}) {
         refreshAccountCode: autoCodeRefresh.refreshAccountCode
     };
     const dataProvider = createDataProvider(dataProviderDeps);
+    engine.deleteAccount = dataProvider.deleteAccount;
+    let restoreGeneration = 0;
+    let restoreTask = null;
 
     // 绑定全局日志事件
     runtimeEvents.on('log', (entry) => {
@@ -200,20 +205,29 @@ function createRuntimeEngine(options = {}) {
         return { sent, failed };
     }
 
-    /** 恢复上次仍处于运行状态的账号；旧数据没有 autoStart 时按运行恢复。 */
-    async function startAllAccounts() {
-        const accounts = store.getAccounts().accounts || [];
-        const restorable = getRestorableAccounts(accounts);
-        if (restorable.length > 0) {
-            log('系统', `发现 ${restorable.length} 个需恢复运行的账号，正在启动...`);
-            for (const acc of restorable) {
-                await startWorker(acc);
+    /** Restore only the current, explicitly enabled records, never a stale boot snapshot. */
+    function startAllAccounts() {
+        if (restoreTask) return restoreTask;
+        const generation = restoreGeneration;
+        const operation = Promise.resolve().then(async () => {
+            const accounts = store.getAccounts().accounts || [];
+            const restorable = getRestorableAccounts(accounts);
+            if (restorable.length > 0) {
+                log('系统', `发现 ${restorable.length} 个需恢复运行的账号，正在启动...`);
+                for (const previous of restorable) {
+                    if (generation !== restoreGeneration) break;
+                    const current = store.getAccounts().accounts.find(account => account.id === previous.id);
+                    if (!current || current.autoStart !== true || current.deleting) continue;
+                    await startWorker(current, { automatic: true });
+                }
+            } else if (accounts.length > 0) {
+                log('系统', '所有账号上次均已停止，不自动启动');
+            } else {
+                log('系统', '未发现账号，请访问管理面板添加账号');
             }
-        } else if (accounts.length > 0) {
-            log('系统', '所有账号上次均已停止，不自动启动');
-        } else {
-            log('系统', '未发现账号，请访问管理面板添加账号');
-        }
+        }).finally(() => { if (restoreTask === operation) restoreTask = null; });
+        restoreTask = operation;
+        return operation;
     }
 
     /** 引擎启动入口 */
@@ -235,13 +249,15 @@ function createRuntimeEngine(options = {}) {
         }
 
         if (shouldAutoStart) {
-            startAllAccounts();
+            void startAllAccounts().catch(error => log('错误', `恢复账号启动失败: ${error.message}`));
         }
         autoCodeRefresh.rescheduleAll();
     }
 
     /** 停止所有账号 */
     function stopAllAccounts() {
+        restoreGeneration++;
+        restoreTask = null;
         autoCodeRefresh.close();
         loginRecovery.clear();
         const ids = new Set([...Object.keys(workers), ...store.getAccounts().accounts.map(account => account.id)]);

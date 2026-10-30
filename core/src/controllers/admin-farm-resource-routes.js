@@ -1,4 +1,5 @@
 const { getLevelExpProgress } = require("../config/gameConfig");
+const { normalizeFertilizerCheckOptions } = require("../services/mall");
 
 function sendMissingAccount(res, statusCode = 400) {
   const payload = { ok: false, error: "Missing x-account-id" };
@@ -26,17 +27,6 @@ function withLevelProgress(statusPayload) {
     statusPayload.levelProgress = getLevelExpProgress(level, exp);
   }
   return statusPayload;
-}
-
-function getFertilizerCheckOptions(body = {}) {
-  return {
-    buyOrganic: body.buyOrganic ?? false,
-    buyNormal: body.buyNormal ?? false,
-    organicCount: Number(body.organicCount) || 0,
-    organicThresholdHours: Number(body.organicThresholdHours) || 0,
-    normalCount: Number(body.normalCount) || 0,
-    normalThresholdHours: Number(body.normalThresholdHours) || 0,
-  };
 }
 
 function registerAdminFarmResourceRoutes({
@@ -83,8 +73,9 @@ function registerAdminFarmResourceRoutes({
       return;
 
     try {
-      const type = String(req.body?.type || "organic");
-      const count = Number(req.body?.count) || 0;
+      const { type, count } = req.body || {};
+      if (!["organic", "normal"].includes(type) || !Number.isSafeInteger(count) || count <= 0)
+        return res.status(400).json({ ok: false, error: "化肥类型或购买数量无效" });
       const bought = await provider.buyFertilizer(accountId, type, count);
       res.json({ ok: true, bought });
     }
@@ -98,10 +89,13 @@ function registerAdminFarmResourceRoutes({
     if (!accountId)
       return;
 
+    let options;
+    try { options = normalizeFertilizerCheckOptions(req.body); }
+    catch (error) { return res.status(400).json({ ok: false, error: error.message }); }
     try {
       const result = await provider.checkAndBuyFertilizer(
         accountId,
-        getFertilizerCheckOptions(req.body),
+        options,
       );
       res.json({ ok: true, ...result });
     }

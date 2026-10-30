@@ -74,10 +74,6 @@ function openCareerModal() {
 // 关闭下拉（点击外部）
 onMounted(() => {
   document.addEventListener('click', closeAccountDropdown)
-  // 初始化主题
-  if (localStorage.getItem('theme-override') === 'dark') {
-    document.documentElement.classList.add('dark')
-  }
 })
 onUnmounted(() => {
   document.removeEventListener('click', closeAccountDropdown)

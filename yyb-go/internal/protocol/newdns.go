@@ -59,7 +59,7 @@ func requestNewDNS(ctx context.Context, connectTo string, timeout time.Duration,
 	if host == "" {
 		host = newdnsHost
 	}
-	conn, err := dialTCP(ctx, host, 80, timeout, tcpProxy, false)
+	conn, err := dialTCP(ctx, host, 80, timeout, tcpProxy)
 	if err != nil {
 		return 0, nil, "", err
 	}

@@ -181,9 +181,7 @@ function generateMachineId() {
         return hash.substring(0, 16);
     }
 
-    const fallback = os.hostname() + String(os.totalmem()) + (os.cpus()[0]?.model || '');
-    const hash = crypto.createHash('sha256').update(fallback).digest('hex').toUpperCase();
-    return hash.substring(0, 16);
+    throw new Error('未获取到系统稳定设备标识');
 }
 
 function getMachineIdDisplay() {
@@ -195,8 +193,8 @@ function getIdentifierInfo() {
     const identifier = getStableIdentifier();
     return {
         platform: process.platform,
-        type: identifier?.type || 'fallback',
-        value: identifier?.value || null,
+        type: identifier.type,
+        value: identifier.value,
         machineId: generateMachineId(),
         displayId: getMachineIdDisplay(),
     };

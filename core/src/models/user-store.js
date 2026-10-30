@@ -2,7 +2,11 @@ const fs = require('fs');
 const path = require('path');
 const { getDataFile, ensureDataDir } = require('../config/runtime-paths');
 const crypto = require('crypto');
-const { getAccessPolicy } = require('./access-policy');
+const { getAccessPolicy, getUserAccessRejection } = require('./access-policy');
+const { readJsonFileStrict, writeJsonFileAtomic, storageError } = require('../services/json-db');
+const { ADMIN_USER_ID, assertUserId, isUserIdentity } = require('./user-id');
+const { createIdentityTransaction } = require('../services/identity-transaction');
+const USER_SCHEMA_VERSION = 3;
 
 // ==================== 文件路径 ====================
 
@@ -10,6 +14,8 @@ const USERS_FILE = getDataFile('users.json');
 const CARDS_FILE = getDataFile('cards.json');
 const LOGIN_ATTEMPTS_FILE = getDataFile('login-attempts.json');
 const CARD_CLAIM_FILE = getDataFile('card-claim.json');
+const identityTransaction = createIdentityTransaction(path.dirname(USERS_FILE));
+identityTransaction.recover();
 
 // ==================== 常量 ====================
 
@@ -39,24 +45,13 @@ const IP_LOCKOUT_DURATION = 10 * 60 * 1000;     // 10 分钟
 let loginAttempts = {};
 
 function loadLoginAttempts() {
-    try {
-        ensureDataDir();
-        if (fs.existsSync(LOGIN_ATTEMPTS_FILE)) {
-            const data = JSON.parse(fs.readFileSync(LOGIN_ATTEMPTS_FILE, 'utf8'));
-            loginAttempts = data || {};
-        }
-    } catch {
-        loginAttempts = {};
-    }
+    const data = readJsonFileStrict(LOGIN_ATTEMPTS_FILE, () => ({}));
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('登录限制记录格式无效');
+    loginAttempts = data;
 }
 
 function saveLoginAttempts() {
-    try {
-        ensureDataDir();
-        fs.writeFileSync(LOGIN_ATTEMPTS_FILE, JSON.stringify(loginAttempts, null, 2), 'utf8');
-    } catch (err) {
-        console.error('保存登录尝试记录失败:', err.message);
-    }
+    writeJsonFileAtomic(LOGIN_ATTEMPTS_FILE, loginAttempts);
 }
 
 function cleanExpiredAttempts() {
@@ -133,10 +128,10 @@ function checkRateLimit(ip) {
     return { allowed: true };
 }
 
-function checkAccountLockout(username) {
+function checkAccountLockout(userId) {
     cleanExpiredAttempts();
 
-    const key = `user:${  username}`;
+    const key = `user:${userId}`;
     const now = Date.now();
 
     if (loginAttempts[key] && loginAttempts[key].lockedUntil) {
@@ -156,8 +151,8 @@ function checkAccountLockout(username) {
     return { locked: false };
 }
 
-function recordFailedAttempt(username) {
-    const key = `user:${  username}`;
+function recordFailedAttempt(userId) {
+    const key = `user:${userId}`;
     const now = Date.now();
 
     if (!loginAttempts[key]) {
@@ -183,8 +178,8 @@ function recordFailedAttempt(username) {
     };
 }
 
-function clearFailedAttempts(username) {
-    const key = `user:${  username}`;
+function clearFailedAttempts(userId) {
+    const key = `user:${userId}`;
     if (loginAttempts[key]) {
         delete loginAttempts[key];
         saveLoginAttempts();
@@ -202,6 +197,7 @@ function clearIpAttempts(ip) {
 // ==================== 密码工具 ====================
 
 function validatePasswordStrength(password) {
+    if (typeof password !== 'string') return { valid: false, errors: ['密码必须为字符串'] };
     const errors = [];
 
     if (password.length < 6) errors.push('密码长度至少6位');
@@ -232,19 +228,13 @@ function hashPassword(password, salt = null) {
 }
 
 function verifyPassword(password, stored) {
-    if (stored.includes(':')) {
-        const [salt, hash] = stored.split(':');
-        const computed = crypto.pbkdf2Sync(password, salt, ITERATIONS, KEY_LENGTH, DIGEST).toString('hex');
-        return hash === computed;
-    } else {
-        // 兼容旧版 SHA256
-        const computed = crypto.createHash('sha256').update(password).digest('hex');
-        return stored === computed;
+    if (typeof password !== 'string') return false;
+    if (typeof stored !== 'string' || !/^[a-f0-9]{64}:[a-f0-9]{128}$/.test(stored)) {
+        throw new Error('密码记录格式无效，请重新初始化测试用户');
     }
-}
-
-function needsRehash(stored) {
-    return !stored.includes(':');
+    const [salt, hash] = stored.split(':');
+    const computed = crypto.pbkdf2Sync(password, salt, ITERATIONS, KEY_LENGTH, DIGEST);
+    return crypto.timingSafeEqual(Buffer.from(hash, 'hex'), computed);
 }
 
 // ==================== 卡密系统 ====================
@@ -253,9 +243,9 @@ const generateCardCode = () => {
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
     let code = '';
     for (let i = 0; i < 16; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
+        code += chars.charAt(crypto.randomInt(chars.length));
     }
-    return code;
+    return cards.some(card => card.code === code) ? generateCardCode() : code;
 };
 
 function normalizeDurationUnit(unit) {
@@ -333,74 +323,75 @@ function normalizeCardForResponse(card) {
 }
 
 let users = [];
+let retiredUsernames = [];
+let nextUserId = ADMIN_USER_ID + 1;
 let cards = [];
 
 function loadUsers() {
-    ensureDataDir();
-    try {
-        if (fs.existsSync(USERS_FILE)) {
-            const data = JSON.parse(fs.readFileSync(USERS_FILE, 'utf8'));
-            users = Array.isArray(data.users) ? data.users : [];
-        } else {
-            users = [];
-            saveUsers();
-        }
-    } catch (err) {
-        console.error('加载用户数据失败:', err.message);
-        users = [];
+    identityTransaction.recover();
+    const data = readJsonFileStrict(USERS_FILE);
+    if (data?.schemaVersion !== USER_SCHEMA_VERSION || !Array.isArray(data.users) || !Array.isArray(data.retiredUsernames) || !Number.isSafeInteger(data.nextUserId) || data.nextUserId <= ADMIN_USER_ID) {
+        throw storageError('读取', USERS_FILE, new Error('Unsupported user schema; initialize new test data'));
     }
+    const names = new Set(data.retiredUsernames.map(name => typeof name === 'string' ? name.toLowerCase() : name));
+    if (names.size !== data.retiredUsernames.length || [...names].some(name => typeof name !== 'string' || !/^\w{3,32}$/.test(name))) {
+        throw new Error('用户身份记录无效');
+    }
+    const ids = new Set();
+    for (const user of data.users) {
+        if (!isUserIdentity(user) || ids.has(user.id) || user.id >= data.nextUserId || !/^\w{3,32}$/.test(user.username) || names.has(user.username.toLowerCase()) || !['admin', 'user'].includes(user.role)
+            || !/^[a-f0-9]{64}:[a-f0-9]{128}$/.test(user.password)) throw new Error('用户记录无效');
+        names.add(user.username.toLowerCase());
+        ids.add(user.id);
+    }
+    if (!ids.has(ADMIN_USER_ID)) throw new Error('缺少 ID 1000 管理员');
+    users = data.users;
+    nextUserId = data.nextUserId;
+    retiredUsernames = data.retiredUsernames;
 }
 
 function saveUsers() {
-    ensureDataDir();
-    try {
-        fs.writeFileSync(USERS_FILE, JSON.stringify({ users }, null, 2), 'utf8');
-    } catch (err) {
-        console.error('保存用户数据失败:', err.message);
-    }
+    try { writeJsonFileAtomic(USERS_FILE, { schemaVersion: USER_SCHEMA_VERSION, users, retiredUsernames, nextUserId }); }
+    catch (error) { throw storageError('保存', USERS_FILE, error); }
 }
 
 function loadCards() {
-    ensureDataDir();
-    try {
-        if (fs.existsSync(CARDS_FILE)) {
-            const data = JSON.parse(fs.readFileSync(CARDS_FILE, 'utf8'));
-            cards = Array.isArray(data.cards) ? data.cards : [];
-        } else {
-            cards = [];
-            saveCards();
-        }
-    } catch (err) {
-        console.error('加载卡密数据失败:', err.message);
-        cards = [];
-    }
+    identityTransaction.recover();
+    const data = readJsonFileStrict(CARDS_FILE, () => ({ cards: [] }));
+    if (!Array.isArray(data?.cards)) throw new Error('卡密记录格式无效');
+    cards = data.cards;
 }
 
 function saveCards() {
-    ensureDataDir();
-    try {
-        fs.writeFileSync(CARDS_FILE, JSON.stringify({ cards }, null, 2), 'utf8');
-    } catch (err) {
-        console.error('保存卡密数据失败:', err.message);
+    writeJsonFileAtomic(CARDS_FILE, { cards });
+}
+
+function saveIdentity() {
+    identityTransaction.commit({
+        'users.json': { schemaVersion: USER_SCHEMA_VERSION, users, retiredUsernames, nextUserId },
+        'cards.json': { cards },
+        'card-claim.json': { enabled: cardClaimEnabled, records: cardClaimRecords },
+    });
+}
+
+function bindCardClaim(cardCode, userId) {
+    for (const record of cardClaimRecords) {
+        if (record.cardCode === cardCode) record.userId = userId;
     }
 }
 
 // ==================== 默认管理员初始化 ====================
 
 function initDefaultAdmin() {
-    loadUsers();
-    const adminExists = users.find(u => u.username === 'admin');
-    if (!adminExists) {
-        const defaultPassword = 'admin';
-        users.push({
-            username: 'admin',
-            password: hashPassword(defaultPassword),
-            role: 'admin',
-            createdAt: Date.now()
-        });
-        saveUsers();
-        console.log('[用户系统] 已创建默认管理员账号，默认密码: admin');
+    if (fs.existsSync(USERS_FILE)) {
+        loadUsers();
+        return;
     }
+    users = [{ id: ADMIN_USER_ID, username: 'admin', password: hashPassword('admin'), role: 'admin', createdAt: Date.now() }];
+    retiredUsernames = [];
+    nextUserId = ADMIN_USER_ID + 1;
+    saveUsers();
+    console.log('[用户系统] 已初始化管理员账号，请首次登录后修改密码');
 }
 
 initDefaultAdmin();
@@ -417,22 +408,21 @@ function validateUser(username, password, ip = 'unknown') {
         return { error: 'rate_limit', message: rateLimit.message, remainingMs: rateLimit.remainingMs };
     }
 
-    // 账户锁定检查
-    const lockout = checkAccountLockout(username);
+    const user = users.find(u => u.username === username);
+    // 账户锁定按不可变 ID 记录。
+    const lockout = user ? checkAccountLockout(user.id) : { locked: false };
     if (lockout.locked) {
         return { error: 'locked', message: lockout.message, remainingMs: lockout.remainingMs };
     }
 
     // 查找用户
-    const user = users.find(u => u.username === username);
     if (!user || !['admin', 'user'].includes(user.role)) {
-        recordFailedAttempt(username);
         return { error: 'invalid_credentials', message: '用户名或密码错误' };
     }
 
     // 验证密码
     if (!verifyPassword(password, user.password)) {
-        const result = recordFailedAttempt(username);
+        const result = recordFailedAttempt(user.id);
         if (result.locked) {
             return { error: 'locked', message: result.message };
         }
@@ -442,19 +432,14 @@ function validateUser(username, password, ip = 'unknown') {
         };
     }
 
-    clearFailedAttempts(username);
+    clearFailedAttempts(user.id);
     clearIpAttempts(ip);
 
-    // 升级旧版密码哈希
-    if (needsRehash(user.password)) {
-        user.password = hashPassword(password);
-        saveUsers();
-        console.log(`[安全] 用户 ${  username  } 密码已升级为新哈希算法`);
-    }
-
     return {
+        id: user.id,
         username: user.username,
         role: user.role,
+        deleting: user.deleting === true,
         cardCode: user.cardCode || null,
         card: user.card || null,
         accountLimit: user.accountLimit || DEFAULT_ACCOUNT_LIMIT
@@ -466,15 +451,17 @@ function validateUser(username, password, ip = 'unknown') {
 function registerUser(username, password, cardCode) {
     loadUsers();
     loadCards();
+    loadCardClaimRecords();
 
     // 用户名验证
-    if (!username || username.length < 3 || username.length > 32) {
+    if (typeof username !== 'string' || username.length < 3 || username.length > 32) {
         return { ok: false, error: '用户名长度需在3-32位之间' };
     }
     if (!/^\w+$/.test(username)) {
         return { ok: false, error: '用户名只能包含字母、数字和下划线' };
     }
-    if (users.some(u => u.username === username)) {
+    if (retiredUsernames.some(name => name.toLowerCase() === username.toLowerCase())) return { ok: false, error: '该用户名已永久停用，请使用新的用户名' };
+    if (users.some(u => u.username.toLowerCase() === username.toLowerCase())) {
         return { ok: false, error: '用户名已存在' };
     }
 
@@ -505,7 +492,9 @@ function registerUser(username, password, cardCode) {
     if (cardRecord) assignDurationFields(cardRecord, duration);
 
     // 创建用户
+    if (!Number.isSafeInteger(nextUserId + 1)) throw new Error('用户 ID 已耗尽');
     const newUser = {
+        id: nextUserId++,
         username,
         password: hashPassword(password),
         role: 'user',
@@ -517,16 +506,17 @@ function registerUser(username, password, cardCode) {
 
     users.push(newUser);
     if (card) {
-        card.usedBy = username;
+        card.usedBy = newUser.id;
         card.usedAt = now;
-        saveCards();
+        bindCardClaim(card.code, newUser.id);
     }
-    saveUsers();
-    clearFailedAttempts(username);
+    saveIdentity();
+    clearFailedAttempts(newUser.id);
 
     return {
         ok: true,
         user: {
+            id: newUser.id,
             username: newUser.username,
             role: newUser.role,
             card: newUser.card,
@@ -537,11 +527,13 @@ function registerUser(username, password, cardCode) {
 
 // ==================== 用户续费 ====================
 
-function renewUser(username, cardCode) {
+function renewUser(userId, cardCode) {
+    assertUserId(userId);
     loadUsers();
     loadCards();
+    loadCardClaimRecords();
 
-    const user = users.find(u => u.username === username);
+    const user = users.find(u => u.id === userId);
     if (!user) return { ok: false, error: '用户不存在' };
 
     const card = cards.find(c => c.code === cardCode);
@@ -593,10 +585,10 @@ function renewUser(username, cardCode) {
         }
     }
 
-    card.usedBy = username;
+    card.usedBy = user.id;
     card.usedAt = now;
-    saveUsers();
-    saveCards();
+    bindCardClaim(card.code, user.id);
+    saveIdentity();
 
     return {
         ok: true,
@@ -608,25 +600,42 @@ function renewUser(username, cardCode) {
 
 // ==================== 用户管理 ====================
 
+function getUser(userId) {
+    assertUserId(userId);
+    return getAllUsers().find(user => user.id === userId) || null;
+}
+
+function getUserByUsername(username) {
+    return getAllUsers().find(user => user.username === username) || null;
+}
+
 function getAllUsers() {
     loadUsers();
+    const policy = getAccessPolicy();
     return users
         .map(u => ({
+            id: u.id,
             username: u.username,
             role: u.role,
+            createdAt: u.createdAt,
+            accessStatus: u.deleting ? 'deleting' : getUserAccessRejection(u, policy)?.reason || 'normal',
+            deleting: u.deleting === true,
             card: u.card,
             accountLimit: u.accountLimit || DEFAULT_ACCOUNT_LIMIT
         }));
 }
 
-function updateUser(username, updates) {
+function updateUser(userId, updates) {
+    assertUserId(userId);
     loadUsers();
-    const user = users.find(u => u.username === username);
+    const user = users.find(u => u.id === userId);
     if (!user) return null;
+    const error = validateUserUpdates(updates);
+    if (error) throw Object.assign(new Error(error), { status: 400 });
 
     if (updates.expiresAt !== undefined) {
         if (!user.card) user.card = {};
-        user.card.expiresAt = updates.expiresAt;
+        assignUserExpiry(user.card, updates.expiresAt);
     }
     if (updates.enabled !== undefined) {
         if (!user.card) user.card = {};
@@ -635,71 +644,79 @@ function updateUser(username, updates) {
 
     saveUsers();
     return {
+        id: user.id,
         username: user.username,
         role: user.role,
+        deleting: user.deleting === true,
         card: user.card,
         accountLimit: user.accountLimit || DEFAULT_ACCOUNT_LIMIT
     };
 }
 
-function editUser(username, updates) {
+function validateUserUpdates(updates) {
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return '用户修改参数必须为对象';
+    if (updates.accountLimit !== undefined && (!Number.isSafeInteger(updates.accountLimit) || updates.accountLimit <= 0)) return '账号限额必须为正整数';
+    if (updates.expiresAt !== undefined && updates.expiresAt !== null
+        && (!Number.isSafeInteger(updates.expiresAt) || updates.expiresAt <= 0 || updates.expiresAt > 8.64e15)) return '过期时间必须为有效时间戳或 null';
+    for (const field of ['enabled', 'isPermanent']) {
+        if (updates[field] !== undefined && typeof updates[field] !== 'boolean') return `${field} 必须为布尔值`;
+    }
+    if (updates.isPermanent === true && updates.expiresAt != null) return '永久权限与过期时间不能同时设置';
+    if (updates.password !== undefined) {
+        const result = validatePasswordStrength(updates.password);
+        if (!result.valid) return result.errors.join('；');
+    }
+    return null;
+}
+
+function assignUserExpiry(card, expiresAt) {
+    const durationMs = expiresAt === null ? 0 : Math.max(0, expiresAt - Date.now());
+    assignDurationFields(card, {
+        days: durationMs / DAY_MS, durationValue: durationMs / HOUR_MS,
+        durationUnit: 'hour', durationMs, isPermanent: false,
+    });
+    card.expiresAt = expiresAt;
+}
+
+function editUser(userId, updates) {
+    assertUserId(userId);
     loadUsers();
-    const user = users.find(u => u.username === username);
+    const user = users.find(u => u.id === userId);
     if (!user) return { ok: false, error: '用户不存在' };
+    const error = validateUserUpdates(updates);
+    if (error) return { ok: false, error };
 
     // 修改用户名
-    if (updates.newUsername && updates.newUsername !== username) {
-        if (!/^\w{3,32}$/.test(updates.newUsername)) {
-            return { ok: false, error: '用户名只能包含字母、数字和下划线，长度3-32位' };
-        }
-        if (users.some(u => u.username === updates.newUsername)) {
-            return { ok: false, error: '用户名已存在' };
-        }
-        user.username = updates.newUsername;
+    if (updates.newUsername !== undefined && updates.newUsername !== user.username) {
+        return { ok: false, error: '用户名创建后不可修改' };
     }
 
     // 修改密码
-    if (updates.password) {
-        const pwdResult = validatePasswordStrength(updates.password);
-        if (!pwdResult.valid) return { ok: false, error: pwdResult.errors.join('；') };
+    if (updates.password !== undefined) {
         user.password = hashPassword(updates.password);
     }
 
     // 账号限额
     if (updates.accountLimit !== undefined) {
-        user.accountLimit = Number.parseInt(updates.accountLimit, 10) || DEFAULT_ACCOUNT_LIMIT;
+        user.accountLimit = updates.accountLimit;
     }
 
     // 设置永久/过期时间
-    if (updates.isPermanent) {
+    if (updates.isPermanent === true) {
         if (!user.card) user.card = {};
         assignDurationFields(user.card, normalizeTimeDuration({ isPermanent: true }));
         user.card.expiresAt = null;
-    } else if (updates.expiresAt !== undefined) {
+    } else if (updates.expiresAt !== undefined || updates.isPermanent === false) {
         if (!user.card) user.card = {};
-        if (updates.expiresAt === null) {
-            assignDurationFields(user.card, { days: 0, durationValue: 0, durationUnit: 'day', durationMs: 0, isPermanent: false });
-            user.card.expiresAt = null;
-        } else {
-            const expiresAt = Number.parseInt(updates.expiresAt, 10);
-            user.card.expiresAt = expiresAt;
-            const remaining = expiresAt - Date.now();
-            const durationMs = remaining > 0 ? remaining : 0;
-            const duration = durationMs > 0
-                ? normalizeTimeDuration({
-                    durationMs,
-                    durationUnit: durationMs % DAY_MS === 0 ? 'day' : 'hour'
-                })
-                : { days: 0, durationValue: 0, durationUnit: 'day', durationMs: 0, isPermanent: false };
-            assignDurationFields(user.card, duration);
-        }
+        assignUserExpiry(user.card, updates.expiresAt === undefined ? user.card.expiresAt ?? null : updates.expiresAt);
     }
 
     saveUsers();
     return {
         ok: true,
         user: {
-            username: user.username,
+            id: user.id,
+        username: user.username,
             role: user.role,
             card: user.card,
             accountLimit: user.accountLimit || DEFAULT_ACCOUNT_LIMIT
@@ -711,7 +728,11 @@ function editUser(username, updates) {
 
 function getAllCards() {
     loadCards();
-    return cards.map(normalizeCardForResponse);
+    loadCardClaimRecords();
+    return cards.map(card => {
+        const record = cardClaimRecords.find(record => record.cardCode === card.code);
+        return { ...normalizeCardForResponse(card), claimedAt: card.claimedAt ?? record?.claimTime ?? null };
+    });
 }
 
 function createCard(description, days, type = 'time', options = {}) {
@@ -820,22 +841,57 @@ function deleteCardsBatch(codes) {
     };
 }
 
-function deleteUser(username, force = false) {
+function beginUserDeletion(userId) {
+    assertUserId(userId);
     loadUsers();
-    const idx = users.findIndex(u => u.username === username);
+    const user = users.find(user => user.id === userId);
+    if (!user) return { ok: false, error: '用户不存在' };
+    if (user.id === ADMIN_USER_ID) return { ok: false, error: '管理员账号保留' };
+    user.deleting = true;
+    saveUsers();
+    return { ok: true };
+}
+
+function getExpiredUserIds() {
+    if (!getAccessPolicy().cardVerificationEnabled) throw new Error('卡密验证已关闭，禁止按到期清理用户');
+    loadUsers();
+    return users.filter(user => user.role !== 'admin' && user.card?.expiresAt && user.card.expiresAt < Date.now()).map(user => user.id);
+}
+
+function deleteUser(userId, force = false) {
+    assertUserId(userId);
+    loadUsers();
+    const idx = users.findIndex(u => u.id === userId);
     if (idx === -1) return { ok: false, error: '用户不存在' };
-    if (!force && users[idx].role === 'admin') {
+    if (users[idx].id === ADMIN_USER_ID) {
         return { ok: false, error: '不能删除管理员账号' };
     }
 
+    if (!users[idx].deleting) return { ok: false, error: '请先停用用户并清理全部数据' };
+    loadCards();
+    loadCardClaimRecords();
+    const removedCards = new Set(cards.filter(card => card.usedBy === userId).map(card => card.code));
+    cardClaimRecords.filter(record => record.userId === userId).forEach(record => removedCards.add(record.cardCode));
+    cards = cards.filter(card => !removedCards.has(card.code));
+    saveCards();
+    loadLoginAttempts();
+    delete loginAttempts[`user:${userId}`];
+    saveLoginAttempts();
+    loadLoginLogs();
+    loginLogs = loginLogs.filter(log => log.userId !== userId);
+    saveLoginLogs();
+    cardClaimRecords = cardClaimRecords.filter(record => record.userId !== userId && !removedCards.has(record.cardCode));
+    saveCardClaimRecords();
+    retiredUsernames.push(users[idx].username);
     users.splice(idx, 1);
     saveUsers();
     return { ok: true };
 }
 
-function changePassword(username, currentPassword, newPassword) {
+function changePassword(userId, currentPassword, newPassword) {
+    assertUserId(userId);
     loadUsers();
-    const user = users.find(u => u.username === username);
+    const user = users.find(u => u.id === userId);
     if (!user) return { ok: false, error: '用户不存在' };
 
     if (!verifyPassword(currentPassword, user.password)) {
@@ -856,31 +912,15 @@ function changePassword(username, currentPassword, newPassword) {
 // ==================== 卡密领取系统 ====================
 
 function loadCardClaimRecords() {
-    ensureDataDir();
-    try {
-        if (fs.existsSync(CARD_CLAIM_FILE)) {
-            const data = JSON.parse(fs.readFileSync(CARD_CLAIM_FILE, 'utf8'));
-            cardClaimEnabled = data.enabled === true;
-            cardClaimRecords = data.records || [];
-        } else {
-            cardClaimEnabled = true;
-            cardClaimRecords = [];
-            saveCardClaimRecords();
-        }
-    } catch {
-        cardClaimEnabled = true;
-        cardClaimRecords = [];
-    }
+    identityTransaction.recover();
+    const data = readJsonFileStrict(CARD_CLAIM_FILE, () => ({ enabled: true, records: [] }));
+    if (typeof data?.enabled !== 'boolean' || !Array.isArray(data.records)) throw new Error('卡密领取记录格式无效');
+    cardClaimEnabled = data.enabled;
+    cardClaimRecords = data.records;
 }
 
 function saveCardClaimRecords() {
-    ensureDataDir();
-    try {
-        fs.writeFileSync(CARD_CLAIM_FILE, JSON.stringify({
-            enabled: cardClaimEnabled,
-            records: cardClaimRecords
-        }, null, 2), 'utf8');
-    } catch { }
+    writeJsonFileAtomic(CARD_CLAIM_FILE, { enabled: cardClaimEnabled, records: cardClaimRecords });
 }
 
 function getCardClaimStatus() {
@@ -890,26 +930,30 @@ function getCardClaimStatus() {
 
 function getAvailableTimeCardCount() {
     loadCards();
+    loadCardClaimRecords();
+    const reserved = new Set(cardClaimRecords.map(record => record.cardCode));
     return cards.filter(card =>
-        card.type === 'time' && !card.usedBy && card.enabled
+        card.type === 'time' && !card.usedBy && !card.claimedAt && !reserved.has(card.code) && card.enabled
     ).length;
 }
 
 function setCardClaimStatus(enabled) {
+    if (typeof enabled !== 'boolean') throw Object.assign(new Error('卡密领取开关必须为布尔值'), { status: 400 });
     loadCardClaimRecords();
-    cardClaimEnabled = !!enabled;
+    cardClaimEnabled = enabled;
     saveCardClaimRecords();
     return { enabled: cardClaimEnabled };
 }
 
-function checkUAClaimLimit(ua) {
-    loadCardClaimRecords();
+function checkClaimLimit(ipHash) {
     const now = Date.now();
-    const uaHash = crypto.createHash('sha256').update(ua).digest('hex');
-    const record = cardClaimRecords.find(r => r.uaHash === uaHash);
+    // User-Agent identifies a browser build, not a person. Shared browser
+    // versions must not consume each other's daily allowance.
+    const latest = cardClaimRecords.filter(record => record.ipHash === ipHash)
+        .reduce((latest, record) => Math.max(latest, record.claimTime), 0);
 
-    if (record) {
-        const elapsed = now - record.claimTime;
+    if (latest) {
+        const elapsed = now - latest;
         if (elapsed < 86400000) {  // 24 小时内
             const remainingMs = 86400000 - elapsed;
             return {
@@ -923,22 +967,28 @@ function checkUAClaimLimit(ua) {
     return { allowed: true };
 }
 
-function claimCardByUA(ua, username = null) {
+function claimCard(ua, ip) {
     loadCards();
     loadCardClaimRecords();
+    const { isIP } = require('node:net');
+    const source = typeof ip === 'string' ? ip.replace(/^::ffff:/i, '') : '';
+    if (typeof ua !== 'string' || !isIP(source)) return { ok: false, error: '领取请求来源无效' };
+    const uaHash = crypto.createHash('sha256').update(ua).digest('hex');
+    const ipHash = crypto.createHash('sha256').update(source).digest('hex');
 
     if (!cardClaimEnabled) {
         return { ok: false, error: '卡密领取功能未开启' };
     }
 
-    const limit = checkUAClaimLimit(ua);
+    const limit = checkClaimLimit(ipHash);
     if (!limit.allowed) {
         return { ok: false, error: limit.message, remainingMs: limit.remainingMs };
     }
 
     // 筛选可用的时间卡密
+    const reserved = new Set(cardClaimRecords.map(record => record.cardCode));
     const availableCards = cards.filter(c =>
-        c.type === 'time' && !c.usedBy && c.enabled
+        c.type === 'time' && !c.usedBy && !c.claimedAt && !reserved.has(c.code) && c.enabled
     );
 
     if (availableCards.length === 0) {
@@ -946,18 +996,22 @@ function claimCardByUA(ua, username = null) {
     }
 
     // 随机选一张
-    const randomIdx = Math.floor(Math.random() * availableCards.length);
-    const selectedCard = normalizeCardForResponse(availableCards[randomIdx]);
+    const selected = availableCards[crypto.randomInt(availableCards.length)];
+    const selectedCard = normalizeCardForResponse(selected);
 
     // 记录领取
-    const uaHash = crypto.createHash('sha256').update(ua).digest('hex');
+    selected.claimedAt = Date.now();
     cardClaimRecords.push({
         uaHash,
-        claimTime: Date.now(),
+        ipHash,
+        claimTime: selected.claimedAt,
         cardCode: selectedCard.code,
-        username: username || null
+        userId: null
     });
-    saveCardClaimRecords();
+    identityTransaction.commit({
+        'cards.json': { cards },
+        'card-claim.json': { enabled: cardClaimEnabled, records: cardClaimRecords },
+    });
 
     return {
         ok: true,
@@ -977,12 +1031,14 @@ function getCardClaimRecords() {
 }
 
 function clearExpiredClaimRecords() {
+    loadCards();
     loadCardClaimRecords();
     const now = Date.now();
     const thirtyDays = 2592000000;  // 30 天
     const before = cardClaimRecords.length;
 
-    cardClaimRecords = cardClaimRecords.filter(r => now - r.claimTime < thirtyDays);
+    const unredeemed = new Set(cards.filter(card => !card.usedBy).map(card => card.code));
+    cardClaimRecords = cardClaimRecords.filter(r => now - r.claimTime < thirtyDays || unredeemed.has(r.cardCode));
 
     if (cardClaimRecords.length !== before) saveCardClaimRecords();
     return { cleared: before - cardClaimRecords.length };
@@ -990,34 +1046,6 @@ function clearExpiredClaimRecords() {
 
 // ==================== 清理 ====================
 
-function clearExpiredUsers() {
-    if (!getAccessPolicy().cardVerificationEnabled) {
-        return { ok: false, error: '卡密验证已关闭，不能按卡密到期清理用户' };
-    }
-    loadUsers();
-    const now = Date.now();
-    const toDelete = [];
-    const keep = [];
-
-    for (const user of users) {
-        if (user.role === 'admin') {
-            keep.push(user);
-            continue;
-        }
-        if (user.card && user.card.expiresAt && user.card.expiresAt < now) {
-            toDelete.push(user.username);
-        } else {
-            keep.push(user);
-        }
-    }
-
-    if (toDelete.length > 0) {
-        users = keep;
-        saveUsers();
-    }
-
-    return { ok: true, deletedCount: toDelete.length, deletedUsers: toDelete };
-}
 
 function getUserCount() {
     loadUsers();
@@ -1040,8 +1068,11 @@ function verifyCardOwnership(username, cardCode) {
     const card = cards.find(c => c.code === cardCode);
     if (!card) return { ok: false, error: '用户名或卡密错误' };
 
-    if (card.usedBy !== username) {
-        return { ok: false, error: '卡密不属于该用户' };
+    // Renewal can be paid by a third party. Only the original registration
+    // credential proves ownership; a later payment must never grant recovery.
+    if (user.role !== 'user' || user.deleting || !user.cardCode || user.cardCode !== cardCode
+        || card.type === 'quota' || card.usedBy !== user.id) {
+        return { ok: false, error: '请提供该用户注册时使用的卡密' };
     }
 
     return { ok: true };
@@ -1058,7 +1089,7 @@ function resetPasswordByCard(username, cardCode, newPassword) {
     const user = users.find(u => u.username === username);
     user.password = hashPassword(newPassword);
     if (user.mustChangePassword) delete user.mustChangePassword;
-    clearFailedAttempts(username);
+    clearFailedAttempts(user.id);
     saveUsers();
 
     return { ok: true, message: '密码重置成功' };
@@ -1071,34 +1102,26 @@ let loginLogs = [];
 let logIdCounter = 0;
 
 function loadLoginLogs() {
-    ensureDataDir();
-    try {
-        if (fs.existsSync(LOGIN_LOGS_FILE)) {
-            const data = JSON.parse(fs.readFileSync(LOGIN_LOGS_FILE, 'utf8'));
-            loginLogs = data.logs || [];
-            logIdCounter = data.counter || 0;
-        }
-    } catch {
-        loginLogs = [];
-        logIdCounter = 0;
-    }
+    const data = readJsonFileStrict(LOGIN_LOGS_FILE, () => ({ logs: [], counter: 0 }));
+    if (!Array.isArray(data?.logs) || !Number.isSafeInteger(data.counter) || data.counter < 0) throw new Error('登录日志格式无效');
+    loginLogs = data.logs;
+    logIdCounter = data.counter;
 }
 
 function saveLoginLogs() {
-    ensureDataDir();
-    try {
-        fs.writeFileSync(LOGIN_LOGS_FILE, JSON.stringify({ logs: loginLogs, counter: logIdCounter }, null, 2), 'utf8');
-    } catch {}
+    writeJsonFileAtomic(LOGIN_LOGS_FILE, { logs: loginLogs, counter: logIdCounter });
 }
 
 function addLoginLog(event, username, errorType, ip, userAgent) {
     loadLoginLogs();
+    const user = getUserByUsername(username);
     logIdCounter++;
     loginLogs.push({
         id: String(logIdCounter),
         timestamp: Date.now(),
         event,
-        username,
+        userId: user?.id ?? null,
+        username: user?.username ?? '',
         errorType: errorType || null,
         ip,
         userAgent: userAgent || 'unknown'
@@ -1140,6 +1163,8 @@ module.exports = {
     registerUser,
     renewUser,
     getAllUsers,
+    getUser,
+    getUserByUsername,
     updateUser,
     editUser,
     getAllCards,
@@ -1149,15 +1174,16 @@ module.exports = {
     deleteCard,
     deleteCardsBatch,
     deleteUser,
+    beginUserDeletion,
+    getExpiredUserIds,
     changePassword,
     DEFAULT_ACCOUNT_LIMIT,
     getCardClaimStatus,
     getAvailableTimeCardCount,
     setCardClaimStatus,
-    claimCardByUA,
+    claimCard,
     getCardClaimRecords,
     clearExpiredClaimRecords,
-    clearExpiredUsers,
     getUserCount,
     checkRateLimit,
     clearIpAttempts,

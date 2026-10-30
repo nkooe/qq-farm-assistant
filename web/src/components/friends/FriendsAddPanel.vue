@@ -1,13 +1,15 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useFriendStore } from '@/stores/friend'
 import { useToastStore } from '@/stores/toast'
+import { useUserStore } from '@/stores/user'
 
 const props = defineProps<{
   accountId: string
   accountRunning: boolean
 }>()
 
+const userStore = useUserStore()
 const friendStore = useFriendStore()
 const toast = useToastStore()
 
@@ -32,6 +34,8 @@ const rows = ref<TargetRow[]>([])
 const sending = ref(false)
 const cancelRequested = ref(false)
 const sendIntervalMs = ref(800)
+let contextVersion = 0
+onUnmounted(() => { contextVersion++; cancelRequested.value = true })
 
 // 手动单个添加
 const manualGid = ref('')
@@ -229,7 +233,7 @@ function clearAll() {
 const STORAGE_PREFIX = 'qqfarm:addfriends:'
 
 function storageKey() {
-  return `${STORAGE_PREFIX}${props.accountId || 'default'}`
+  return `${STORAGE_PREFIX}${userStore.userId}:${props.accountId}`
 }
 
 interface PersistTarget {
@@ -303,9 +307,12 @@ onMounted(() => {
 watch(rows, saveRows, { deep: true })
 
 // 切换账号时载入对应账号保存的目标库
-watch(() => props.accountId, () => {
+watch([() => props.accountId, () => userStore.userId], () => {
+  contextVersion++
+  cancelRequested.value = true
+  rawInput.value = ''; manualGid.value = ''; manualKey.value = ''
   rows.value = loadRows()
-})
+}, { flush: 'sync' })
 
 const selectedCount = computed(() => rows.value.filter(r => r.selected).length)
 const validCount = computed(() => rows.value.filter(r => r.keyValid).length)
@@ -345,7 +352,7 @@ function sleep(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function sendRow(row: TargetRow) {
+async function sendRow(row: TargetRow, accountId: string) {
   row.status = 'sending'
   row.resultText = '发送中…'
   row.resultKind = 'none'
@@ -357,7 +364,7 @@ async function sendRow(row: TargetRow) {
     row.resultKind = 'error'
     return
   }
-  const res = await friendStore.applyFriend(props.accountId, {
+  const res = await friendStore.applyFriend(accountId, {
     gid: row.gid,
     shareKey: row.key,
     openid: row.openid,
@@ -382,6 +389,10 @@ async function sendSelected() {
     toast.error('请先勾选要发送的目标')
     return
   }
+  const accountId = props.accountId
+  const userId = userStore.userId
+  const version = contextVersion
+  const isCurrent = () => contextVersion === version && userStore.userId === userId && props.accountId === accountId
   const interval = Math.max(0, Number(sendIntervalMs.value) || 0)
   sending.value = true
   cancelRequested.value = false
@@ -389,22 +400,23 @@ async function sendSelected() {
   let skipped = 0
   try {
     for (let i = 0; i < targets.length; i++) {
-      if (cancelRequested.value) {
+      if (cancelRequested.value || !isCurrent()) {
         skipped = targets.length - i
         break
       }
       const row = targets[i]
       if (!row)
         continue
-      await sendRow(row)
+      await sendRow(row, accountId)
       sent++
-      if (cancelRequested.value) {
+      if (cancelRequested.value || !isCurrent()) {
         skipped = targets.length - i - 1
         break
       }
       if (i < targets.length - 1 && interval > 0)
         await sleep(interval)
     }
+    if (!isCurrent()) return
     if (cancelRequested.value) {
       // 恢复仍在"发送中"的行（请求未返回的视为未发送）
       for (const r of rows.value) {
@@ -455,12 +467,11 @@ function statusBadgeClass(row: TargetRow) {
     <div class="rounded-lg bg-blue-50 p-3 text-sm text-blue-800 dark:bg-blue-900/20 dark:text-blue-200 sm:p-4">
       <div class="mb-1 flex items-center gap-2 font-medium">
         <div class="i-carbon-information" />
-        主动加好友说明
+        添加好友
       </div>
       <ul class="list-disc pl-5 space-y-1 text-blue-700/90 dark:text-blue-200/80">
-        <li>粘贴<b>分享卡片数据</b>（<code>uid=...&openid=...&share_key=...</code>）——走 <b>ReportArkClick</b> 直接发申请，<b>无需进农场、天然绕过拜访开关 1002007</b>（已验证）。</li>
-        <li>每条必须含 <code>gid(uid)</code> + <code>openid</code> + <code>share_key</code>(32位hex) 三者，缺一不可；支持一行一条或整段粘贴，或「导入文件」选 <code>share_cards.txt/.json</code>。</li>
-        <li>凭证有<b>时效</b>，请使用<b>新鲜</b>卡片；过期会返回「凭证已过期」。</li>
+        <li>粘贴分享卡片，或导入 TXT / JSON。</li>
+        <li>需包含 uid、openid、share_key；过期请重新获取。</li>
       </ul>
     </div>
 
@@ -470,7 +481,7 @@ function statusBadgeClass(row: TargetRow) {
       class="flex items-center gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300 sm:p-4"
     >
       <div class="i-carbon-warning-alt" />
-      当前账号未在线，发送前请先到「账号」页启动该账号。
+      账号离线，请先启动。
     </div>
 
     <!-- 粘贴解析区 -->

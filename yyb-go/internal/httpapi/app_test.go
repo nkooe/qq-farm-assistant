@@ -42,6 +42,8 @@ func TestHandlerServesGinRoutesAndSwaggerDocs(t *testing.T) {
 	routes := app.Handler()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.Header.Set("Authorization", "Bearer "+ApiToken)
+		r.Header.Set("X-Farm-User-ID", "1000")
+		r.Header.Set("X-Farm-Role", "admin")
 		routes.ServeHTTP(w, r)
 	})
 

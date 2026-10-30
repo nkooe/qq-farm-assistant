@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +22,6 @@ type Config struct {
 	MaxShortlinkConcurrency int
 	MaxLoginConcurrency     int
 	TCPProxy                string
-	TCPProxyFallbackDirect  bool
 }
 
 func DefaultConfig() Config {
@@ -32,7 +32,6 @@ func DefaultConfig() Config {
 		DNSCacheTTL:             30 * time.Minute,
 		MaxShortlinkConcurrency: 1000,
 		MaxLoginConcurrency:     32,
-		TCPProxyFallbackDirect:  true,
 	}
 }
 
@@ -81,6 +80,25 @@ func NewPool(cfg Config, db *store.DB) *Pool {
 		locks:        map[string]*sync.Mutex{},
 		loginSem:     make(chan struct{}, cfg.MaxLoginConcurrency),
 		shortlinkSem: make(chan struct{}, cfg.MaxShortlinkConcurrency),
+	}
+}
+
+// Caller must wait for all account operations to finish before removing their locks.
+func (p *Pool) ForgetAccounts(ids []int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key := range p.locks {
+		for _, id := range ids {
+			if strings.HasPrefix(key, fmt.Sprintf("%d\x00", id)) {
+				// Session locks also contain the proxy URL. Evict its DNS cache too.
+				proxy := strings.SplitN(key, "\x00", 2)[1]
+				dnsCache.Lock()
+				delete(dnsCache.entries, "0|Windows|"+proxy)
+				dnsCache.Unlock()
+				delete(p.locks, key)
+				break
+			}
+		}
 	}
 }
 
@@ -143,21 +161,10 @@ func (p *Pool) Invalidate(ctx context.Context, accountID int64, tcpProxy string)
 func (p *Pool) run(ctx context.Context, loginBuffer string, accountID int64, tcpProxy string, op func(context.Context, WmpfSession) (map[string]any, error)) (map[string]any, error) {
 	effective := effectiveProxy(tcpProxy, p.cfg.TCPProxy)
 	st, err := p.state(ctx, loginBuffer, accountID, effective)
-	if err == nil {
-		res, err := op(ctx, st)
-		if err == nil || effective == "" || !p.cfg.TCPProxyFallbackDirect {
-			return res, err
-		}
-		_ = p.Invalidate(ctx, accountID, effective)
+	if err != nil {
+		return nil, err
 	}
-	if effective != "" && p.cfg.TCPProxyFallbackDirect {
-		st, err = p.state(ctx, loginBuffer, accountID, "")
-		if err != nil {
-			return nil, err
-		}
-		return op(ctx, st)
-	}
-	return nil, err
+	return op(ctx, st)
 }
 
 func (p *Pool) state(ctx context.Context, loginBuffer string, accountID int64, tcpProxy string) (WmpfSession, error) {
@@ -220,7 +227,7 @@ func (p *Pool) loginAndSession(ctx context.Context, loginBuffer, tcpProxy string
 	targets = orderLonglinkTargets(targets, 6)
 	var last error
 	for _, t := range targets {
-		mc, err := connectMmtls(ctx, t, p.cfg.LoginTimeout, tcpProxy, p.cfg.TCPProxyFallbackDirect)
+		mc, err := connectMmtls(ctx, t, p.cfg.LoginTimeout, tcpProxy)
 		if err != nil {
 			last = err
 			continue
@@ -296,11 +303,7 @@ func (p *Pool) sendEnvelope(ctx context.Context, st WmpfSession, envelope []byte
 	defer release(p.shortlinkSem)
 	reqCtx, cancel := context.WithTimeout(ctx, p.cfg.ShortlinkTimeout)
 	defer cancel()
-	fallback := p.cfg.TCPProxyFallbackDirect
-	if st.TCPProxy != "" {
-		fallback = false
-	}
-	return send0RTT(reqCtx, st.ShortlinkTargets, st.PSK, st.Session.RecvKey, envelope, p.cfg.ShortlinkTimeout, st.TCPProxy, fallback)
+	return send0RTT(reqCtx, st.ShortlinkTargets, st.PSK, st.Session.RecvKey, envelope, p.cfg.ShortlinkTimeout, st.TCPProxy)
 }
 
 func acquire(ctx context.Context, sem chan struct{}) error {

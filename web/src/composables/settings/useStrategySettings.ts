@@ -2,6 +2,7 @@ import type { Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { computed, ref, watchEffect } from 'vue'
 import api from '@/api'
+import { useUserStore } from '@/stores/user'
 import { useFarmStore } from '@/stores/farm'
 import { useSettingStore } from '@/stores/setting'
 
@@ -35,6 +36,7 @@ export function useStrategySettings({
   getAutomationSettings: () => AutomationSettingsSnapshot
   showAlert: (message: string, type?: AlertType) => void
 }) {
+  const userStore = useUserStore()
   const settingStore = useSettingStore()
   const farmStore = useFarmStore()
   const { settings, loading: settingsLoading } = storeToRefs(settingStore)
@@ -90,7 +92,7 @@ export function useStrategySettings({
 
   function readBagSeedExcluded(accountId: string | number): Set<number> {
     try {
-      const raw = localStorage.getItem(BAG_SEED_EXCLUDED_PREFIX + String(accountId))
+      const raw = localStorage.getItem(`${BAG_SEED_EXCLUDED_PREFIX}${userStore.userId}:${accountId}`)
       if (!raw)
         return new Set()
       const parsed = JSON.parse(raw)
@@ -108,7 +110,7 @@ export function useStrategySettings({
     if (!accountId)
       return
     try {
-      const key = BAG_SEED_EXCLUDED_PREFIX + String(accountId)
+      const key = `${BAG_SEED_EXCLUDED_PREFIX}${userStore.userId}:${accountId}`
       if (bagSeedExcluded.value.size === 0)
         localStorage.removeItem(key)
       else

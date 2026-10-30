@@ -16,10 +16,15 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const SchemaVersion = 3
+
 const schema = `
+CREATE TABLE retired_users (user_id INTEGER PRIMARY KEY CHECK(user_id > 1000));
 CREATE TABLE IF NOT EXISTS wechat_accounts (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    openid          TEXT    NOT NULL UNIQUE,
+    openid          TEXT    NOT NULL,
+    owner_user_id INTEGER NOT NULL CHECK(owner_user_id >= 1000 AND owner_user_id <= 9007199254740991),
+    owner_role      TEXT    NOT NULL CHECK((owner_role='admin' AND owner_user_id=1000) OR (owner_role='user' AND owner_user_id>1000)),
     uin             INTEGER,
     alias           TEXT,
     nickname        TEXT,
@@ -30,9 +35,14 @@ CREATE TABLE IF NOT EXISTS wechat_accounts (
     status          TEXT,
     last_checked_at INTEGER,
     created_at      INTEGER NOT NULL,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    UNIQUE(owner_user_id, openid)
 );
 CREATE INDEX IF NOT EXISTS idx_wxacc_uin ON wechat_accounts(uin);
+CREATE TRIGGER prevent_retired_accounts BEFORE INSERT ON wechat_accounts
+WHEN EXISTS (SELECT 1 FROM retired_users WHERE user_id=NEW.owner_user_id)
+BEGIN SELECT RAISE(ABORT, 'user is permanently retired'); END;
+
 
 CREATE TABLE IF NOT EXISTS account_refresh_health (
     account_id INTEGER PRIMARY KEY REFERENCES wechat_accounts(id) ON DELETE CASCADE,
@@ -45,15 +55,22 @@ CREATE TABLE IF NOT EXISTS account_refresh_health (
 
 CREATE TABLE IF NOT EXISTS proxy_profiles (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    name       TEXT    NOT NULL UNIQUE,
+    name       TEXT    NOT NULL,
     protocol   TEXT    NOT NULL,
     host       TEXT    NOT NULL,
     port       INTEGER NOT NULL,
     username   TEXT    NOT NULL DEFAULT '',
     password   TEXT    NOT NULL DEFAULT '',
+    owner_user_id INTEGER NOT NULL CHECK(owner_user_id >= 1000 AND owner_user_id <= 9007199254740991),
+    shared_with_users INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL,
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL,
+    UNIQUE(owner_user_id, name)
 );
+
+CREATE TRIGGER prevent_retired_proxies BEFORE INSERT ON proxy_profiles
+WHEN EXISTS (SELECT 1 FROM retired_users WHERE user_id=NEW.owner_user_id)
+BEGIN SELECT RAISE(ABORT, 'user is permanently retired'); END;
 
 CREATE TABLE IF NOT EXISTS account_proxy_settings (
     wechat_account_id INTEGER PRIMARY KEY REFERENCES wechat_accounts(id) ON DELETE CASCADE,
@@ -94,6 +111,8 @@ type DB struct {
 }
 
 type WechatAccount struct {
+	OwnerUserID   int64          `json:"-"`
+	OwnerRole     string         `json:"-"`
 	ID            int64          `json:"id"`
 	OpenID        string         `json:"openid"`
 	UIN           *int64         `json:"uin,omitempty"`
@@ -123,27 +142,32 @@ type AccountPublic struct {
 }
 
 type ProxyProfile struct {
-	ID        int64  `json:"id"`
-	Name      string `json:"name"`
-	Protocol  string `json:"protocol"`
-	Host      string `json:"host"`
-	Port      int    `json:"port"`
-	Username  string `json:"username"`
-	Password  string `json:"-"`
-	CreatedAt int64  `json:"created_at"`
-	UpdatedAt int64  `json:"updated_at"`
+	ID              int64  `json:"id"`
+	Name            string `json:"name"`
+	Protocol        string `json:"protocol"`
+	Host            string `json:"host"`
+	Port            int    `json:"port"`
+	Username        string `json:"username"`
+	Password        string `json:"-"`
+	OwnerUserID     int64  `json:"-"`
+	SharedWithUsers bool   `json:"shared_with_users"`
+	CreatedAt       int64  `json:"created_at"`
+	UpdatedAt       int64  `json:"updated_at"`
 }
 
 type ProxyProfilePublic struct {
 	ID                 int64  `json:"id"`
 	Name               string `json:"name"`
-	Protocol           string `json:"protocol"`
-	Host               string `json:"host"`
-	Port               int    `json:"port"`
-	Username           string `json:"username"`
-	PasswordConfigured bool   `json:"password_configured"`
-	CreatedAt          int64  `json:"created_at"`
-	UpdatedAt          int64  `json:"updated_at"`
+	Protocol           string `json:"protocol,omitempty"`
+	Host               string `json:"host,omitempty"`
+	Port               int    `json:"port,omitempty"`
+	Username           string `json:"username,omitempty"`
+	PasswordConfigured bool   `json:"password_configured,omitempty"`
+	SharedWithUsers    bool   `json:"shared_with_users,omitempty"`
+	OwnerUserID        int64  `json:"owner_user_id,omitempty"`
+	Redacted           bool   `json:"redacted,omitempty"`
+	CreatedAt          int64  `json:"created_at,omitempty"`
+	UpdatedAt          int64  `json:"updated_at,omitempty"`
 }
 
 type AccountProxySetting struct {
@@ -187,21 +211,50 @@ func Open(path string) (*DB, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err = db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
-		_ = db.Close()
+		db.Close()
 		return nil, err
 	}
+	var version, tables int
+	if err = db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err = db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&tables); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if tables > 0 && version != SchemaVersion {
+		db.Close()
+		return nil, fmt.Errorf("unsupported database schema %d; initialize a new test database", version)
+	}
+	pragmas := []string{"PRAGMA synchronous=NORMAL", "PRAGMA foreign_keys=ON", "PRAGMA secure_delete=ON"}
 	if path != ":memory:" {
-		_, _ = db.ExecContext(ctx, "PRAGMA journal_mode=WAL")
+		pragmas = append(pragmas, "PRAGMA journal_mode=WAL")
 	}
-	_, _ = db.ExecContext(ctx, "PRAGMA synchronous=NORMAL")
-	_, _ = db.ExecContext(ctx, "PRAGMA foreign_keys=ON")
-	if err = migrateSessionsTable(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, err
+	for _, statement := range pragmas {
+		if _, err = db.ExecContext(ctx, statement); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
-	if _, err = db.ExecContext(ctx, schema); err != nil {
-		_ = db.Close()
-		return nil, err
+	if tables == 0 {
+		tx, beginErr := db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			db.Close()
+			return nil, beginErr
+		}
+		if _, err = tx.ExecContext(ctx, schema); err == nil {
+			_, err = tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", SchemaVersion))
+		}
+		if err != nil {
+			tx.Rollback()
+			db.Close()
+			return nil, err
+		}
+		if err = tx.Commit(); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	out := &DB{sql: db}
 	if err = out.EnsureDefaultFeatures(ctx); err != nil {
@@ -231,43 +284,20 @@ func (db *DB) EnsureDefaultFeatures(ctx context.Context) error {
 	return nil
 }
 
-func migrateSessionsTable(ctx context.Context, db *sql.DB) error {
-	oldExists, err := sqliteTableExists(ctx, db, "wmpf_sessions")
-	if err != nil {
-		return err
+func boolInt(value bool) int {
+	if value {
+		return 1
 	}
-	if !oldExists {
-		return nil
-	}
-	newExists, err := sqliteTableExists(ctx, db, "sessions")
-	if err != nil {
-		return err
-	}
-	if !newExists {
-		if _, err = db.ExecContext(ctx, "DROP INDEX IF EXISTS idx_sess_expires"); err != nil {
-			return err
-		}
-		_, err = db.ExecContext(ctx, "ALTER TABLE wmpf_sessions RENAME TO sessions")
-		return err
-	}
-	if _, err = db.ExecContext(ctx, `
-INSERT OR IGNORE INTO sessions
-(id, wechat_account_id, uin, tcp_proxy, session_blob, expires_at, created_at, updated_at)
-SELECT id, wechat_account_id, uin, tcp_proxy, session_blob, expires_at, created_at, updated_at
-FROM wmpf_sessions`); err != nil {
-		return err
-	}
-	_, err = db.ExecContext(ctx, "DROP TABLE wmpf_sessions")
-	return err
+	return 0
 }
 
-func sqliteTableExists(ctx context.Context, db *sql.DB, name string) (bool, error) {
-	var n int
-	err := db.QueryRowContext(ctx, "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?", name).Scan(&n)
-	return n > 0, err
-}
-
-func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, alias, nickname, avatar *string, userInfo map[string]any, credentials map[string]any, status *string) (*WechatAccount, error) {
+func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, ownerUserID int64, ownerRole string, alias, nickname, avatar *string, userInfo map[string]any, credentials map[string]any, status *string) (*WechatAccount, error) {
+	if !validProxyIdentity(ownerRole, ownerUserID) || ownerUserID < 1000 {
+		return nil, fmt.Errorf("account owner is required")
+	}
+	if err := db.CheckActiveUser(ctx, ownerUserID); err != nil {
+		return nil, err
+	}
 	now := time.Now().Unix()
 	userJSON, err := marshalNullable(userInfo)
 	if err != nil {
@@ -279,47 +309,70 @@ func (db *DB) UpsertAccount(ctx context.Context, openid, loginBuffer string, ali
 	}
 	_, err = db.sql.ExecContext(ctx,
 		`INSERT INTO wechat_accounts
-		(openid, login_buffer, alias, nickname, avatar, user_info, credentials, status, created_at, updated_at)
-		VALUES(?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(openid) DO UPDATE SET
+		(openid, login_buffer, owner_user_id, owner_role, alias, nickname, avatar, user_info, credentials, status, created_at, updated_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(owner_user_id, openid) DO UPDATE SET
 		login_buffer=excluded.login_buffer, alias=excluded.alias, nickname=excluded.nickname,
 		avatar=excluded.avatar, user_info=excluded.user_info, credentials=excluded.credentials,
-		status=excluded.status, updated_at=excluded.updated_at`,
-		openid, loginBuffer, nullableString(alias), nullableString(nickname), nullableString(avatar),
+		status=excluded.status, updated_at=excluded.updated_at WHERE wechat_accounts.owner_user_id=excluded.owner_user_id`,
+		openid, loginBuffer, ownerUserID, ownerRole, nullableString(alias), nullableString(nickname), nullableString(avatar),
 		userJSON, credJSON, nullableString(status), now, now,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return db.GetAccountByOpenID(ctx, openid)
+	account, err := db.GetAccountByOpenID(ctx, openid, ownerUserID)
+	if err == nil && account.OwnerUserID != ownerUserID {
+		return nil, fmt.Errorf("account belongs to another user")
+	}
+	return account, err
 }
 
 func (db *DB) GetAccount(ctx context.Context, id int64) (*WechatAccount, error) {
 	return db.scanAccount(db.sql.QueryRowContext(ctx, selectAccountSQL+" WHERE id=?", id))
 }
 
-func (db *DB) GetAccountByOpenID(ctx context.Context, openid string) (*WechatAccount, error) {
-	return db.scanAccount(db.sql.QueryRowContext(ctx, selectAccountSQL+" WHERE openid=?", openid))
+func (db *DB) GetAccountByOpenID(ctx context.Context, openid string, userID int64) (*WechatAccount, error) {
+	return db.scanAccount(db.sql.QueryRowContext(ctx, selectAccountSQL+" WHERE openid=? AND owner_user_id=?", openid, userID))
 }
 
-func (db *DB) GetAccountByUIN(ctx context.Context, uin int64) (*WechatAccount, error) {
-	return db.scanAccount(db.sql.QueryRowContext(ctx, selectAccountSQL+" WHERE uin=?", uin))
-}
-
-func (db *DB) ResolveAccount(ctx context.Context, ref string) (*WechatAccount, error) {
-	if ref == "" {
+// ResolveAccount uses a farm database ID or an explicitly scoped OpenID. UIN aliases are not accepted.
+func (db *DB) ResolveAccount(ctx context.Context, ref, role string, userID int64) (*WechatAccount, error) {
+	if !validProxyIdentity(role, userID) || ref == "" {
 		return nil, sql.ErrNoRows
 	}
 	if isDigits(ref) {
-		n, _ := strconv.ParseInt(ref, 10, 64)
-		if acc, err := db.GetAccountByUIN(ctx, n); err == nil {
-			return acc, nil
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return nil, err
+		n, err := strconv.ParseInt(ref, 10, 64)
+		if err != nil || strconv.FormatInt(n, 10) != ref {
+			return nil, sql.ErrNoRows
 		}
 		return db.GetAccount(ctx, n)
 	}
-	return db.GetAccountByOpenID(ctx, ref)
+	if role != "admin" {
+		return db.GetAccountByOpenID(ctx, ref, userID)
+	}
+	rows, err := db.sql.QueryContext(ctx, selectAccountSQL+" WHERE openid=?", ref)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var account *WechatAccount
+	for rows.Next() {
+		if account != nil {
+			return nil, fmt.Errorf("multiple user accounts match; use the account ID")
+		}
+		account, err = scanAccountRows(rows)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if account == nil {
+		return nil, sql.ErrNoRows
+	}
+	return account, nil
 }
 
 func (db *DB) ListAccounts(ctx context.Context) ([]*WechatAccount, error) {
@@ -382,8 +435,18 @@ func (db *DB) DeleteAccount(ctx context.Context, id int64) error {
 	return err
 }
 
-func (db *DB) ListProxyProfiles(ctx context.Context) ([]ProxyProfilePublic, error) {
-	rows, err := db.sql.QueryContext(ctx, `SELECT id, name, protocol, host, port, username, password, created_at, updated_at FROM proxy_profiles ORDER BY name, id`)
+func (db *DB) ListProxyProfiles(ctx context.Context, role string, userID int64) ([]ProxyProfilePublic, error) {
+	if !validProxyIdentity(role, userID) {
+		return nil, fmt.Errorf("valid user identity required")
+	}
+	query := `SELECT id, name, protocol, host, port, username, password, owner_user_id, shared_with_users, created_at, updated_at FROM proxy_profiles`
+	args := []any{}
+	if role != "admin" {
+		query += ` WHERE owner_user_id=? OR (owner_user_id=1000 AND shared_with_users=1)`
+		args = append(args, userID)
+	}
+	query += ` ORDER BY name, id`
+	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -394,32 +457,35 @@ func (db *DB) ListProxyProfiles(ctx context.Context) ([]ProxyProfilePublic, erro
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, profile.Public())
+		out = append(out, profile.PublicFor(role, userID))
 	}
 	return out, rows.Err()
 }
 
 func (db *DB) GetProxyProfile(ctx context.Context, id int64) (*ProxyProfile, error) {
-	return scanProxyProfile(db.sql.QueryRowContext(ctx, `SELECT id, name, protocol, host, port, username, password, created_at, updated_at FROM proxy_profiles WHERE id=?`, id))
+	return scanProxyProfile(db.sql.QueryRowContext(ctx, `SELECT id, name, protocol, host, port, username, password, owner_user_id, shared_with_users, created_at, updated_at FROM proxy_profiles WHERE id=?`, id))
 }
 
-func (db *DB) UpsertProxyProfile(ctx context.Context, id int64, name, protocolName, host string, port int, username, password string, keepPassword bool) (*ProxyProfile, error) {
+func (db *DB) UpsertProxyProfile(ctx context.Context, id int64, name, protocolName, host string, port int, username, password string, keepPassword bool, owner int64, shared bool) (*ProxyProfile, error) {
+	if err := db.CheckActiveUser(ctx, owner); err != nil {
+		return nil, err
+	}
 	now := time.Now().Unix()
 	if id > 0 {
 		if keepPassword {
-			_, err := db.sql.ExecContext(ctx, `UPDATE proxy_profiles SET name=?, protocol=?, host=?, port=?, username=?, updated_at=? WHERE id=?`, name, protocolName, host, port, username, now, id)
+			_, err := db.sql.ExecContext(ctx, `UPDATE proxy_profiles SET name=?, protocol=?, host=?, port=?, username=?, owner_user_id=?, shared_with_users=?, updated_at=? WHERE id=?`, name, protocolName, host, port, username, owner, boolInt(shared && owner == 1000), now, id)
 			if err != nil {
 				return nil, err
 			}
 		} else {
-			_, err := db.sql.ExecContext(ctx, `UPDATE proxy_profiles SET name=?, protocol=?, host=?, port=?, username=?, password=?, updated_at=? WHERE id=?`, name, protocolName, host, port, username, password, now, id)
+			_, err := db.sql.ExecContext(ctx, `UPDATE proxy_profiles SET name=?, protocol=?, host=?, port=?, username=?, password=?, owner_user_id=?, shared_with_users=?, updated_at=? WHERE id=?`, name, protocolName, host, port, username, password, owner, boolInt(shared && owner == 1000), now, id)
 			if err != nil {
 				return nil, err
 			}
 		}
 		return db.GetProxyProfile(ctx, id)
 	}
-	result, err := db.sql.ExecContext(ctx, `INSERT INTO proxy_profiles(name, protocol, host, port, username, password, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)`, name, protocolName, host, port, username, password, now, now)
+	result, err := db.sql.ExecContext(ctx, `INSERT INTO proxy_profiles(name, protocol, host, port, username, password, owner_user_id, shared_with_users, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, name, protocolName, host, port, username, password, owner, boolInt(shared && owner == 1000), now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -442,7 +508,10 @@ func (db *DB) DeleteProxyProfile(ctx context.Context, id int64) error {
 	return err
 }
 
-func (db *DB) GetAccountProxySetting(ctx context.Context, accountID int64) (AccountProxySetting, error) {
+func (db *DB) GetAccountProxySetting(ctx context.Context, accountID int64, role string, userID int64) (AccountProxySetting, error) {
+	if !validProxyIdentity(role, userID) {
+		return AccountProxySetting{}, fmt.Errorf("valid user identity required")
+	}
 	setting := AccountProxySetting{AccountID: accountID, Mode: "direct"}
 	var profileID sql.NullInt64
 	err := db.sql.QueryRowContext(ctx, `SELECT mode, proxy_profile_id, updated_at FROM account_proxy_settings WHERE wechat_account_id=?`, accountID).Scan(&setting.Mode, &profileID, &setting.UpdatedAt)
@@ -454,31 +523,70 @@ func (db *DB) GetAccountProxySetting(ctx context.Context, accountID int64) (Acco
 	}
 	if profileID.Valid {
 		setting.ProxyProfileID = &profileID.Int64
-		if profile, getErr := db.GetProxyProfile(ctx, profileID.Int64); getErr == nil {
-			public := profile.Public()
-			setting.Profile = &public
+		profile, getErr := db.GetProxyProfile(ctx, profileID.Int64)
+		if getErr != nil {
+			return AccountProxySetting{}, getErr
 		}
+		if !profile.AvailableTo(role, userID) {
+			return AccountProxySetting{}, fmt.Errorf("proxy profile is not available to this user")
+		}
+		public := profile.PublicFor(role, userID)
+		setting.Profile = &public
 	}
 	return setting, nil
 }
 
-func (db *DB) SetAccountProxySetting(ctx context.Context, accountID int64, mode string, profileID *int64) (AccountProxySetting, error) {
+func (db *DB) SetAccountProxySetting(ctx context.Context, accountID int64, mode string, profileID *int64, role string, userID int64) (AccountProxySetting, error) {
+	if !validProxyIdentity(role, userID) {
+		return AccountProxySetting{}, fmt.Errorf("valid user identity required")
+	}
+	if (mode != "direct" && mode != "static") || (mode == "static" && (profileID == nil || *profileID <= 0)) {
+		return AccountProxySetting{}, fmt.Errorf("valid proxy setting required")
+	}
+	if mode == "direct" {
+		profileID = nil
+	}
+	if mode == "static" && profileID != nil {
+		profile, err := db.GetProxyProfile(ctx, *profileID)
+		if err != nil {
+			return AccountProxySetting{}, err
+		}
+		if !profile.AvailableTo(role, userID) {
+			return AccountProxySetting{}, fmt.Errorf("proxy profile is not available to this user")
+		}
+	}
 	now := time.Now().Unix()
 	_, err := db.sql.ExecContext(ctx, `INSERT INTO account_proxy_settings(wechat_account_id, mode, proxy_profile_id, updated_at) VALUES(?,?,?,?) ON CONFLICT(wechat_account_id) DO UPDATE SET mode=excluded.mode, proxy_profile_id=excluded.proxy_profile_id, updated_at=excluded.updated_at`, accountID, mode, nullableInt(profileID), now)
 	if err != nil {
 		return AccountProxySetting{}, err
 	}
-	return db.GetAccountProxySetting(ctx, accountID)
+	return db.GetAccountProxySetting(ctx, accountID, role, userID)
 }
 
 func (db *DB) ResolveAccountTCPProxy(ctx context.Context, accountID int64) (string, error) {
-	setting, err := db.GetAccountProxySetting(ctx, accountID)
-	if err != nil || setting.Mode != "static" || setting.ProxyProfileID == nil {
+	account, err := db.GetAccount(ctx, accountID)
+	if err != nil {
 		return "", err
+	}
+	if err := db.CheckActiveUser(ctx, account.OwnerUserID); err != nil {
+		return "", err
+	}
+	setting, err := db.GetAccountProxySetting(ctx, accountID, account.OwnerRole, account.OwnerUserID)
+	if err != nil {
+		return "", err
+	}
+	if setting.Mode == "direct" {
+		return "", nil
+	}
+	if setting.Mode != "static" || setting.ProxyProfileID == nil {
+		return "", fmt.Errorf("invalid static proxy binding")
 	}
 	profile, err := db.GetProxyProfile(ctx, *setting.ProxyProfileID)
 	if err != nil {
 		return "", err
+	}
+	if !profile.AvailableTo(account.OwnerRole, account.OwnerUserID) {
+		return "", fmt.Errorf("proxy profile is unavailable to account owner")
 	}
 	return profile.ProxyURL(), nil
 }
@@ -599,7 +707,7 @@ func (a *WechatAccount) Public() AccountPublic {
 	}
 }
 
-const selectAccountSQL = `SELECT id, openid, uin, alias, nickname, avatar, user_info, login_buffer, credentials, status, last_checked_at, created_at, updated_at FROM wechat_accounts`
+const selectAccountSQL = `SELECT id, openid, owner_user_id, owner_role, uin, alias, nickname, avatar, user_info, login_buffer, credentials, status, last_checked_at, created_at, updated_at FROM wechat_accounts`
 
 type accountScanner interface {
 	Scan(dest ...any) error
@@ -609,18 +717,36 @@ type featureScanner interface {
 	Scan(dest ...any) error
 }
 
-func (p ProxyProfile) Public() ProxyProfilePublic {
-	return ProxyProfilePublic{
-		ID: p.ID, Name: p.Name, Protocol: p.Protocol, Host: p.Host, Port: p.Port,
-		Username: p.Username, PasswordConfigured: p.Password != "", CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
+func (p ProxyProfile) PublicFor(role string, userID int64) ProxyProfilePublic {
+	owner := p.OwnedBy(userID)
+
+	if role != "admin" && !owner {
+		return ProxyProfilePublic{ID: p.ID, Name: p.Name, Redacted: true}
 	}
+	public := ProxyProfilePublic{
+		ID: p.ID, Name: p.Name, Protocol: p.Protocol, Host: p.Host, Port: p.Port,
+		Username: p.Username, PasswordConfigured: p.Password != "", SharedWithUsers: p.SharedWithUsers, CreatedAt: p.CreatedAt, UpdatedAt: p.UpdatedAt,
+	}
+	if role == "admin" {
+		public.OwnerUserID = p.OwnerUserID
+	}
+	return public
+}
+
+func (p ProxyProfile) OwnedBy(userID int64) bool {
+	return userID >= 1000 && p.OwnerUserID == userID
+}
+
+func (p ProxyProfile) AvailableTo(role string, userID int64) bool {
+	return validProxyIdentity(role, userID) && (role == "admin" || p.OwnedBy(userID) || (p.OwnerUserID == 1000 && p.SharedWithUsers))
+}
+
+func validProxyIdentity(role string, userID int64) bool {
+	return userID <= 9007199254740991 && ((role == "admin" && userID == 1000) || (role == "user" && userID > 1000))
 }
 
 func (p ProxyProfile) ProxyURL() string {
 	scheme := p.Protocol
-	if scheme == "http" {
-		scheme = "http-connect"
-	}
 	u := &url.URL{Scheme: scheme, Host: net.JoinHostPort(p.Host, strconv.Itoa(p.Port))}
 	if p.Username != "" {
 		if p.Password != "" {
@@ -634,7 +760,7 @@ func (p ProxyProfile) ProxyURL() string {
 
 func scanProxyProfile(row accountScanner) (*ProxyProfile, error) {
 	var profile ProxyProfile
-	if err := row.Scan(&profile.ID, &profile.Name, &profile.Protocol, &profile.Host, &profile.Port, &profile.Username, &profile.Password, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
+	if err := row.Scan(&profile.ID, &profile.Name, &profile.Protocol, &profile.Host, &profile.Port, &profile.Username, &profile.Password, &profile.OwnerUserID, &profile.SharedWithUsers, &profile.CreatedAt, &profile.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &profile, nil
@@ -653,7 +779,7 @@ func scanAccountRows(row accountScanner) (*WechatAccount, error) {
 		status                  sql.NullString
 	)
 	err := row.Scan(
-		&a.ID, &a.OpenID, &uin, &alias, &nickname, &avatar, &userJSON,
+		&a.ID, &a.OpenID, &a.OwnerUserID, &a.OwnerRole, &uin, &alias, &nickname, &avatar, &userJSON,
 		&a.LoginBuffer, &credJSON, &status, &lastChecked, &a.CreatedAt, &a.UpdatedAt,
 	)
 	if err != nil {
@@ -670,10 +796,14 @@ func scanAccountRows(row accountScanner) (*WechatAccount, error) {
 		a.LastCheckedAt = &lastChecked.Int64
 	}
 	if userJSON.Valid && userJSON.String != "" {
-		_ = json.Unmarshal([]byte(userJSON.String), &a.UserInfo)
+		if err := json.Unmarshal([]byte(userJSON.String), &a.UserInfo); err != nil {
+			return nil, err
+		}
 	}
 	if credJSON.Valid && credJSON.String != "" {
-		_ = json.Unmarshal([]byte(credJSON.String), &a.Credentials)
+		if err := json.Unmarshal([]byte(credJSON.String), &a.Credentials); err != nil {
+			return nil, err
+		}
 	}
 	return &a, nil
 }
@@ -750,4 +880,68 @@ func isDigits(s string) bool {
 		}
 	}
 	return true
+}
+
+func (db *DB) CheckActiveUser(ctx context.Context, userID int64) error {
+	if userID < 1000 || userID > 9007199254740991 {
+		return fmt.Errorf("userID is required")
+	}
+	var retired int
+	if err := db.sql.QueryRowContext(ctx, "SELECT count(*) FROM retired_users WHERE user_id=?", userID).Scan(&retired); err != nil {
+		return err
+	}
+	if retired != 0 {
+		return fmt.Errorf("user is permanently retired")
+	}
+	return nil
+}
+
+func (db *DB) PurgeUser(ctx context.Context, userID int64) ([]string, error) {
+	if userID <= 1000 {
+		return nil, fmt.Errorf("userID is required")
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, "SELECT openid FROM wechat_accounts WHERE owner_user_id=?", userID)
+	if err != nil {
+		return nil, err
+	}
+	openids := []string{}
+	for rows.Next() {
+		var openid string
+		if err := rows.Scan(&openid); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		openids = append(openids, openid)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, statement := range []string{
+		"INSERT OR IGNORE INTO retired_users(user_id) VALUES(?)",
+		"DELETE FROM wechat_accounts WHERE owner_user_id=?",
+		"DELETE FROM proxy_profiles WHERE owner_user_id=?",
+	} {
+		if _, err := tx.ExecContext(ctx, statement, userID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	// Truncate WAL pages that held the deleted credentials before reporting completion.
+	var busy, logPages, checkpointed int
+	if err := db.sql.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logPages, &checkpointed); err != nil {
+		return nil, err
+	}
+	if busy != 0 {
+		return nil, fmt.Errorf("user deletion checkpoint is busy")
+	}
+	return openids, nil
 }

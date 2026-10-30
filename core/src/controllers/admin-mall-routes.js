@@ -1,12 +1,7 @@
-const { parseMallPriceValue, parseMallLimitInfo } = require("../services/mall");
+const { getMallUnitPrice, parseMallLimitInfo } = require("../services/mall");
   const { toNum } = require("../utils/utils");
 
 const MALL_GOODS_ORDER = [1002, 1003, 1006];
-const MALL_GOODS_PRICE_OVERRIDES = {
-  1002: 42,
-  1003: 34,
-  1006: 33,
-};
 const MALL_GOODS_META = {
   1002: {
     name: "10小时有机化肥",
@@ -91,27 +86,16 @@ function registerAdminMallRoutes({
         if (!meta) continue;
 
         const isFree = discount.is_free === true;
-        const isLimited = discount.is_limited === true;
-        const price =
-          MALL_GOODS_PRICE_OVERRIDES[id] || parseMallPriceValue(discount.price);
-        let limitCount = 0;
-        let boughtNum = 0;
-        if (isLimited && discount.limit) {
-          try {
-            const limitInfo = parseMallLimitInfo(discount.limit);
-            if (limitInfo) {
-              limitCount = limitInfo.limitCount || 0;
-              boughtNum = limitInfo.boughtNum || 0;
-            }
-          } catch {}
-        }
+        const price = getMallUnitPrice(discount);
+        const { limitCount, boughtNum } = parseMallLimitInfo(discount.purchase_limit);
+        const isLimited = limitCount > 0;
 
         const isSoldOut = limitCount > 0 && boughtNum >= limitCount;
         goods.push({
           id,
           goodsId: id,
           name: meta.name,
-          type: toNum(discount.type) || 0,
+          type: toNum(discount.goods_type) || 0,
           itemIds: [],
           price,
           isFree,
@@ -119,10 +103,11 @@ function registerAdminMallRoutes({
           limitCount,
           boughtNum,
           isSoldOut,
-          discount: discount.discount || "",
+          discount: discount.discount_text || "",
           images: meta.images,
           layout: meta.layout,
-          canBuy: !isSoldOut && (isFree || userTicket >= price),
+          canBuy: discount.is_available === true && !discount.ad_only && !discount.share?.share_only
+            && !isSoldOut && (isFree || (toNum(discount.price?.id) === 1002 && userTicket >= price)),
         });
       }
 
@@ -153,8 +138,8 @@ function registerAdminMallRoutes({
 
     try {
       const { goodsId, count } = req.body || {};
-      if (!goodsId || !count) {
-        return res.status(400).json({ ok: false, error: "参数不完整" });
+      if (!Number.isSafeInteger(goodsId) || goodsId <= 0 || !Number.isSafeInteger(count) || count <= 0) {
+        return res.status(400).json({ ok: false, error: "商品 ID 和数量必须为正整数" });
       }
 
       const data = await provider.buyMallGoods(accountId, goodsId, count);

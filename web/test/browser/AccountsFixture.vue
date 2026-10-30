@@ -9,7 +9,7 @@ import Dashboard from '../../src/views/Dashboard.vue'
 const showDashboard = new URLSearchParams(location.search).has('dashboard')
 
 // Mount production components and composable; Playwright intercepts every API request.
-useUserStore().userInfo = { username: 'test-admin', role: 'admin', card: null, accountLimit: -1 }
+useUserStore().userInfo = { id: 1000, username: 'test-admin', role: 'admin', card: null, accountLimit: -1 }
 const alert = ref('')
 const state = reactive(useAccountSettings(message => alert.value = message))
 const accountStore = useAccountStore()

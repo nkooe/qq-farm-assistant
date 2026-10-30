@@ -1,12 +1,15 @@
 import type { UserCard } from '@/stores/user'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import api from '@/api'
 import { useToastStore } from '@/stores/toast'
 import { useUserStore } from '@/stores/user'
 
 export interface UserInfo {
+  id: number
   username: string
   role: string
+  createdAt: number
+  accessStatus: 'normal' | 'banned' | 'expired' | 'card_required' | 'deleting'
   card: UserCard | null
   accountLimit: number
 }
@@ -29,12 +32,6 @@ function formatDateTimeLocal(timestamp: number): string {
   return `${year}-${month}-${day}T${hours}:${minutes}`
 }
 
-function isExpired(card: UserCard | null) {
-  if (!card?.expiresAt)
-    return false
-  return Date.now() > card.expiresAt
-}
-
 export function useAdminUsers() {
   const userStore = useUserStore()
   const toast = useToastStore()
@@ -53,6 +50,11 @@ export function useAdminUsers() {
   const showClearExpiredUsersConfirm = ref(false)
   const clearExpiredUsersLoading = ref(false)
   const showEditUserConfirm = ref(false)
+  const selectedUserIds = ref<Set<number>>(new Set())
+  const pendingDeleteUsers = ref<UserInfo[]>([])
+  const showDeleteSelectedUsersConfirm = ref(false)
+  const deleteSelectedUsersLoading = ref(false)
+  const deleteSelectedUsersError = ref('')
 
   const users = ref<UserInfo[]>([])
   const usersLoading = ref(false)
@@ -68,12 +70,13 @@ export function useAdminUsers() {
   })
   const editLoading = ref(false)
 
+  const currentUserId = computed(() => userStore.userId)
   const currentUsername = computed(() => userStore.username)
   const activeUsersCount = computed(() =>
-    users.value.filter(user => user.card && user.card.enabled !== false && !isExpired(user.card)).length,
+    users.value.filter(user => user.role !== 'admin' && user.accessStatus === 'normal').length,
   )
   const expiredUsersCount = computed(() =>
-    users.value.filter(user => user.card && isExpired(user.card)).length,
+    users.value.filter(user => user.role !== 'admin' && user.card?.expiresAt && user.card.expiresAt < Date.now()).length,
   )
   const adminUsersCount = computed(() =>
     users.value.filter(user => user.role === 'admin').length,
@@ -83,14 +86,27 @@ export function useAdminUsers() {
     if (!query)
       return users.value
 
-    return users.value.filter(user => user.username.toLowerCase().includes(query))
+    return users.value.filter(user => (String(user.id).includes(query) || user.username.toLowerCase().includes(query)))
   })
-  const userManagementSummary = computed(() => {
-    if (expiredUsersCount.value > 0)
-      return `当前检测到 ${expiredUsersCount.value} 个到期账号，清理前建议先确认这些用户是否仍需保留。`
-    if (activeUsersCount.value > 0)
-      return `当前有 ${activeUsersCount.value} 个正常用户处于可用状态，适合优先核对续费、封禁和额度是否一致。`
-    return '当前没有正常用户处于可用状态，适合先检查续费链路或用户发放是否异常。'
+  const selectableUsers = computed(() => filteredUsers.value.filter(user => user.role !== 'admin' && user.id !== currentUserId.value))
+  const selectedUsers = computed(() => users.value.filter(user => selectedUserIds.value.has(user.id)))
+  const allVisibleUsersSelected = computed(() => selectableUsers.value.length > 0 && selectableUsers.value.every(user => selectedUserIds.value.has(user.id)))
+  const someVisibleUsersSelected = computed(() => selectableUsers.value.some(user => selectedUserIds.value.has(user.id)))
+  function clearUserSelection() { selectedUserIds.value = new Set() }
+  function toggleSelectUser(userId: number) {
+    if (!selectableUsers.value.some(user => user.id === userId)) return
+    const next = new Set(selectedUserIds.value)
+    if (next.has(userId)) next.delete(userId)
+    else next.add(userId)
+    selectedUserIds.value = next
+  }
+  function toggleSelectAllUsers() {
+    selectedUserIds.value = allVisibleUsersSelected.value ? new Set() : new Set(selectableUsers.value.map(user => user.id))
+  }
+  watch(userSearchQuery, clearUserSelection)
+  watch(users, () => {
+    const allowed = new Set(users.value.filter(user => user.role !== 'admin' && user.id !== currentUserId.value).map(user => user.id))
+    selectedUserIds.value = new Set([...selectedUserIds.value].filter(id => allowed.has(id)))
   })
 
   async function fetchUsers() {
@@ -124,12 +140,13 @@ export function useAdminUsers() {
     toggleUserStatusLoading.value = true
     try {
       const user = pendingToggleUser.value
-      const updates: Partial<UserCard> = { enabled: !user.card?.enabled }
-      const result = await userStore.updateUser(user.username, updates, {
+      const wasBanned = user.card?.enabled === false
+      const updates: Partial<UserCard> = { enabled: wasBanned }
+      const result = await userStore.updateUser(user.id, updates, {
         confirmed: true,
       })
       if (result.ok) {
-        toast.success(user.card?.enabled ? '用户已封禁' : '用户已解封')
+        toast.success(wasBanned ? '用户已解封' : '用户已封禁')
         showToggleUserStatusConfirm.value = false
         pendingToggleUser.value = null
         await fetchUsers()
@@ -151,13 +168,49 @@ export function useAdminUsers() {
     showDeleteUserConfirm.value = true
   }
 
+  function requestDeleteSelectedUsers() {
+    pendingDeleteUsers.value = selectedUsers.value.filter(user => user.role !== 'admin' && user.id !== currentUserId.value)
+    if (!pendingDeleteUsers.value.length) return
+    deleteSelectedUsersError.value = ''
+    showDeleteSelectedUsersConfirm.value = true
+  }
+
+  async function confirmDeleteSelectedUsers() {
+    if (deleteSelectedUsersLoading.value || !pendingDeleteUsers.value.length) return
+    deleteSelectedUsersLoading.value = true
+    deleteSelectedUsersError.value = ''
+    const failed: UserInfo[] = []
+    let deleted = 0
+    try {
+      for (const user of pendingDeleteUsers.value) {
+        try {
+          const result = await userStore.deleteUser(user.id, { confirmed: true })
+          if (!result.ok) throw new Error(result.error || '删除失败')
+          deleted++
+          selectedUserIds.value.delete(user.id)
+          users.value = users.value.filter(item => item.id !== user.id)
+        }
+        catch (error: any) {
+          failed.push(user)
+          deleteSelectedUsersError.value = error?.response?.data?.error || error?.message || '删除失败'
+        }
+      }
+      if (deleted) toast.success(`已删除 ${deleted} 个用户及其全部数据`)
+      pendingDeleteUsers.value = failed
+      if (failed.length) deleteSelectedUsersError.value = `${failed.length} 个用户未删除：${deleteSelectedUsersError.value}。可重试下列用户。`
+      else showDeleteSelectedUsersConfirm.value = false
+      await fetchUsers()
+    }
+    finally { deleteSelectedUsersLoading.value = false }
+  }
+
   async function confirmDeleteUser() {
     if (!pendingDeleteUser.value)
       return
 
     deleteUserLoading.value = true
     try {
-      const result = await userStore.deleteUser(pendingDeleteUser.value.username, {
+      const result = await userStore.deleteUser(pendingDeleteUser.value.id, {
         confirmed: true,
       })
       if (result.ok) {
@@ -208,7 +261,7 @@ export function useAdminUsers() {
 
     renewUserLoading.value = true
     try {
-      const result = await userStore.renewUser(pendingRenewUser.value.username, cardCode, {
+      const result = await userStore.renewUser(pendingRenewUser.value.id, cardCode, {
         confirmed: true,
       })
       if (result.ok) {
@@ -306,7 +359,7 @@ export function useAdminUsers() {
       if (editForm.value.password)
         updateData.password = editForm.value.password
 
-      const res = await api.post(`/api/admin/users/${selectedUser.value.username}/edit`, updateData)
+      const res = await api.post(`/api/admin/users/${selectedUser.value.id}/edit`, updateData)
 
       if (res.data.ok) {
         toast.success('用户信息已更新')
@@ -327,6 +380,20 @@ export function useAdminUsers() {
   }
 
   return {
+    selectedUserIds,
+    selectedUsers,
+    selectableUsers,
+    allVisibleUsersSelected,
+    someVisibleUsersSelected,
+    clearUserSelection,
+    toggleSelectUser,
+    toggleSelectAllUsers,
+    pendingDeleteUsers,
+    showDeleteSelectedUsersConfirm,
+    deleteSelectedUsersLoading,
+    deleteSelectedUsersError,
+    requestDeleteSelectedUsers,
+    confirmDeleteSelectedUsers,
     showDeleteUserConfirm,
     pendingDeleteUser,
     deleteUserLoading,
@@ -350,10 +417,10 @@ export function useAdminUsers() {
     editForm,
     editLoading,
     currentUsername,
+    currentUserId,
     activeUsersCount,
     expiredUsersCount,
     adminUsersCount,
-    userManagementSummary,
     fetchUsers,
     requestToggleUserStatus,
     confirmToggleUserStatus,

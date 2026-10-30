@@ -14,7 +14,7 @@ func TestInternalProxyCredentialsAreLocalAndBearerOnly(t *testing.T) {
 	previous := ApiToken
 	ApiToken = "fixture-local-service"
 	t.Cleanup(func() { ApiToken = previous })
-	profile, err := a.db.UpsertProxyProfile(context.Background(), 0, "Fixture", "socks5", "127.0.0.1", 1080, "test", "private", false)
+	profile, err := a.db.UpsertProxyProfile(context.Background(), 0, "Fixture", "socks5", "127.0.0.1", 1080, "test", "private", false, 1000, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +28,8 @@ func TestInternalProxyCredentialsAreLocalAndBearerOnly(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/internal/proxy-url", strings.NewReader(string(payload)))
 		req.RemoteAddr = tc.addr
 		req.Header.Set("Authorization", "Bearer "+tc.token)
+		req.Header.Set("X-Farm-Role", "admin")
+		req.Header.Set("X-Farm-User-ID", "1000")
 		res := httptest.NewRecorder()
 		a.Handler().ServeHTTP(res, req)
 		if res.Code != tc.status {

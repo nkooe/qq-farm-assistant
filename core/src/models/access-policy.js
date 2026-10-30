@@ -1,14 +1,14 @@
+const { isUserIdentity } = require('./user-id');
 const fs = require('node:fs');
 const { ensureDataDir, getDataFile } = require('../config/runtime-paths');
+const { readJsonFileStrict, writeJsonFileAtomic } = require('../services/json-db');
 
 function getAccessPolicy() {
-  try {
-    const data = JSON.parse(fs.readFileSync(getDataFile('access-policy.json'), 'utf8'));
-    return { cardVerificationEnabled: data.cardVerificationEnabled !== false };
-  } catch {
-    // Missing or damaged configuration keeps the existing verification policy.
-    return { cardVerificationEnabled: true };
-  }
+  const file = getDataFile('access-policy.json');
+  if (!fs.existsSync(file)) setAccessPolicy({ cardVerificationEnabled: true });
+  const data = readJsonFileStrict(file);
+  if (typeof data?.cardVerificationEnabled !== 'boolean') throw new Error('卡密验证配置格式无效');
+  return { cardVerificationEnabled: data.cardVerificationEnabled };
 }
 
 function setAccessPolicy(config) {
@@ -18,21 +18,20 @@ function setAccessPolicy(config) {
   const policy = { cardVerificationEnabled: config.cardVerificationEnabled };
   ensureDataDir();
   const file = getDataFile('access-policy.json');
-  const temporaryFile = `${file}.tmp`;
-  fs.writeFileSync(temporaryFile, JSON.stringify(policy, null, 2), { encoding: 'utf8', mode: 0o600 });
-  fs.renameSync(temporaryFile, file);
+  writeJsonFileAtomic(file, policy);
   return policy;
 }
 
-function getUserAccessRejection(user) {
-  if (!user || !['admin', 'user'].includes(user.role)) {
+function getUserAccessRejection(user, policy) {
+  if (!isUserIdentity(user)) {
     return { reason: 'invalid_role', error: '登录状态已失效，请重新登录' };
   }
+  if (user.deleting) return { reason: 'banned', error: '用户数据正在删除，账号已停用' };
   if (user.role === 'admin') return null;
   if (user.card?.enabled === false) {
     return { reason: 'banned', error: '账号已被封禁，请联系管理员' };
   }
-  if (!getAccessPolicy().cardVerificationEnabled) return null;
+  if (!(policy || getAccessPolicy()).cardVerificationEnabled) return null;
   const expiresAt = Number(user.card?.expiresAt);
   const permanent = user.card?.isPermanent === true || user.card?.days === -1 || user.card?.durationValue === -1;
   if (!user.card || (!permanent && (!Number.isFinite(expiresAt) || expiresAt <= 0))) {

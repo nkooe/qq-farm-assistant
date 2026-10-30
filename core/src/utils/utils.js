@@ -101,42 +101,25 @@ function inferModuleFromTag(tag) {
     return tagMap[t] || 'system';
 }
 
-function normalizeLogArgs(arg1, arg2, arg3) {
-    // 新写法: log(msg, meta)
-    if (typeof arg2 !== 'string') {
-        return {
-            tag: '',
-            msg: String(arg1 || ''),
-            meta: arg2 || null,
-        };
-    }
-    // 兼容旧写法: log(tag, msg, meta)
-    return {
-        tag: String(arg1 || ''),
-        msg: String(arg2 || ''),
-        meta: arg3 || null,
-    };
-}
-
-function log(arg1, arg2, arg3 = null) {
-    const { tag, msg, meta } = normalizeLogArgs(arg1, arg2, arg3);
+function log(tag, msg, meta = null) {
+    if (typeof tag !== 'string' || typeof msg !== 'string') throw new TypeError('日志必须使用 log(tag, message, meta)');
     const safeMeta = normalizeMeta(meta);
     if (!safeMeta.module) safeMeta.module = inferModuleFromTag(tag);
     const displayTag = resolveModuleTag(safeMeta.module);
     coreLogger.info(msg, { tag: displayTag, ...safeMeta });
     if (logHook) {
-        try { logHook(displayTag, msg, false, safeMeta); } catch {}
+        logHook(displayTag, msg, false, safeMeta);
     }
 }
 
-function logWarn(arg1, arg2, arg3 = null) {
-    const { tag, msg, meta } = normalizeLogArgs(arg1, arg2, arg3);
+function logWarn(tag, msg, meta = null) {
+    if (typeof tag !== 'string' || typeof msg !== 'string') throw new TypeError('日志必须使用 logWarn(tag, message, meta)');
     const safeMeta = normalizeMeta(meta);
     if (!safeMeta.module) safeMeta.module = inferModuleFromTag(tag);
     const displayTag = resolveModuleTag(safeMeta.module);
     coreLogger.warn(msg, { tag: displayTag, ...safeMeta });
     if (logHook) {
-        try { logHook(displayTag, msg, true, safeMeta); } catch {}
+        logHook(displayTag, msg, true, safeMeta);
     }
 }
 

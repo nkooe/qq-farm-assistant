@@ -14,15 +14,15 @@ test.after(() => {
 });
 
 test('offline reminders preserve legacy delivery and persist explicit disabling', () => {
-  store.setOfflineReminder({ smtpHost: 'smtp.fixture', smtpUser: 'fixture', smtpPass: 'fixture', recipientEmail: 'fixture@example.test' }, 'reminder-test');
-  assert.equal(store.getOfflineReminder('reminder-test').enabled, true);
-  store.setOfflineReminder({ enabled: false }, 'reminder-test');
-  assert.equal(store.getOfflineReminder('reminder-test').enabled, false);
-  assert.equal(store.getOfflineReminder('reminder-test').smtpHost, 'smtp.fixture');
+  store.setOfflineReminder({ smtpHost: 'smtp.fixture', smtpUser: 'fixture', smtpPass: 'fixture', recipientEmail: 'fixture@example.test' }, 1010);
+  assert.equal(store.getOfflineReminder(1010).enabled, true);
+  store.setOfflineReminder({ enabled: false }, 1010);
+  assert.equal(store.getOfflineReminder(1010).enabled, false);
+  assert.equal(store.getOfflineReminder(1010).smtpHost, 'smtp.fixture');
 });
 
 test('default plans keep only strategy and automation fields', () => {
-  const plan = store.setUserDefaultAccountPlan('alice', {
+  const plan = store.setUserDefaultAccountPlan(1001, {
     plantingStrategy: 'max_profit',
     automation: { farm: true, friend: true },
     intervals: { farmMin: 7, farmMax: 9 },
@@ -48,7 +48,7 @@ test('default plans keep only strategy and automation fields', () => {
 test('new accounts inherit an enabled user default plan', () => {
   const accounts = store.addOrUpdateAccount({
     name: 'Alice farm',
-    username: 'alice',
+    userId: 1001,
     code: 'code-1',
   });
   const created = accounts.accounts.at(-1);
@@ -62,14 +62,14 @@ test('new accounts inherit an enabled user default plan', () => {
 });
 
 test('disabled plans do not change new account defaults', () => {
-  store.setUserDefaultAccountPlan('bob', {
+  store.setUserDefaultAccountPlan(1002, {
     plantingStrategy: 'max_profit',
     automation: { farm: true },
   }, { enabled: false });
 
   const accounts = store.addOrUpdateAccount({
     name: 'Bob farm',
-    username: 'bob',
+    userId: 1002,
     code: 'code-2',
   });
   const created = accounts.accounts.at(-1);
@@ -81,12 +81,12 @@ test('disabled plans do not change new account defaults', () => {
 });
 
 test('a saved plan can be applied to an existing account', () => {
-  store.setUserDefaultAccountPlan('bob', {
+  store.setUserDefaultAccountPlan(1002, {
     plantingStrategy: 'level',
     automation: { task: true },
   });
-  const account = store.getAccountsByUser('bob').accounts[0];
-  const config = store.applyUserDefaultAccountPlan('bob', account.id);
+  const account = store.getAccountsByUser(1002).accounts[0];
+  const config = store.applyUserDefaultAccountPlan(1002, account.id);
 
   assert.equal(config.plantingStrategy, 'level');
   assert.equal(config.automation.task, true);

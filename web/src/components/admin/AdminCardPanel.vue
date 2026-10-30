@@ -112,7 +112,7 @@ const statusFilterOptions = [
     </div>
 
     <div class="rounded-2xl border border-[var(--theme-border)] bg-[var(--theme-glass)] px-4 py-3 text-sm text-gray-600 backdrop-blur-md dark:text-gray-300">
-      可以按类型、状态和关键词筛选卡密；批量创建时会自动导出文件，便于直接发放。
+      批量创建后自动导出。
     </div>
 
     <div class="rounded-2xl border border-[var(--theme-border)] bg-[var(--theme-glass)] px-4 py-3 text-sm shadow-sm backdrop-blur-md">
@@ -153,7 +153,7 @@ const statusFilterOptions = [
               卡密筛选
             </div>
             <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-              先按卡密类型缩小范围，再结合关键词与状态定位库存、失效或已发放记录。
+              按类型、状态或关键词筛选。
             </p>
           </div>
           <div class="rounded-full bg-gray-100 px-3 py-1 text-xs text-gray-600 dark:bg-gray-900 dark:text-gray-300">
@@ -318,6 +318,7 @@ const statusFilterOptions = [
                 >
                   {{ card.enabled ? '启用' : '禁用' }}
                 </span>
+                <span v-if="card.claimedAt && !card.usedBy" class="ml-1 text-xs text-amber-600 dark:text-amber-400">已领取，待使用</span>
               </td>
               <td class="whitespace-nowrap px-4 py-2 text-sm text-gray-500 dark:text-gray-400">
                 {{ card.usedBy || '-' }}

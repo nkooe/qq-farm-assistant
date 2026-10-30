@@ -7,8 +7,8 @@ function createReloginReminderService(deps) {
     getAccounts,
   } = deps;
 
-  function getOfflineAutoDeleteMs(username = '') {
-    const cfg = store.getOfflineReminder ? store.getOfflineReminder(username) : null;
+  function getOfflineAutoDeleteMs(userId = '') {
+    const cfg = store.getOfflineReminder ? store.getOfflineReminder(userId) : null;
     const seconds = Math.max(0, Number.parseInt(cfg && cfg.offlineDeleteSec, 10) || 0);
     return seconds === 0 ? Infinity : seconds * 1000;
   }
@@ -19,15 +19,12 @@ function createReloginReminderService(deps) {
     return accounts.find(acc => String(acc.id) === String(accountId));
   }
 
-  function resolveUsername(accountId, fallback = '') {
-    if (fallback) return String(fallback).trim();
-    try {
-      const account = findAccount(accountId);
-      return account && account.username ? String(account.username).trim() : '';
-    } catch (err) {
-      log('错误', `查找账号用户名失败: ${  err.message}`);
-      return '';
-    }
+  function resolveUserId(accountId, suppliedId) {
+    const account = findAccount(accountId);
+    if (!account) throw new Error('提醒账号不存在');
+    require('../models/user-id').assertUserId(account.userId);
+    if (suppliedId !== undefined && suppliedId !== account.userId) throw new Error('提醒用户归属不一致');
+    return account.userId;
   }
 
   async function sendSmtpReminder(cfg, accountId, accountName, reason, offlineMs) {
@@ -45,7 +42,7 @@ function createReloginReminderService(deps) {
         `host=${  smtpHost ? '已设置' : '未设置'
         }, user=${  smtpUser ? '已设置' : '未设置'
         }, pass=${  smtpPass ? '已设置' : '未设置'
-        }, recipient=${  recipientEmail ? '已设置' : '未设置'}`);
+        }, recipient=${  recipientEmail ? '已设置' : '未设置'}`, { accountId: String(accountId) });
       return { ok: false, status: 'unconfigured' };
     }
 
@@ -65,8 +62,8 @@ function createReloginReminderService(deps) {
       subject: accountName ? `${title  } ${  accountName}` : title,
       content,
     });
-    if (ret && ret.ok) log('系统', `下线提醒邮件发送成功: ${  accountName || accountId}`);
-    else log('错误', `下线提醒邮件发送失败: ${  ret && ret.msg ? ret.msg : 'unknown'}`);
+    if (ret && ret.ok) log('系统', `下线提醒邮件发送成功: ${  accountName || accountId}`, { accountId: String(accountId) });
+    else log('错误', `下线提醒邮件发送失败: ${  ret && ret.msg ? ret.msg : 'unknown'}`, { accountId: String(accountId) });
     return { ok: !!ret?.ok, status: ret?.ok ? 'sent' : 'failed' };
   }
 
@@ -79,15 +76,15 @@ function createReloginReminderService(deps) {
     let content = String(cfg.msg || '账号下线').trim();
 
     if (!channel || !title || !content) {
-      log('错误', `下线提醒配置不完整: channel=${  channel  }, title=${  title  }, content=${  content}`);
+      log('错误', `下线提醒配置不完整: channel=${  channel  }, title=${  title  }, content=${  content}`, { accountId: String(accountId) });
       return { ok: false, status: 'unconfigured' };
     }
     if (channel !== 'webhook' && !token) {
-      log('错误', '下线提醒配置不完整: token=未设置');
+      log('错误', '下线提醒配置不完整: token=未设置', { accountId: String(accountId) });
       return { ok: false, status: 'unconfigured' };
     }
     if (channel === 'webhook' && !endpoint) {
-      log('错误', 'Webhook 渠道未设置接口地址');
+      log('错误', 'Webhook 渠道未设置接口地址', { accountId: String(accountId) });
       return { ok: false, status: 'unconfigured' };
     }
 
@@ -96,8 +93,8 @@ function createReloginReminderService(deps) {
     if (minutes > 0) content += `\n离线时长: ${  minutes  } 分钟`;
 
     const ret = await sendPushooMessage({ channel, endpoint, token, title, content });
-    if (ret && ret.ok) log('系统', `下线提醒发送成功: ${  accountName || accountId}`);
-    else log('错误', `下线提醒发送失败: ${  ret && ret.msg ? ret.msg : 'unknown'}`);
+    if (ret && ret.ok) log('系统', `下线提醒发送成功: ${  accountName || accountId}`, { accountId: String(accountId) });
+    else log('错误', `下线提醒发送失败: ${  ret && ret.msg ? ret.msg : 'unknown'}`, { accountId: String(accountId) });
     return { ok: !!ret?.ok, status: ret?.ok ? 'sent' : 'failed' };
   }
 
@@ -107,23 +104,23 @@ function createReloginReminderService(deps) {
       const accountName = String(params.accountName || '').trim();
       const reason = String(params.reason || 'unknown');
       const offlineMs = Number(params.offlineMs) || 0;
-      const username = resolveUsername(accountId, params.username);
+      const userId = resolveUserId(accountId, params.userId);
 
       log('系统',
         `触发下线提醒: 账号=${  accountName || accountId  }, 原因=${  reason}`,
-        { accountId, accountName, reason, username });
+        { accountId, accountName, reason, userId });
 
-      const cfg = store.getOfflineReminder ? store.getOfflineReminder(username) : null;
+      const cfg = store.getOfflineReminder ? store.getOfflineReminder(userId) : null;
       if (cfg?.enabled === false) return { ok: false, status: 'disabled' };
       if (!cfg) {
-        log('错误', `未找到下线提醒配置: 用户=${  username || '(空)'}`);
+        log('错误', `未找到下线提醒配置: 用户=${  userId || '(空)'}`, { accountId: String(params.accountId || ''), userId: params.userId || '' });
         return { ok: false, status: 'unconfigured' };
       }
 
       const channel = String(cfg.channel || 'smtp').trim().toLowerCase();
       log('系统', `下线提醒配置: 渠道=${  channel  }, 标题=${  cfg.title || '账号下线提醒'}`, {
         channel,
-        username,
+        userId,
       });
 
       if (channel === 'smtp') {
@@ -132,7 +129,7 @@ function createReloginReminderService(deps) {
         return await sendPushooReminder(cfg, accountId, accountName, reason, offlineMs);
       }
     } catch (err) {
-      log('错误', `下线提醒发送异常: ${  err.message}`);
+      log('错误', `下线提醒发送异常: ${  err.message}`, { accountId: String(params.accountId || ''), userId: params.userId || '' });
       return { ok: false, status: 'failed' };
     }
   }

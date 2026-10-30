@@ -12,21 +12,32 @@ const {
   getFertilizerBuyCheckIntervalMinutes
 } = require('../models/store');
 const { checkAndBuyFertilizerBoth } = require('./mall');
+const { createScheduler } = require('./scheduler');
+const { runWithRequestClass } = require('../utils/request-context');
 
-let fertilizerBuyCheckTimer = null;
+const scheduler = createScheduler('farm_fertilizer_buy');
+let timerSignature = '';
+let checking = false;
+let pendingController = null;
+
+function currentSignature() {
+  return JSON.stringify([isAutomationOn('fertilizer_buy_organic'), isAutomationOn('fertilizer_buy_normal'),
+    getFertilizerBuyCheckIntervalMinutes(), getFertilizerBuyOrganicCount(), getFertilizerBuyOrganicThresholdHours(),
+    getFertilizerBuyNormalCount(), getFertilizerBuyNormalThresholdHours()]);
+}
 
 /** 启动化肥自动购买检测定时器 */
 function startFertilizerBuyCheckTimer() {
-  if (fertilizerBuyCheckTimer) clearInterval(fertilizerBuyCheckTimer);
+  pendingController?.abort(new Error('化肥自动购买配置已更新'));
+  scheduler.clearAll();
+  timerSignature = currentSignature();
 
   if (!isAutomationOn('fertilizer_buy_organic') && !isAutomationOn('fertilizer_buy_normal')) return;
 
   const intervalMinutes = getFertilizerBuyCheckIntervalMinutes();
   const intervalMs = intervalMinutes * 60 * 1000;
 
-  fertilizerBuyCheckTimer = setInterval(() => {
-    checkFertilizerBuyOnce();
-  }, intervalMs);
+  scheduler.setIntervalTask('check', intervalMs, checkFertilizerBuyOnce);
 
   log('农场', `化肥自动购买检测定时器已启动，间隔 ${intervalMinutes} 分钟`, {
     module: 'farm',
@@ -38,10 +49,9 @@ function startFertilizerBuyCheckTimer() {
 
 /** 停止化肥自动购买检测定时器 */
 function stopFertilizerBuyCheckTimer() {
-  if (fertilizerBuyCheckTimer) {
-    clearInterval(fertilizerBuyCheckTimer);
-    fertilizerBuyCheckTimer = null;
-  }
+  pendingController?.abort(new Error('化肥自动购买已停止'));
+  scheduler.clearAll();
+  timerSignature = '';
   log('农场', '化肥自动购买检测定时器已停止', {
     module: 'farm',
     event: '购买化肥计时器',
@@ -49,10 +59,18 @@ function stopFertilizerBuyCheckTimer() {
   });
 }
 
+function refreshFertilizerBuyCheckTimer() {
+  if (currentSignature() !== timerSignature) startFertilizerBuyCheckTimer();
+}
+
 /** 执行一次化肥购买检测 */
 async function checkFertilizerBuyOnce() {
+  if (checking) return;
   if (!isAutomationOn('fertilizer_buy_organic') && !isAutomationOn('fertilizer_buy_normal')) return;
 
+  checking = true;
+  const controller = new AbortController();
+  pendingController = controller;
   try {
     const config = {
       buyOrganic: isAutomationOn('fertilizer_buy_organic'),
@@ -62,7 +80,7 @@ async function checkFertilizerBuyOnce() {
       normalCount: getFertilizerBuyNormalCount(),
       normalThresholdHours: getFertilizerBuyNormalThresholdHours()
     };
-    await checkAndBuyFertilizerBoth(config);
+    await runWithRequestClass('farm', () => checkAndBuyFertilizerBoth(config), { signal: controller.signal });
   } catch (err) {
     logWarn('农场', `化肥自动购买检测失败: ${err.message}`, {
       module: 'farm',
@@ -70,10 +88,14 @@ async function checkFertilizerBuyOnce() {
       result: 'error',
       error: err.message
     });
+  } finally {
+    if (pendingController === controller) pendingController = null;
+    checking = false;
   }
 }
 
 module.exports = {
   startFertilizerBuyCheckTimer,
-  stopFertilizerBuyCheckTimer
+  stopFertilizerBuyCheckTimer,
+  refreshFertilizerBuyCheckTimer
 };

@@ -18,16 +18,16 @@ services:
       # 宿主机默认 3900（Windows 端口排除区间会拒绝 3007 监听）；容器内 Node 仍监听 3007
       - "${PORT:-3900}:3007"
     volumes:
-      - qq-farm-test-data:/app/core/data
-      - qq-farm-test-logs:/app/core/data/logs
+      - qq-farm-v3-data:/app/core/data
+      - qq-farm-v3-logs:/app/core/data/logs
       # 应用宝 Go 服务的 SQLite 数据库持久化（跨容器重启保留已登录账号）
-      - qq-farm-test-yyb-db:/usr/local/share/yyb-go/resource/db
+      - qq-farm-v3-yyb-db:/usr/local/share/yyb-go/resource/db
     environment:
       - TZ=${TZ:-Asia/Shanghai}
       - NODE_ENV=production
       - ADMIN_PORT=3007
       - QQ_LOGIN_ENABLED=${QQ_LOGIN_ENABLED:-1}
-      - QQ_LOGIN_MAX_SESSIONS=${QQ_LOGIN_MAX_SESSIONS:-1}
+      - QQ_LOGIN_MAX_SESSIONS=${QQ_LOGIN_MAX_SESSIONS:-3}
       - QQ_LOGIN_SOCKS_PROXY=${QQ_LOGIN_SOCKS_PROXY:-}
       # ===== 应用宝 Go 服务（同容器内，单镜像共用 3007 出口）=====
       # Node 代理会把 /api/yyb/* 转发到下面的地址；无需在 Web 端再填外部地址
@@ -53,9 +53,9 @@ services:
         max-file: "3"
 
 volumes:
-  qq-farm-test-data:
-    name: qq-farm-test-data
-  qq-farm-test-logs:
-    name: qq-farm-test-logs
-  qq-farm-test-yyb-db:
-    name: qq-farm-test-yyb-db
+  qq-farm-v3-data:
+    name: qq-farm-v3-data
+  qq-farm-v3-logs:
+    name: qq-farm-v3-logs
+  qq-farm-v3-yyb-db:
+    name: qq-farm-v3-yyb-db

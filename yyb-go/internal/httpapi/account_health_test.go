@@ -25,7 +25,7 @@ func healthTestApp(t *testing.T) (*App, *store.WechatAccount) {
 	}
 	t.Cleanup(func() { _ = a.Close() })
 	status := "alive"
-	acc, err := a.db.UpsertAccount(context.Background(), "wx-test", "secret-buffer", nil, nil, nil, nil,
+	acc, err := a.db.UpsertAccount(context.Background(), "wx-test", "secret-buffer", 1000, "admin", nil, nil, nil, nil,
 		protocol.LoginBufferCredentials{OpenID: "wx-test", AccessToken: "secret-access", RefreshToken: "secret-refresh", ExpiresAt: time.Now().Add(time.Hour).Unix()}.ToMap(), &status)
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +157,8 @@ func TestHealthIsAuthenticatedAndDoesNotExposeSecrets(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/accounts/health?ref=wx-test", nil)
 		if authorized {
 			req.Header.Set("Authorization", "Bearer "+ApiToken)
+			req.Header.Set("X-Farm-User-ID", "1000")
+			req.Header.Set("X-Farm-Role", "admin")
 		}
 		res := httptest.NewRecorder()
 		a.Handler().ServeHTTP(res, req)

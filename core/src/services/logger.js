@@ -3,16 +3,7 @@ const path = require('node:path');
 const process = require('node:process');
 const { getProgramRoot } = require('../config/runtime-paths');
 
-// 尝试加载 winston，失败则使用 fallback
-let winston = null;
-let DailyRotateFile = null;
-try {
-  winston = require('winston');
-  DailyRotateFile = require('winston-daily-rotate-file');
-} catch {
-  winston = null;
-  DailyRotateFile = null;
-}
+const winston = require('winston');
 
 const LOG_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const LOG_CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
@@ -46,7 +37,7 @@ function cleanupExpiredLogFiles(logDir, now = Date.now()) {
         fs.unlinkSync(filePath);
         removed += 1;
       }
-    } catch {}
+    } catch (error) { if (error.code !== 'ENOENT') throw error; }
   }
   return removed;
 }
@@ -97,75 +88,59 @@ function sanitizeMeta(meta, depth = 0) {
   return result;
 }
 
-// ─── Fallback 日志（无 winston 时使用） ───
-
-let fallbackLogDir = null;
-
 function resolveLogDir() {
   return process.env.FARM_LOG_DIR
     ? path.resolve(process.env.FARM_LOG_DIR)
     : path.join(getProgramRoot(), 'logs');
 }
 
-function ensureFallbackLogDir() {
-  if (fallbackLogDir) return fallbackLogDir;
-  const logDir = resolveLogDir();
-  if (!fs.existsSync(logDir)) {
-    fs.mkdirSync(logDir, { recursive: true });
-  }
-  startLogCleanup(logDir);
-  fallbackLogDir = logDir;
-  return fallbackLogDir;
-}
-
-/** 追加 fallback 日志到文件 */
-function appendFallbackLog(level, moduleName, message, meta) {
-  try {
-    const logDir = ensureFallbackLogDir();
-    const entry = {
-      ts: new Date().toISOString(),
-      level,
-      module: moduleName,
-      message: redactString(message),
-      meta: sanitizeMeta(meta || {})
-    };
-    const line = `${JSON.stringify(entry)  }\n`;
-    fs.appendFileSync(path.join(logDir, buildHourlyLogFilename('combined')), line, 'utf8');
-    if (level === 'error') {
-      fs.appendFileSync(path.join(logDir, buildHourlyLogFilename('error')), line, 'utf8');
-    }
-  } catch {}
-}
-
-/** 创建 console-based fallback logger */
-function createConsoleFallback(moduleName) {
-  const writeLog = (level, message, meta) => {
-    const timestamp = new Date().toISOString();
-    const msg = redactString(message);
-    const sanitized = sanitizeMeta(meta);
-    appendFallbackLog(level, moduleName, msg, sanitized);
-    if (sanitized && Object.keys(sanitized).length > 0) {
-      console.warn(`[${timestamp}] [${level}] [${moduleName}] ${msg} ${JSON.stringify(sanitized)}`);
-    } else {
-      console.warn(`[${timestamp}] [${level}] [${moduleName}] ${msg}`);
-    }
-  };
-  return {
-    info: (msg, meta) => writeLog('info', msg, meta),
-    warn: (msg, meta) => writeLog('warn', msg, meta),
-    error: (msg, meta) => writeLog('error', msg, meta),
-    debug: (msg, meta) => writeLog('debug', msg, meta)
-  };
-}
-
 // ─── Winston Logger ───
 
 let rootLogger = null;
+const retiredLogOwners = new Set();
+const retiredLogAccounts = new Set();
+
+class HourlyFileTransport extends winston.Transport {
+  constructor({ directory, prefix, ...options }) { super(options); this.directory = directory; this.prefix = prefix; }
+  log(info, callback) {
+    // Close every append before returning, so deletion can rewrite the log
+    // atomically on Windows without racing an open rotation stream.
+    fs.appendFileSync(path.join(this.directory, buildHourlyLogFilename(this.prefix)), `${info[Symbol.for('message')]}\n`, { mode: 0o600 });
+    this.emit('logged', info); callback();
+  }
+}
+
+function belongsToDeletedUser(value, key = '') {
+  if (Array.isArray(value)) return value.some(item => belongsToDeletedUser(item, key));
+  if (value && typeof value === 'object') return Object.entries(value).some(([name, item]) => belongsToDeletedUser(item, name));
+  if (/^(?:userId|ownerUserId|owner_user_id|user|admin|deletedUsers)$/.test(key)) return retiredLogOwners.has(String(value));
+  if (/^(?:accountId|account_id)$/.test(key)) return retiredLogAccounts.has(String(value));
+  return false;
+}
+
+function writeLog(level, module, message, meta) {
+  const entry = { module, message: redactString(message), ...(process.env.FARM_ACCOUNT_ID ? { accountId: process.env.FARM_ACCOUNT_ID } : {}), ...sanitizeMeta(meta) };
+  if (belongsToDeletedUser(entry)) return;
+  getRootLogger().log(level, entry);
+}
+
+async function purgeUserLogs(userId, accountIds) {
+  retiredLogOwners.add(String(userId));
+  accountIds.forEach(id => retiredLogAccounts.add(String(id)));
+  const directory = resolveLogDir();
+  if (!fs.existsSync(directory)) return;
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isFile() || !ROTATED_LOG_RE.test(entry.name)) continue;
+    const file = path.join(directory, entry.name);
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    const remaining = lines.filter(line => !belongsToDeletedUser(JSON.parse(line)));
+    require('./json-db').writeTextFileAtomic(file, remaining.length ? `${remaining.join('\n')}\n` : '');
+  }
+}
 
 /** 获取/创建根 logger（Winston） */
 function getRootLogger() {
   if (rootLogger) return rootLogger;
-  if (!winston) { rootLogger = null; return rootLogger; }
 
   const logDir = resolveLogDir();
   if (!fs.existsSync(logDir)) {
@@ -202,19 +177,13 @@ function getRootLogger() {
         )
       }),
       // 合并日志文件
-      new DailyRotateFile({
-        filename: path.join(logDir, 'combined-%DATE%.log'),
-        datePattern: 'YYYY-MM-DD-HH',
-        maxFiles: '3d',
-        auditFile: path.join(logDir, '.combined-log-audit.json'),
+      new HourlyFileTransport({
+        directory: logDir, prefix: 'combined',
         format: combine(timestamp(), errors({ stack: true }), json())
       }),
       // 错误日志文件
-      new DailyRotateFile({
-        filename: path.join(logDir, 'error-%DATE%.log'),
-        datePattern: 'YYYY-MM-DD-HH',
-        maxFiles: '3d',
-        auditFile: path.join(logDir, '.error-log-audit.json'),
+      new HourlyFileTransport({
+        directory: logDir, prefix: 'error',
         level: 'error',
         format: combine(timestamp(), errors({ stack: true }), json())
       })
@@ -230,24 +199,18 @@ function getRootLogger() {
  */
 function createModuleLogger(name = 'app') {
   const moduleName = String(name || 'app');
-  const logger = getRootLogger();
-
-  // 无 winston 时降级为 console fallback
-  if (!logger) return createConsoleFallback(moduleName);
-
-  const child = logger.child({ module: moduleName });
   return {
     info(message, meta = {}) {
-      child.info(redactString(message), sanitizeMeta(meta));
+      writeLog('info', moduleName, message, meta);
     },
     warn(message, meta = {}) {
-      child.warn(redactString(message), sanitizeMeta(meta));
+      writeLog('warn', moduleName, message, meta);
     },
     error(message, meta = {}) {
-      child.error(redactString(message), sanitizeMeta(meta));
+      writeLog('error', moduleName, message, meta);
     },
     debug(message, meta = {}) {
-      child.debug(redactString(message), sanitizeMeta(meta));
+      writeLog('debug', moduleName, message, meta);
     }
   };
 }
@@ -259,5 +222,6 @@ module.exports = {
   buildHourlyLogFilename,
   cleanupExpiredLogFiles,
   resolveLogDir,
-  LOG_RETENTION_MS
+  LOG_RETENTION_MS,
+  purgeUserLogs
 };

@@ -1,14 +1,4 @@
-/**
- * 行为级回归测试：plantFromBagSeeds 的「优先列表全部失败 → 兜底其他背包种子」
- *
- * 线上故障背景（2026-09）：用户保存的优先列表是早期数据，其中的种子因
- * 活动结束/等级变化已不可种，旧实现会让整轮颗粒无收（"什么都种不了"）。
- * 修复后：优先列表内种子全部失败时，自动尝试背包中其他可用种子。
- *
- * 同时守卫：
- * - 优先列表中有能种的种子时，不会去动其他背包种子（保持优先语义）
- * - 兜底不会回退到商店购买（防误购语义不变）
- */
+// 背包优先列表失败时停止本轮，不自动切换到列表外种子。
 const test = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
@@ -35,7 +25,7 @@ function setupEnv() {
   return { proto, network, utils, warehouse, store };
 }
 
-test('plantFromBagSeeds: 优先列表全部失败时兜底尝试其他背包种子', async () => {
+test('plantFromBagSeeds: 优先种子失败时停止，禁止切换其他背包种子', async () => {
   const { proto, network, utils, warehouse, store } = setupEnv();
   await proto.loadProto();
 
@@ -85,15 +75,10 @@ test('plantFromBagSeeds: 优先列表全部失败时兜底尝试其他背包种�
     const landIds = Array.from({ length: 6 }, (_, i) => i + 1);
     const result = await planting.plantFromBagSeeds(landIds, '1');
 
-    // 优先种子失败后（4 次止损），应接着尝试 OTHER_BAG_SEED 并种上
-    assert.ok(plantedSeeds.includes(OTHER_BAG_SEED),
-      '兜底应尝试背包中其他可用种子');
-    assert.ok(result.totalPlanted > 0,
-      `兜底后应有种植成功（实际 ${result.totalPlanted}）`);
-    assert.ok(
-      warnLogs.some(w => String(w.meta && w.meta.result) === 'priority_fallback_to_other_bag_seeds'),
-      '应有 priority_fallback_to_other_bag_seeds 标记',
-    );
+    assert.ok(plantedSeeds.every(id => id === PRIORITY_SEED));
+    assert.strictEqual(result.totalPlanted, 0);
+    assert.strictEqual(result.fallbackAllowed, false);
+    assert.ok(warnLogs.some(w => w.meta?.result === 'seed_rejected'));
   } finally {
     warehouse.getBagSeeds = originalGetBagSeeds;
     store.getBagSeedPriority = originalGetPriority;
@@ -159,13 +144,4 @@ test('plantFromBagSeeds: 优先列表内种子能种时不触碰其他背包种�
     utils.sleep = originalSleep;
     delete require.cache[require.resolve(path.join(root, 'src/services/planting-service'))];
   }
-});
-
-test('plantFromBagSeeds 不再因单颗种子失败禁用整轮（源码级守卫）', () => {
-  const fs = require('fs');
-  const src = fs.readFileSync(path.join(root, 'src/services/planting-service.js'), 'utf8');
-  assert.match(src, /plantSeedBatch/, '应有共享的批次种植逻辑');
-  assert.match(src, /priority_fallback_to_other_bag_seeds/, '应有优先列表兜底日志');
-  assert.match(src, /result: 'seed_rejected'/, '单颗失败应跳过而非中断');
-  assert.match(src, /all_bag_seeds_rejected/, '全部失败时应汇总');
 });

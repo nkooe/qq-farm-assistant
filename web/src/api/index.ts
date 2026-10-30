@@ -1,14 +1,27 @@
-import { useStorage } from '@vueuse/core'
+import { StorageSerializers, useStorage } from '@vueuse/core'
 import axios from 'axios'
 import { useToastStore } from '@/stores/toast'
 
 const tokenRef = useStorage('admin_token', '')
 const accountIdRef = useStorage('current_account_id', '')
+const accountOwnerRef = useStorage<number | null>('current_account_owner', null, undefined, { serializer: StorageSerializers.object })
+const userInfoRef = useStorage<{ id?: number } | null>('user_info', null, undefined, {
+  serializer: StorageSerializers.object,
+})
 
 const api = axios.create({
   baseURL: '/',
   timeout: 20000,
 })
+
+interface RequestIdentity {
+  farmIdentity?: { token: string, userId: number | null }
+}
+
+function isStaleRequest(config: RequestIdentity | undefined) {
+  const identity = config?.farmIdentity
+  return identity && (identity.token !== tokenRef.value || identity.userId !== (userInfoRef.value?.id ?? null))
+}
 
 let lastNetworkToastAt = 0
 function showNetworkToast(message: string) {
@@ -20,13 +33,17 @@ function showNetworkToast(message: string) {
 }
 
 api.interceptors.request.use((config) => {
+  ;(config as typeof config & RequestIdentity).farmIdentity = {
+    token: tokenRef.value,
+    userId: userInfoRef.value?.id ?? null,
+  }
   if (/^\/api\/(activity-center|activities|solar-calendar|illustrated\/snapshot|illustrated\/claim)/.test(config.url || ''))
     config.timeout = Math.max(config.timeout || 0, 180000)
   const token = tokenRef.value
   if (token) {
     config.headers['x-admin-token'] = token
   }
-  const accountId = accountIdRef.value
+  const accountId = accountOwnerRef.value === userInfoRef.value?.id ? accountIdRef.value : ''
   if (accountId && !config.headers['x-account-id']) {
     config.headers['x-account-id'] = accountId
   }
@@ -34,8 +51,12 @@ api.interceptors.request.use((config) => {
 }, error => Promise.reject(error))
 
 api.interceptors.response.use((response) => {
+  if (isStaleRequest(response.config as typeof response.config & RequestIdentity))
+    throw new axios.CanceledError('用户会话已切换')
   return response
 }, (error) => {
+  if (isStaleRequest(error.config))
+    return Promise.reject(new axios.CanceledError('用户会话已切换'))
   if (axios.isCancel(error) || error?.code === 'ERR_CANCELED') {
     return Promise.reject(error)
   }

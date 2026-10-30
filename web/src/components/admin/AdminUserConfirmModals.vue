@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { EditForm, UserInfo } from '@/composables/useAdminUsers'
 import ConfirmModal from '@/components/ConfirmModal.vue'
+import ModalOverlay from '@/components/ui/ModalOverlay.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
 
 const props = defineProps<{
   renewUserCardCode: string
@@ -11,6 +13,9 @@ const props = defineProps<{
   renewUserLoading: boolean
   clearExpiredUsersLoading: boolean
   editLoading: boolean
+  pendingDeleteUsers: UserInfo[]
+  deleteSelectedUsersLoading: boolean
+  deleteSelectedUsersError: string
 }>()
 
 const emit = defineEmits<{
@@ -19,6 +24,7 @@ const emit = defineEmits<{
   renewUser: []
   clearExpiredUsers: []
   editUser: []
+  deleteSelectedUsers: []
 }>()
 
 const showToggleUserStatusConfirm = defineModel<boolean>('showToggleUserStatusConfirm', { required: true })
@@ -30,6 +36,7 @@ const pendingRenewUser = defineModel<UserInfo | null>('pendingRenewUser', { requ
 const showClearExpiredUsersConfirm = defineModel<boolean>('showClearExpiredUsersConfirm', { required: true })
 const showEditUserConfirm = defineModel<boolean>('showEditUserConfirm', { required: true })
 const selectedUser = defineModel<UserInfo | null>('selectedUser', { required: true })
+const showDeleteSelectedUsersConfirm = defineModel<boolean>('showDeleteSelectedUsersConfirm', { required: true })
 
 function closeToggleUserStatusConfirm() {
   if (props.toggleUserStatusLoading)
@@ -62,6 +69,25 @@ function closeEditUserConfirm() {
 </script>
 
 <template>
+  <ModalOverlay :show="showDeleteSelectedUsersConfirm" title="确认批量删除用户" :busy="deleteSelectedUsersLoading" @close="showDeleteSelectedUsersConfirm = false">
+    <div class="ui-dialog-panel max-w-lg w-full">
+      <header class="ui-dialog-header"><h3 class="text-lg font-bold">确认批量删除用户</h3></header>
+      <div class="ui-dialog-body space-y-4">
+        <p class="text-sm text-gray-600 dark:text-gray-300">将删除以下 {{ pendingDeleteUsers.length }} 个用户及其全部账号、登录资料和配置，并立即撤销登录。此操作不可恢复。</p>
+        <ul class="max-h-64 overflow-y-auto border border-[var(--theme-border)] rounded-xl divide-y divide-[var(--theme-border)]" aria-label="待删除用户">
+          <li v-for="user in pendingDeleteUsers" :key="user.id" class="flex items-center justify-between gap-4 px-4 py-3 text-sm">
+            <span class="min-w-0 break-all font-medium">{{ user.username }}</span><span class="shrink-0 text-gray-500 tabular-nums dark:text-gray-400">ID {{ user.id }}</span>
+          </li>
+        </ul>
+        <p v-if="deleteSelectedUsersError" role="alert" class="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-900/20 dark:text-red-300">{{ deleteSelectedUsersError }}</p>
+      </div>
+      <footer class="ui-dialog-footer">
+        <BaseButton variant="secondary" class="min-h-11" :disabled="deleteSelectedUsersLoading" @click="showDeleteSelectedUsersConfirm = false">取消</BaseButton>
+        <BaseButton variant="danger" class="min-h-11" :loading="deleteSelectedUsersLoading" @click="emit('deleteSelectedUsers')">确认删除 {{ pendingDeleteUsers.length }} 个用户</BaseButton>
+      </footer>
+    </div>
+  </ModalOverlay>
+
   <ConfirmModal
     :show="showToggleUserStatusConfirm"
     :title="pendingToggleUser?.card?.enabled === false ? '确认解封用户' : '确认封禁用户'"

@@ -7,6 +7,7 @@ function createAutoCodeRefreshService(deps) {
   const { store, getAccounts, addOrUpdateAccount, resolveWorkerControls, log, addAccountLog } = deps;
   const loginRecovery = deps.loginRecovery || createLoginRecovery();
   const request = deps.fetch || fetch;
+  const getAccountAccessRejection = deps.getAccountAccessRejection || require('../services/account-access').getAccountAccessRejection;
   const pending = new Map();
   const scheduler = createScheduler('auto_code_refresh');
   const taskName = id => `refresh_${String(id || '')}`;
@@ -38,17 +39,18 @@ function createAutoCodeRefreshService(deps) {
 
   function refreshAccountCode(id, reason = 'timer') {
     id = String(id);
-    if (pending.has(id)) return pending.get(id);
     const account = findAccount(id);
     if (!account || account.platform === 'qq' || account.loginType === 'yyb') return Promise.resolve(false);
-    const config = store.getGlobalWxConfig?.() || {};
+    if (getAccountAccessRejection(account)) { stopAccount(id); return Promise.resolve(false); }
+    if (pending.has(id)) return pending.get(id);
+    const config = store.getUserWxConfig(account.userId);
     if (config.enabled === false || (reason === 'timer' && (account.autoStart === false || online(id)))) return Promise.resolve(false);
     const identity = loginIdentity(account);
     const operation = (async () => {
       try {
         const code = await loginRecovery.run(account, 'wxid', ({ signal }) => requestFarmCode(account, config, signal));
         const current = findAccount(id);
-        if (pending.get(id) !== operation || !current || loginIdentity(current) !== identity) return false;
+        if (pending.get(id) !== operation || !current || loginIdentity(current) !== identity || getAccountAccessRejection(current)) return false;
         if (reason === 'timer' && online(id)) return false;
         addOrUpdateAccount({ id, code });
         if (typeof controls().restartWorker === 'function' && current.autoStart !== false) await controls().restartWorker({ ...current, code });
@@ -67,12 +69,18 @@ function createAutoCodeRefreshService(deps) {
     return operation;
   }
 
-  function stopAccount(id) { scheduler.clear(taskName(id)); loginRecovery.cancel(id); pending.delete(String(id)); }
+  function stopAccount(id) {
+    id = String(id);
+    const operation = pending.get(id);
+    scheduler.clear(taskName(id)); loginRecovery.cancel(id); pending.delete(id);
+    return operation;
+  }
   function scheduleAccount(id) {
     scheduler.clear(taskName(id));
     const config = store.getAutoCodeRefresh?.(id);
     const account = findAccount(id);
     if (!account || account.platform === 'qq' || account.loginType === 'yyb') return;
+    if (getAccountAccessRejection(account)) { stopAccount(id); return; }
     if (!config?.enabled) { loginRecovery.cancel(id); return; }
     if (!account.wxid || account.autoStart === false) return;
     const minutes = Math.max(1, Math.min(1440, Number(config.intervalMinutes) || 60));

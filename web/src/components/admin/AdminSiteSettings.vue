@@ -88,16 +88,16 @@ onMounted(() => Promise.allSettled([loadAccess(), loadAnnouncement()]))
     </div>
     <fieldset :disabled="!accessReady || accessSaving" class="min-w-0 space-y-4 border border-gray-200 rounded-xl p-4 dark:border-gray-700">
       <div class="text-sm text-gray-600 dark:text-gray-300">
-        当前生效：{{ accessReady ? (savedCardVerificationEnabled ? '启用卡密验证' : '关闭卡密验证') : '加载中…' }}。修改后点击保存生效。
+        当前生效：{{ accessReady ? (savedCardVerificationEnabled ? '启用卡密验证' : '关闭卡密验证') : '加载中…' }}。保存后生效。
       </div>
       <BaseSwitch v-model="cardVerificationEnabled" label="启用卡密验证" class="min-h-11" />
       <div class="rounded-lg bg-gray-50 p-3 text-sm leading-relaxed dark:bg-gray-900/40">
-        <p>开启：普通用户注册需提供卡密，登录与使用时检查激活状态和有效期。</p>
-        <p class="mt-2">关闭：可免卡密注册，已有用户跳过到期检查；封禁、账号数量限制仍然生效。</p>
-        <p class="mt-2">管理员不受卡密限制。切换开关不会修改原有卡密、期限和额度。</p>
+        <p>开启：注册需卡密，到期需续费。</p>
+        <p class="mt-2">关闭：免卡密和到期检查，封禁与额度仍有效。</p>
+        <p class="mt-2">管理员不受卡密限制。</p>
       </div>
       <p v-if="cardVerificationEnabled && !savedCardVerificationEnabled" class="text-sm text-amber-800 dark:text-amber-200">
-        重新开启后，无卡密或已到期的普通用户需要激活或续费，当前登录状态会被撤销。
+        开启后，未激活或已到期用户将退出登录。
       </p>
       <div class="flex justify-end">
         <BaseButton :loading="accessSaving" :disabled="!accessReady || cardVerificationEnabled === savedCardVerificationEnabled" @click="requestSaveAccess">保存访问控制</BaseButton>
@@ -123,7 +123,7 @@ onMounted(() => Promise.allSettled([loadAccess(), loadAnnouncement()]))
       </div>
       <BaseSwitch v-model="announcement.showOnce" label="每版只显示一次" class="min-h-11" />
       <p class="text-sm leading-relaxed text-gray-600 dark:text-gray-300">
-        开启后，每位用户已读的版本不再弹出；修改发布后会再次提醒。关闭此项时，每次登录显示一次，切换页面不重复弹。关闭公告会保留标题和内容。
+        开启：每版只提醒一次；关闭：每次登录提醒。
       </p>
       <div class="flex justify-end">
         <BaseButton :loading="announcementSaving" :disabled="!announcementReady" @click="saveAnnouncement">{{ announcement.enabled ? '保存并发布公告' : '保存公告配置' }}</BaseButton>

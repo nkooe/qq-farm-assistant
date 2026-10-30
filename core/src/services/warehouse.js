@@ -360,22 +360,8 @@ function getGoldFromItems(items) {
 /**
  * 从出售回复推导金币变动
  */
-function deriveGoldGainFromSellReply(reply, prevGold) {
-  // 尝试 get_items 字段
-  const getItemsGold = getGoldFromItems(reply && reply.get_items || []);
-  if (getItemsGold > 0) {
-    return { gain: getItemsGold, nextKnownGold: prevGold };
-  }
-
-  // 回退：items / sell_items
-  const itemsGold = getGoldFromItems(reply && (reply.items || reply.sell_items) || []);
-  if (itemsGold <= 0) return { gain: 0, nextKnownGold: prevGold };
-
-  if (prevGold > 0 && itemsGold >= prevGold) {
-    return { gain: itemsGold - prevGold, nextKnownGold: itemsGold };
-  }
-
-  return { gain: itemsGold, nextKnownGold: prevGold };
+function deriveGoldGainFromSellReply(reply, lastKnownGold) {
+  return { gain: getGoldFromItems(reply.get_items || []), nextKnownGold: lastKnownGold };
 }
 
 function getCurrentTotals() {
@@ -549,27 +535,7 @@ async function sellAllFruits() {
         derivedGold = derived.nextKnownGold;
         if (gain > 0) totalGoldFromReply += gain;
         batch.forEach(recordSoldFruit);
-      } catch (err) {
-        // 批量失败，逐个重试
-        logWarn('仓库', `批量出售失败，改为逐个重试: ${err.message}`);
-        for (const fruit of batch) {
-          try {
-            const result = await sellItems([fruit]);
-            const derived = deriveGoldGainFromSellReply(result, derivedGold);
-            const gain = Math.max(0, toNum(derived.gain));
-            derivedGold = derived.nextKnownGold;
-            if (gain > 0) totalGoldFromReply += gain;
-            recordSoldFruit(fruit);
-          } catch (innerErr) {
-            const fid = toNum(fruit.id);
-            const fcount = toNum(fruit.count);
-            skippedKindCount += 1;
-            logWarn('仓库', `跳过不可售物品: ID=${fid} x${fcount} (${innerErr.message})`, {
-              module: 'warehouse', event: '跳过不可售物品', result: 'skip', itemId: fid, count: fcount,
-            });
-          }
-        }
-      }
+      } catch (error) { throw error; }
       if (i + SELL_BATCH_SIZE < fruits.length) await sleep(300);
     }
 
@@ -595,7 +561,7 @@ async function sellAllFruits() {
         const bagAfter = await getBag();
         const bagGold = getGoldFromItems(getBagItems(bagAfter));
         if (bagGold > prevGold) bagGoldGain = bagGold - prevGold;
-      } catch (_) {}
+      } catch (error) { throw error; }
     }
 
     const totalGoldGain = Math.max(totalGoldFromReply, goldByState, bagGoldGain);
@@ -644,7 +610,7 @@ async function sellAllFruits() {
     return totalGoldGain || 0;
   } catch (err) {
     logWarn('仓库', `出售失败: ${err.message}`);
-    return 0;
+    throw err;
   }
 }
 

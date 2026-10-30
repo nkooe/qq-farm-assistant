@@ -1,8 +1,9 @@
+const { assertUserId, isUserId, parseUserId } = require('./user-id');
 const process = require('node:process');
 const fs = require('node:fs');
 const path = require('node:path');
 const { getDataFile, ensureDataDir } = require('../config/runtime-paths');
-const { migrateStoredClientVersion } = require('../config/config');
+const { getDefaultSystemConfig } = require('../config/config');
 const { readJsonFile, readJsonFileStrict, writeJsonFileAtomic, storageError } = require('../services/json-db');
 const { createConfigStorage } = require('./store/config-storage');
 
@@ -46,21 +47,15 @@ function getKnownFriendGidsCacheFile(accountId) {
 }
 
 function readKnownFriendGidsCache(accountId) {
-    try {
-        const filePath = getKnownFriendGidsCacheFile(accountId);
-        if (fs.existsSync(filePath)) {
-            const data = readJsonFile(filePath);
-            if (data && Array.isArray(data.gids)) return data.gids;
-        }
-    } catch { }
-    return null;
+    const data = readJsonFile(getKnownFriendGidsCacheFile(accountId), null);
+    if (data === null) return null;
+    if (!Array.isArray(data.gids)) throw new Error('好友缓存格式无效');
+    return data.gids;
 }
 
 function writeKnownFriendGidsCache(accountId, gids) {
-    try {
-        const filePath = getKnownFriendGidsCacheFile(accountId);
-        writeJsonFileAtomic(filePath, { gids: gids || [], updatedAt: Date.now() });
-    } catch { }
+    const filePath = getKnownFriendGidsCacheFile(accountId);
+    writeJsonFileAtomic(filePath, { gids, updatedAt: Date.now() });
 }
 
 // ==================== 好友狗狗信息缓存 ====================
@@ -90,64 +85,43 @@ function getFriendListCacheFile(accountId) {
 }
 
 function readFriendListCache(accountId) {
-    try {
-        const filePath = getFriendListCacheFile(accountId);
-        if (fs.existsSync(filePath)) {
-            const data = readJsonFile(filePath);
-            if (data && Array.isArray(data.friends)) return data.friends;
-        }
-    } catch { }
-    return null;
+    const data = readJsonFile(getFriendListCacheFile(accountId), null);
+    if (data === null) return null;
+    if (!Array.isArray(data.friends)) throw new Error('好友缓存格式无效');
+    return data.friends;
 }
 
 function writeFriendListCache(accountId, friends) {
-    try {
-        const filePath = getFriendListCacheFile(accountId);
-        writeJsonFileAtomic(filePath, { friends: friends || [], updatedAt: Date.now() });
-    } catch { }
+    const filePath = getFriendListCacheFile(accountId);
+    writeJsonFileAtomic(filePath, { friends, updatedAt: Date.now() });
 }
 
 function removeFriendFromCache(accountId, gid) {
     const targetGid = Number(gid);
     if (!targetGid) return;
 
-    // 从好友列表缓存中移除
-    try {
-        const friends = readFriendListCache(accountId);
-        if (Array.isArray(friends) && friends.length > 0) {
-            const filtered = friends.filter(f => Number(f.gid) !== targetGid);
-            if (filtered.length !== friends.length) {
-                writeFriendListCache(accountId, filtered);
-            }
-        }
-    } catch { }
-
-    // 从狗狗信息缓存中移除
-    try {
-        require('../services/friend-pet-cache').forget(targetGid, accountId);
-    } catch { }
+    const friends = readFriendListCache(accountId);
+    if (friends) {
+        const filtered = friends.filter(f => Number(f.gid) !== targetGid);
+        if (filtered.length !== friends.length) writeFriendListCache(accountId, filtered);
+    }
+    require('../services/friend-pet-cache').forget(targetGid, accountId);
 }
 
 function deleteFriendListCache(accountId) {
-    try {
-        const filePath = getFriendListCacheFile(accountId);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch { }
+    const file = getFriendListCacheFile(accountId);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
 }
 
 function deleteFriendDogInfoCache(accountId) {
-    try {
-        require('../services/friend-pet-cache').clear(accountId);
-        const filePath = getFriendDogInfoCacheFile(accountId);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch { }
+    require('../services/friend-pet-cache').clear(accountId);
+    const retired = getFriendDogInfoCacheFile(accountId);
+    if (fs.existsSync(retired)) fs.unlinkSync(retired);
 }
 
 function deleteKnownFriendGidsCache(accountId) {
-    try {
-        const filePath = getKnownFriendGidsCacheFile(accountId);
-        if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-    } catch { }
+    const file = getKnownFriendGidsCacheFile(accountId);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
 }
 
 function deleteAccountCaches(accountId) {
@@ -281,7 +255,8 @@ const ALLOWED_AUTOMATION_KEYS = new Set(Object.keys(DEFAULT_ACCOUNT_CONFIG.autom
 // ==================== 标准化函数 ====================
 
 function normalizeKnownFriendGids(rawGids, fallback = []) {
-    const input = Array.isArray(rawGids) ? rawGids : fallback;
+    const input = rawGids === undefined ? fallback : rawGids;
+    if (!Array.isArray(input)) throw new Error('好友 GID 必须为列表');
     const result = [];
     for (const item of input) {
         const gid = Number.parseInt(item, 10);
@@ -293,7 +268,8 @@ function normalizeKnownFriendGids(rawGids, fallback = []) {
 }
 
 function normalizeBagSeedPriority(rawList) {
-    if (!Array.isArray(rawList)) return [];
+    if (rawList === undefined) return [];
+    if (!Array.isArray(rawList)) throw new Error('种子优先级必须为列表');
     const result = [];
     for (const item of rawList) {
         const seedId = Number.parseInt(item, 10);
@@ -307,33 +283,35 @@ function normalizeBagSeedPriority(rawList) {
 function normalizeBagSeedFallbackStrategy(rawStrategy, fallback = 'level') {
     const strategy = String(rawStrategy || '').trim();
     if (ALLOWED_BAG_SEED_FALLBACK_STRATEGIES.includes(strategy)) return strategy;
-    return fallback;
+    if (rawStrategy === undefined) return fallback;
+    throw new Error('背包第二种植策略无效');
 }
 
 function normalizeFertilizerLandTypes(rawTypes, fallback = DEFAULT_FERTILIZER_LAND_TYPES) {
-    const input = Array.isArray(rawTypes) ? rawTypes : fallback;
+    const input = rawTypes === undefined ? fallback : rawTypes;
+    if (!Array.isArray(input)) throw new Error('土地类型必须为列表');
     const result = [];
     for (const item of input) {
         const key = String(item || '').trim().toLowerCase();
-        if (!FERTILIZER_LAND_TYPE_SET.has(key)) continue;
+        if (!FERTILIZER_LAND_TYPE_SET.has(key)) throw new Error('土地类型无效');
         if (result.includes(key)) continue;
         result.push(key);
     }
     return result;
 }
 
-// 背包种子优先策略：优先种植的指定品质地块（默认全选=不限制，向后兼容）
+// 背包种子优先策略：优先种植的指定品质地块（默认全选）
 function normalizeBagPriorityLandTypes(rawTypes, fallback = DEFAULT_FERTILIZER_LAND_TYPES) {
-    const input = Array.isArray(rawTypes) ? rawTypes : fallback;
+    const input = rawTypes === undefined ? fallback : rawTypes;
+    if (!Array.isArray(input)) throw new Error('土地类型必须为列表');
     const result = [];
     for (const item of input) {
         const key = String(item || '').trim().toLowerCase();
-        if (!FERTILIZER_LAND_TYPE_SET.has(key)) continue;
+        if (!FERTILIZER_LAND_TYPE_SET.has(key)) throw new Error('土地类型无效');
         if (result.includes(key)) continue;
         result.push(key);
     }
-    // 空数组视为"不限制"，回退到全选，避免误配置导致完全不种背包种子
-    return result.length > 0 ? result : [...DEFAULT_FERTILIZER_LAND_TYPES];
+    return result;
 }
 
 function normalizeOfflineReminder(raw) {
@@ -345,10 +323,8 @@ function normalizeOfflineReminder(raw) {
 
     const rawChannel = input.channel !== undefined && input.channel !== null
         ? String(input.channel).trim().toLowerCase() : '';
-    const legacyEndpointChannel = PUSHOO_CHANNELS.has(endpoint.toLowerCase())
-        ? endpoint.toLowerCase() : '';
-    let channel = rawChannel || legacyEndpointChannel || def.channel;
-    if (channel !== 'smtp' && !PUSHOO_CHANNELS.has(channel)) channel = def.channel;
+    const channel = rawChannel || def.channel;
+    if (channel !== 'smtp' && !PUSHOO_CHANNELS.has(channel)) throw new Error('推送渠道无效');
 
     let offlineDeleteSec = Number.parseInt(input.offlineDeleteSec, 10);
     if (!Number.isFinite(offlineDeleteSec) || offlineDeleteSec < 0) offlineDeleteSec = def.offlineDeleteSec;
@@ -405,7 +381,8 @@ function normalizeOfflineReminder(raw) {
 function normalizeTimeString(raw, fallback) {
     const str = String(raw || '').trim();
     const match = str.match(/^(\d{1,2}):(\d{1,2})$/);
-    if (!match) return fallback;
+    if (raw === undefined) return fallback;
+    if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) throw new Error('时间必须为有效 HH:mm');
 
     const hour = Math.max(0, Math.min(23, Number.parseInt(match[1], 10)));
     const minute = Math.max(0, Math.min(59, Number.parseInt(match[2], 10)));
@@ -502,7 +479,7 @@ const DEFAULT_LOGIN_LINKS = {
     qqGroupUrl: ''
 };
 
-let accountFallbackConfig = (() => {
+let accountDefaults = (() => {
     const cfg = { ...DEFAULT_ACCOUNT_CONFIG };
     cfg.automation = { ...DEFAULT_ACCOUNT_CONFIG.automation };
     cfg.intervals = { ...DEFAULT_ACCOUNT_CONFIG.intervals };
@@ -516,22 +493,19 @@ const globalConfig = {
     accountConfigs: {},
     defaultAccountConfig: cloneAccountConfig(DEFAULT_ACCOUNT_CONFIG),
     userDefaultAccountPlans: {},
-    ui: { theme: 'light' },
-    offlineReminder: { ...DEFAULT_OFFLINE_REMINDER },
+    userUis: {},
+    userWxConfigs: {},
     userOfflineReminders: {},
-    adminPasswordHash: '',
     announcement: { enabled: false, title: '系统公告', content: '', showOnce: true, updatedAt: 0 },
     announcementReadRecords: {},
     systemConfig: null,
     loginLinks: null,
-    globalWxConfig: null,
-    deviceProtocol: null,
     userDeviceProtocols: {}
 };
 
-function normalizeAccountConfig(raw, fallbackConfig = accountFallbackConfig) {
+function normalizeAccountConfig(raw, defaults = accountDefaults) {
     const input = raw && typeof raw === 'object' ? raw : {};
-    const cfg = cloneAccountConfig(fallbackConfig || DEFAULT_ACCOUNT_CONFIG);
+    const cfg = cloneAccountConfig(defaults || DEFAULT_ACCOUNT_CONFIG);
 
     // 合并自动化配置
     if (input.automation && typeof input.automation === 'object') {
@@ -724,23 +698,23 @@ function normalizeUserDefaultPlan(raw) {
 
 function getAccountConfigSnapshot(accountId) {
     const id = resolveAccountId(accountId);
-    if (!id) return cloneAccountConfig(accountFallbackConfig);
-    return normalizeAccountConfig(globalConfig.accountConfigs[id], accountFallbackConfig);
+    if (!id) return cloneAccountConfig(accountDefaults);
+    return normalizeAccountConfig(globalConfig.accountConfigs[id], accountDefaults);
 }
 
 function setAccountConfigSnapshot(accountId, config, save = true) {
     const id = resolveAccountId(accountId);
     if (!id) {
-        const next = normalizeAccountConfig(config, accountFallbackConfig);
+        const next = normalizeAccountConfig(config, accountDefaults);
         if (save) saveGlobalConfig({ defaultAccountConfig: cloneAccountConfig(next) });
         else {
-            accountFallbackConfig = next;
+            accountDefaults = next;
             globalConfig.defaultAccountConfig = cloneAccountConfig(next);
         }
-        return cloneAccountConfig(accountFallbackConfig);
+        return cloneAccountConfig(accountDefaults);
     }
 
-    const next = normalizeAccountConfig(config, accountFallbackConfig);
+    const next = normalizeAccountConfig(config, accountDefaults);
     if (save) configStorage.saveAccount(id, next);
     globalConfig.accountConfigs[id] = next;
     return cloneAccountConfig(globalConfig.accountConfigs[id]);
@@ -769,27 +743,10 @@ function ensureAccountConfig(accountId, opts = {}) {
 function loadGlobalConfig() {
     ensureDataDir();
     try {
-        const data = configStorage.load({ migrate: !process.env.FARM_ACCOUNT_ID });
+        const data = configStorage.load();
 
-        // Retired login settings must not survive upgrades in the persisted document.
-        let retiredLoginSettingsRemoved = false;
-        if (Object.hasOwn(data, 'captureConfig')) {
-            delete data.captureConfig;
-            retiredLoginSettingsRemoved = true;
-        }
-        const reminders = [data.offlineReminder, ...Object.values(data.userOfflineReminders || {})];
-        for (const reminder of reminders) {
-            if (reminder && typeof reminder === 'object' && Object.hasOwn(reminder, 'reloginUrlMode')) {
-                delete reminder.reloginUrlMode;
-                retiredLoginSettingsRemoved = true;
-            }
-        }
-        if (retiredLoginSettingsRemoved && !process.env.FARM_ACCOUNT_ID) {
-            configStorage.saveGlobal(data);
-        }
-
-        accountFallbackConfig = cloneAccountConfig(DEFAULT_ACCOUNT_CONFIG);
-        globalConfig.defaultAccountConfig = cloneAccountConfig(accountFallbackConfig);
+        accountDefaults = cloneAccountConfig(DEFAULT_ACCOUNT_CONFIG);
+        globalConfig.defaultAccountConfig = cloneAccountConfig(accountDefaults);
 
         // 加载各账号配置
         const rawConfigs = data.accountConfigs && typeof data.accountConfigs === 'object'
@@ -804,18 +761,14 @@ function loadGlobalConfig() {
             ? data.userDefaultAccountPlans : {};
         globalConfig.userDefaultAccountPlans = {};
         for (const [key, val] of Object.entries(rawPlans)) {
-            const username = String(key || '').trim();
-            if (!username || !val) continue;
-            globalConfig.userDefaultAccountPlans[username] = normalizeUserDefaultPlan(val);
+            const userId = parseUserId(key);
+            if (!userId || !val) continue;
+            globalConfig.userDefaultAccountPlans[userId] = normalizeUserDefaultPlan(val);
         }
 
         // UI 配置
-        globalConfig.ui = { ...globalConfig.ui, ...data.ui || {} };
-        const theme = String(globalConfig.ui.theme || '').toLowerCase();
-        globalConfig.ui.theme = theme === 'light' ? 'light' : 'dark';
-
-        // 离线提醒
-        globalConfig.offlineReminder = normalizeOfflineReminder(data.offlineReminder);
+        globalConfig.userUis = { ...data.userUis };
+        globalConfig.userWxConfigs = pickUserWxConfigs(data.userWxConfigs);
 
         // 用户离线提醒
         if (data.userOfflineReminders && typeof data.userOfflineReminders === 'object') {
@@ -825,17 +778,6 @@ function loadGlobalConfig() {
                     globalConfig.userOfflineReminders[key] = normalizeOfflineReminder(val);
                 }
             }
-        }
-        if (data.offlineReminder && typeof data.offlineReminder === 'object') {
-            const adminReminder = normalizeOfflineReminder(data.offlineReminder);
-            if (!globalConfig.userOfflineReminders.admin) {
-                globalConfig.userOfflineReminders.admin = adminReminder;
-            }
-        }
-
-        // 管理员密码
-        if (typeof data.adminPasswordHash === 'string') {
-            globalConfig.adminPasswordHash = data.adminPasswordHash;
         }
 
         // 公告
@@ -852,22 +794,8 @@ function loadGlobalConfig() {
             globalConfig.announcementReadRecords = { ...data.announcementReadRecords };
         }
 
-        // 系统配置
-        if (data.systemConfig && typeof data.systemConfig === 'object') {
-            globalConfig.systemConfig = {
-                serverUrl: String(data.systemConfig.serverUrl || '').trim(),
-                clientVersion: migrateStoredClientVersion(data.systemConfig.clientVersion),
-                wxClientVersion: migrateStoredClientVersion(data.systemConfig.wxClientVersion, 'wx'),
-                platform: String(data.systemConfig.platform || 'qq').trim(),
-                os: String(data.systemConfig.os || 'iOS').trim()
-            };
-            if (globalConfig.systemConfig.clientVersion !== String(data.systemConfig.clientVersion || '').trim()
-                || globalConfig.systemConfig.wxClientVersion !== String(data.systemConfig.wxClientVersion || '').trim()) {
-                if (!process.env.FARM_ACCOUNT_ID) {
-                    configStorage.saveGlobal({ ...data, systemConfig: globalConfig.systemConfig });
-                }
-            }
-        }
+        if (data.systemConfig !== undefined && data.systemConfig !== null) validateSystemConfig(data.systemConfig);
+        globalConfig.systemConfig = data.systemConfig === undefined || data.systemConfig === null ? getDefaultSystemConfig() : { ...data.systemConfig };
 
         // 登录页链接
         if (data.loginLinks && typeof data.loginLinks === 'object') {
@@ -878,35 +806,6 @@ function loadGlobalConfig() {
                 registerSubtitle: String(data.loginLinks.registerSubtitle || DEFAULT_LOGIN_LINKS.registerSubtitle).trim(),
                 purchaseUrl: String(data.loginLinks.purchaseUrl ?? '').trim(),
                 qqGroupUrl: String(data.loginLinks.qqGroupUrl ?? '').trim()
-            };
-        }
-
-        // 微信配置
-        if (data.globalWxConfig && typeof data.globalWxConfig === 'object') {
-            globalConfig.globalWxConfig = {
-                enabled: data.globalWxConfig.enabled !== false,
-                apiBase: String(data.globalWxConfig.apiBase || 'https://code.z74d.top/api').trim(),
-                apiKey: String(data.globalWxConfig.apiKey || '').trim(),
-                proxyApiUrl: String(data.globalWxConfig.proxyApiUrl || 'https://code.z74d.top/api').trim(),
-                appId: String(data.globalWxConfig.appId || 'wx5306c5978fdb76e4').trim(),
-                autoAddAccount: data.globalWxConfig.autoAddAccount !== false,
-                userIsolation: data.globalWxConfig.userIsolation !== false,
-                autoReconnect: data.globalWxConfig.autoReconnect === true,
-                reconnectDelayMin: Math.max(1, Number(data.globalWxConfig.reconnectDelayMin) || 5),
-                reconnectMaxAttempts: Math.max(1, Number(data.globalWxConfig.reconnectMaxAttempts) || 3)
-            };
-        }
-
-        // 设备协议
-        if (data.deviceProtocol && typeof data.deviceProtocol === 'object') {
-            globalConfig.deviceProtocol = {
-                enabled: data.deviceProtocol.enabled === true,
-                userAgent: String(data.deviceProtocol.userAgent || DEFAULT_DEVICE_PROTOCOL.userAgent).trim(),
-                deviceModel: String(data.deviceProtocol.deviceModel || DEFAULT_DEVICE_PROTOCOL.deviceModel).trim(),
-                deviceBrand: String(data.deviceProtocol.deviceBrand || DEFAULT_DEVICE_PROTOCOL.deviceBrand).trim(),
-                deviceMac: String(data.deviceProtocol.deviceMac || '').trim(),
-                deviceId: String(data.deviceProtocol.deviceId || '').trim(),
-                imei: String(data.deviceProtocol.imei || '').trim()
             };
         }
 
@@ -940,9 +839,9 @@ function sanitizeGlobalConfigBeforeSave(config) {
         ? config.userDefaultAccountPlans : {};
     const cleanPlans = {};
     for (const [key, val] of Object.entries(rawPlans)) {
-        const username = String(key || '').trim();
-        if (!username || !val) continue;
-        cleanPlans[username] = normalizeUserDefaultPlan(val);
+        const userId = parseUserId(key);
+        if (!userId || !val) continue;
+        cleanPlans[userId] = normalizeUserDefaultPlan(val);
     }
     config.userDefaultAccountPlans = cleanPlans;
 
@@ -950,8 +849,7 @@ function sanitizeGlobalConfigBeforeSave(config) {
         ? config.userOfflineReminders : {};
     const cleanReminders = {};
     for (const [key, val] of Object.entries(rawReminders)) {
-        const id = String(key || '').trim();
-        if (!id) continue;
+        const id = parseUserId(key);
         cleanReminders[id] = normalizeOfflineReminder(val);
     }
     config.userOfflineReminders = cleanReminders;
@@ -960,8 +858,7 @@ function sanitizeGlobalConfigBeforeSave(config) {
         ? config.userDeviceProtocols : {};
     const cleanProtocols = {};
     for (const [key, val] of Object.entries(rawProtocols)) {
-        const id = String(key || '').trim();
-        if (!id) continue;
+        const id = parseUserId(key);
         cleanProtocols[id] = {
             enabled: val.enabled === true,
             userAgent: String(val.userAgent || DEFAULT_DEVICE_PROTOCOL.userAgent).trim(),
@@ -973,6 +870,8 @@ function sanitizeGlobalConfigBeforeSave(config) {
         };
     }
     config.userDeviceProtocols = cleanProtocols;
+    config.userWxConfigs = pickUserWxConfigs(config.userWxConfigs);
+    for (const field of ['userUis', 'userWxConfigs', 'announcementReadRecords']) Object.keys(config[field]).forEach(parseUserId);
 }
 
 function saveGlobalConfig(changes = {}) {
@@ -981,22 +880,8 @@ function saveGlobalConfig(changes = {}) {
     sanitizeGlobalConfigBeforeSave(next);
     configStorage.saveGlobal(next);
     Object.assign(globalConfig, next);
-    accountFallbackConfig = normalizeAccountConfig(next.defaultAccountConfig, DEFAULT_ACCOUNT_CONFIG);
+    accountDefaults = normalizeAccountConfig(next.defaultAccountConfig, DEFAULT_ACCOUNT_CONFIG);
 }
-
-function getAdminPasswordHash() {
-    return String(globalConfig.adminPasswordHash || '');
-}
-
-function setAdminPasswordHash(hash) {
-    saveGlobalConfig({ adminPasswordHash: String(hash || '') });
-    return globalConfig.adminPasswordHash;
-}
-
-loadGlobalConfig();
-
-
-// ==================== 便捷访问器 ====================
 
 function getAutomation(accountId) {
     const auto = { ...getAccountConfigSnapshot(accountId).automation };
@@ -1007,7 +892,8 @@ function getAutomation(accountId) {
 function getConfigSnapshot(accountId) {
     const cfg = getAccountConfigSnapshot(accountId);
     const auto = { ...cfg.automation };
-    const ui = { ...globalConfig.ui };
+    const owner = accountId ? getAccounts().accounts.find(account => account.id === String(accountId)) : null;
+    const ui = owner ? getUI(owner.userId) : { theme: 'light' };
     return {
         automation: auto,
         autoCodeRefresh: { ...cfg.autoCodeRefresh },
@@ -1040,7 +926,7 @@ function applyConfigSnapshot(patch = {}, opts = {}) {
     const persist = opts.persist !== false;
     const accountId = opts.accountId;
     const base = getAccountConfigSnapshot(accountId);
-    const cfg = normalizeAccountConfig(base, accountFallbackConfig);
+    const cfg = normalizeAccountConfig(base, accountDefaults);
 
     if (patch.automation && typeof patch.automation === 'object') {
         for (const [key, value] of Object.entries(patch.automation)) {
@@ -1159,13 +1045,6 @@ function applyConfigSnapshot(patch = {}, opts = {}) {
         cfg.bagPriorityLandTypes = normalizeBagPriorityLandTypes(patch.bagPriorityLandTypes);
     }
     setAccountConfigSnapshot(accountId, cfg, persist);
-    if (patch.ui && typeof patch.ui === 'object') {
-        const theme = String(patch.ui.theme || '').toLowerCase();
-        if (theme === 'dark' || theme === 'light') {
-            if (persist) saveGlobalConfig({ ui: { ...globalConfig.ui, theme } });
-            else globalConfig.ui = { ...globalConfig.ui, theme };
-        }
-    }
 
     return getConfigSnapshot(accountId);
 }
@@ -1248,7 +1127,7 @@ function getKnownFriendGids(accountId) {
 
 function setKnownFriendGids(accountId, gids) {
     const base = getAccountConfigSnapshot(accountId);
-    const cfg = normalizeAccountConfig(base, accountFallbackConfig);
+    const cfg = normalizeAccountConfig(base, accountDefaults);
     const normalized = normalizeKnownFriendGids(gids, cfg.knownFriendGids);
     cfg.knownFriendGids = normalized;
     setAccountConfigSnapshot(accountId, cfg);
@@ -1298,7 +1177,7 @@ function getFriendBlacklistDetails(accountId) {
 
 function setFriendBlacklist(accountId, list) {
     const base = getAccountConfigSnapshot(accountId);
-    const cfg = normalizeAccountConfig(base, accountFallbackConfig);
+    const cfg = normalizeAccountConfig(base, accountDefaults);
     cfg.friendBlacklist = normalizeFriendBlacklist(list);
     setAccountConfigSnapshot(accountId, cfg);
     return getFriendBlacklistDetails(accountId);
@@ -1395,47 +1274,47 @@ function getPlantBlacklist(accountId) {
 
 function setPlantBlacklist(accountId, blacklist) {
     const base = getAccountConfigSnapshot(accountId);
-    const cfg = normalizeAccountConfig(base, accountFallbackConfig);
+    const cfg = normalizeAccountConfig(base, accountDefaults);
     cfg.plantBlacklist = Array.isArray(blacklist)
         ? blacklist.map(Number).filter(n => Number.isFinite(n) && n > 0) : [];
     setAccountConfigSnapshot(accountId, cfg);
     return [...cfg.plantBlacklist];
 }
 
-function getUI() {
-    return { ...globalConfig.ui };
+function getUI(userId) {
+    assertUserId(userId);
+    return { theme: globalConfig.userUis[userId]?.theme ?? 'light' };
 }
 
-function setUITheme(theme) {
-    const raw = String(theme || '').toLowerCase();
-    return applyConfigSnapshot({ ui: { theme: raw === 'light' ? 'light' : 'dark' } });
+function setUITheme(theme, userId) {
+    assertUserId(userId);
+    if (!['light', 'dark'].includes(theme)) throw new Error('无效的主题');
+    saveGlobalConfig({ userUis: { ...globalConfig.userUis, [userId]: { theme } } });
+    return { ui: getUI(userId) };
 }
 
-function getOfflineReminder(username) {
-    if (!username) return normalizeOfflineReminder(globalConfig.offlineReminder);
-    const userReminder = globalConfig.userOfflineReminders && globalConfig.userOfflineReminders[username];
+function getOfflineReminder(userId) {
+    assertUserId(userId);
+    const userReminder = globalConfig.userOfflineReminders && globalConfig.userOfflineReminders[userId];
     if (userReminder) return normalizeOfflineReminder(userReminder);
     return normalizeOfflineReminder({});
 }
 
-function setOfflineReminder(config, username) {
-    if (!username) {
-        const current = normalizeOfflineReminder(globalConfig.offlineReminder);
-        saveGlobalConfig({ offlineReminder: normalizeOfflineReminder({ ...current, ...config || {} }) });
-        return getOfflineReminder();
-    }
-    const current = normalizeOfflineReminder(globalConfig.userOfflineReminders?.[username] || {});
+function setOfflineReminder(config, userId) {
+    assertUserId(userId);
+    const current = normalizeOfflineReminder(globalConfig.userOfflineReminders?.[userId] || {});
     saveGlobalConfig({ userOfflineReminders: {
         ...globalConfig.userOfflineReminders,
-        [username]: normalizeOfflineReminder({ ...current, ...config || {} })
+        [userId]: normalizeOfflineReminder({ ...current, ...config || {} })
     } });
-    return getOfflineReminder(username);
+    return getOfflineReminder(userId);
 }
 
-function deleteUserOfflineReminder(username) {
-    if (globalConfig.userOfflineReminders && globalConfig.userOfflineReminders[username]) {
+function deleteUserOfflineReminder(userId) {
+    assertUserId(userId);
+    if (globalConfig.userOfflineReminders && globalConfig.userOfflineReminders[userId]) {
         const next = { ...globalConfig.userOfflineReminders };
-        delete next[username];
+        delete next[userId];
         saveGlobalConfig({ userOfflineReminders: next });
     }
 }
@@ -1451,12 +1330,9 @@ function cloneAccounts(data) {
 
 function loadAccounts() {
     ensureDataDir();
-    const data = readJsonFileStrict(ACCOUNTS_FILE, () => ({ accounts: [], nextId: 1 }));
-    if (!data || typeof data !== 'object' || Array.isArray(data)
-        || (data.accounts !== undefined && !Array.isArray(data.accounts))) {
-        throw storageError('读取', ACCOUNTS_FILE, new Error('Invalid accounts document'));
-    }
-    accountsCache = normalizeAccountsData(data);
+    const data = readJsonFileStrict(ACCOUNTS_FILE, () => ({ schemaVersion: 3, accounts: [], nextId: 1 }));
+    try { accountsCache = normalizeAccountsData(data); }
+    catch (error) { throw storageError('读取', ACCOUNTS_FILE, error); }
     return cloneAccounts(accountsCache);
 }
 
@@ -1473,20 +1349,18 @@ function getAccounts() {
 }
 
 function normalizeAccountsData(data) {
-    const input = data && typeof data === 'object' ? data : {};
-    const accounts = (Array.isArray(input.accounts) ? input.accounts : [])
-        .map(account => account && typeof account === 'object'
-            ? { ...account, autoStart: account.autoStart !== false }
-            : account);
-    const maxId = accounts.reduce((max, acc) =>
-        Math.max(max, Number.parseInt(acc && acc.id, 10) || 0), 0);
-
-    let nextId = Number.parseInt(input.nextId, 10);
-    if (!Number.isFinite(nextId) || nextId <= 0) nextId = maxId + 1;
-    if (accounts.length === 0) nextId = 1;
-    if (nextId <= maxId) nextId = maxId + 1;
-
-    return { accounts, nextId };
+    if (data?.schemaVersion !== 3 || !Array.isArray(data.accounts) || !Number.isSafeInteger(data.nextId)) throw new Error('Invalid accounts document');
+    const ids = new Set();
+    for (const account of data.accounts) {
+        if (!account || typeof account.id !== 'string' || !/^[1-9]\d*$/.test(account.id)
+            || !Number.isSafeInteger(Number(account.id)) || ids.has(account.id)
+            || !isUserId(account.userId) || Object.hasOwn(account, 'username')
+            || typeof account.autoStart !== 'boolean') throw new Error('Invalid account identity');
+        ids.add(account.id);
+    }
+    const maxId = data.accounts.reduce((max, account) => Math.max(max, Number(account.id)), 0);
+    if (data.nextId <= maxId) throw new Error('Invalid next account ID');
+    return cloneAccounts(data);
 }
 
 // 第三方应用宝配置脱敏哨兵：API 响应中 token 被替换为该值，
@@ -1529,11 +1403,32 @@ function sanitizeThirdparty(input, existing) {
 }
 
 function addOrUpdateAccount(account) {
+    if (Object.hasOwn(account, 'username')) throw new Error('账号仅接受 userId 归属');
+    for (const field of ['autoStart', 'qqAutoReconnect']) {
+        if (Object.hasOwn(account, field) && typeof account[field] !== 'boolean') throw Object.assign(new Error(`${field} 必须是布尔值`), { status: 400 });
+    }
     const data = getAccounts();
+    const previous = account.id ? data.accounts.find(item => item.id === account.id) : null;
+    if (account.id) {
+        const existing = data.accounts.find(item => item.id === account.id);
+        if (!existing) throw new Error('账号不存在');
+        if (existing.deleting) throw Object.assign(new Error('账号正在删除，禁止修改'), { status: 409 });
+        if (account.userId !== undefined && account.userId !== existing.userId) throw new Error('账号用户 ID 创建后不可修改');
+    } else { assertUserId(account.userId); }
+    if (!account.id || Object.hasOwn(account, 'proxyMode') || Object.hasOwn(account, 'proxyProfileId')) {
+        const setting = {
+            proxyMode: account.proxyMode === undefined ? previous?.proxyMode ?? 'direct' : account.proxyMode,
+            proxyProfileId: account.proxyProfileId === undefined ? previous?.proxyProfileId : account.proxyProfileId,
+        };
+        if (!['direct', 'static'].includes(setting.proxyMode)) throw Object.assign(new Error('请选择有效的代理模式'), { status: 400 });
+        const id = Number(setting.proxyProfileId);
+        if (setting.proxyMode === 'static' && (!Number.isSafeInteger(id) || id <= 0)) throw Object.assign(new Error('请选择有效的代理配置'), { status: 400 });
+        account = { ...account, proxyMode: setting.proxyMode, proxyProfileId: setting.proxyMode === 'static' ? id : null };
+    }
     let accountId = '';
     let created = false;
-    const nextAvatar = account.avatar || account.avatarUrl || account.avatar_url;
-    const nextOpenId = account.openId || account.open_id;
+    const nextAvatar = account.avatar;
+    const nextOpenId = account.openId;
 
     if (account.id) {
         // 更新已有账号
@@ -1581,7 +1476,7 @@ function addOrUpdateAccount(account) {
             gid: account.gid ? String(account.gid) : '',
             openId: nextOpenId ? String(nextOpenId) : '',
             avatar: nextAvatar || '',
-            username: account.username || '',
+            userId: assertUserId(account.userId),
             yybOpenid: account.yybOpenid ? String(account.yybOpenid) : '',
             qqLoginProfile: account.qqLoginProfile || '',
             qqAutoReconnect: account.qqAutoReconnect !== false,
@@ -1592,8 +1487,8 @@ function addOrUpdateAccount(account) {
     }
 
     if (accountId) {
-        const username = String(account.username || '').trim();
-        const plan = created && username ? globalConfig.userDefaultAccountPlans[username] : null;
+        const userId = assertUserId(data.accounts.find(item => item.id === accountId).userId);
+        const plan = created && userId ? globalConfig.userDefaultAccountPlans[userId] : null;
         if (plan && plan.enabled !== false) {
             setAccountConfigSnapshot(accountId, plan.config);
         } else {
@@ -1604,56 +1499,70 @@ function addOrUpdateAccount(account) {
     return data;
 }
 
-function deleteAccount(accountId) {
-    const data = getAccounts();
-    data.accounts = data.accounts.filter(a => a.id !== String(accountId));
-    if (data.accounts.length === 0) data.nextId = 1;
-    saveAccounts(data);
+function removeAccountArtifacts(accountId) {
     removeAccountConfig(accountId);
     deleteAccountCaches(accountId);
+    const digest = require('node:crypto').createHash('sha256').update(String(accountId)).digest('hex');
+    for (const file of [getDataFile(`stats/${accountId}.json`), getDataFile(`activity-center-state-${digest}.json`)]) {
+        if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+}
+
+function beginAccountDeletion(accountId) {
+    const data = getAccounts();
+    const account = data.accounts.find(item => item.id === String(accountId));
+    if (!account) throw Object.assign(new Error('账号不存在'), { status: 404 });
+    if (!account.deleting) {
+        account.deleting = true;
+        account.autoStart = false;
+        saveAccounts(data);
+    }
+    return { ...account };
+}
+
+function deleteAccount(accountId) {
+    const data = getAccounts();
+    removeAccountArtifacts(String(accountId));
+    data.accounts = data.accounts.filter(a => a.id !== String(accountId));
+    saveAccounts(data);
     return data;
 }
 
-function getAccountsByUser(username) {
+function getAccountsByUser(userId) {
+    assertUserId(userId);
     const data = getAccounts();
-    if (!username) return data;
-    return {
-        accounts: data.accounts.filter(a => a.username === username),
-        nextId: data.nextId
-    };
+    return { accounts: data.accounts.filter(a => a.userId === userId), nextId: data.nextId };
 }
 
-function deleteAccountsByUser(username) {
+function deleteAccountsByUser(userId) {
+    assertUserId(userId);
     const data = getAccounts();
-    const deletedIds = [];
-    data.accounts = data.accounts.filter(a => {
-        if (a.username === username) {
-            deletedIds.push(a.id);
-            return false;
-        }
-        return true;
-    });
-    if (data.accounts.length === 0) data.nextId = 1;
+    const deletedIds = data.accounts.filter(a => a.userId === userId).map(a => a.id);
+    for (const id of deletedIds) removeAccountArtifacts(id);
+    data.accounts = data.accounts.filter(a => a.userId !== userId);
     saveAccounts(data);
-    deletedIds.forEach(id => {
-        removeAccountConfig(id);
-        deleteAccountCaches(id);
-    });
     return { deletedCount: deletedIds.length, deletedIds };
 }
 
-function deleteUserConfig(username) {
-    deleteUserOfflineReminder(username);
-    deleteUserDeviceProtocol(username);
-    if (globalConfig.userDefaultAccountPlans && globalConfig.userDefaultAccountPlans[username]) {
+function deleteUserConfig(userId) {
+    assertUserId(userId);
+    const userUis = { ...globalConfig.userUis }; delete userUis[userId];
+    const userWxConfigs = { ...globalConfig.userWxConfigs }; delete userWxConfigs[userId];
+    saveGlobalConfig({ userUis, userWxConfigs });
+    const reads = { ...globalConfig.announcementReadRecords };
+    delete reads[userId];
+    saveGlobalConfig({ announcementReadRecords: reads });
+    deleteUserOfflineReminder(userId);
+    deleteUserDeviceProtocol(userId);
+    if (globalConfig.userDefaultAccountPlans && globalConfig.userDefaultAccountPlans[userId]) {
         const next = { ...globalConfig.userDefaultAccountPlans };
-        delete next[username];
+        delete next[userId];
         saveGlobalConfig({ userDefaultAccountPlans: next });
     }
 }
 
-function getUserDefaultAccountPlan(username) {
-    const key = String(username || '').trim();
+function getUserDefaultAccountPlan(userId) {
+    const key = String(assertUserId(userId));
     const saved = key ? globalConfig.userDefaultAccountPlans[key] : null;
     if (!saved) {
         return {
@@ -1667,9 +1576,9 @@ function getUserDefaultAccountPlan(username) {
     return { exists: true, ...plan };
 }
 
-function setUserDefaultAccountPlan(username, rawConfig, options = {}) {
-    const key = String(username || '').trim();
-    if (!key) throw new Error('Missing username');
+function setUserDefaultAccountPlan(userId, rawConfig, options = {}) {
+    const key = String(assertUserId(userId));
+    if (!key) throw new Error('Missing userId');
     const plan = {
         enabled: options.enabled !== false,
         config: pickDefaultPlanConfig(rawConfig),
@@ -1679,8 +1588,9 @@ function setUserDefaultAccountPlan(username, rawConfig, options = {}) {
     return { exists: true, ...normalizeUserDefaultPlan(plan) };
 }
 
-function applyUserDefaultAccountPlan(username, accountId) {
-    const plan = getUserDefaultAccountPlan(username);
+function applyUserDefaultAccountPlan(userId, accountId) {
+    if (!getAccountsByUser(userId).accounts.some(account => account.id === String(accountId))) throw new Error('账号不属于该用户');
+    const plan = getUserDefaultAccountPlan(userId);
     if (!plan.exists) throw new Error('尚未保存默认方案');
     setAccountConfigSnapshot(accountId, plan.config);
     return getConfigSnapshot(accountId);
@@ -1719,24 +1629,24 @@ function setAnnouncement(content, showOnce = true, options = {}) {
     return getAnnouncement();
 }
 
-function getAnnouncementReadRecord(username) {
-    if (!username) return 0;
-    return globalConfig.announcementReadRecords?.[username] || 0;
+function getAnnouncementReadRecord(userId) {
+    assertUserId(userId);
+    return globalConfig.announcementReadRecords?.[userId] || 0;
 }
 
-function markAnnouncementRead(username, revision = getAnnouncement().updatedAt) {
-    if (!username) return;
+function markAnnouncementRead(userId, revision = getAnnouncement().updatedAt) {
+    assertUserId(userId);
     const announcement = getAnnouncement();
     if (!announcement.enabled || Number(revision) !== announcement.updatedAt) return;
-    saveGlobalConfig({ announcementReadRecords: { ...globalConfig.announcementReadRecords, [username]: announcement.updatedAt } });
+    saveGlobalConfig({ announcementReadRecords: { ...globalConfig.announcementReadRecords, [userId]: announcement.updatedAt } });
 }
 
-function shouldShowAnnouncement(username) {
+function shouldShowAnnouncement(userId) {
     const announcement = getAnnouncement();
     if (!announcement.enabled || !announcement.content) return false;
-    if (!username) return false;
+    assertUserId(userId);
     if (!announcement.showOnce) return true;
-    return getAnnouncementReadRecord(username) < announcement.updatedAt;
+    return getAnnouncementReadRecord(userId) < announcement.updatedAt;
 }
 
 // ==================== 系统配置 ====================
@@ -1745,16 +1655,14 @@ function getSystemConfig() {
     return globalConfig.systemConfig ? { ...globalConfig.systemConfig } : null;
 }
 
+function validateSystemConfig(config) {
+    if (!config || typeof config !== 'object' || ['serverUrl', 'clientVersion', 'wxClientVersion', 'platform', 'os'].some(key => typeof config[key] !== 'string' || !config[key].trim())) throw new Error('系统配置字段必须完整');
+    const url = new URL(config.serverUrl);
+    if (!['ws:', 'wss:'].includes(url.protocol) || !['qq', 'wx'].includes(config.platform)) throw new Error('系统配置格式无效');
+}
 function setSystemConfig(config) {
-    if (!config || typeof config !== 'object') return null;
-    const next = {
-        serverUrl: String(config.serverUrl || '').trim(),
-        clientVersion: String(config.clientVersion || '').trim(),
-        // Old panels omit this field: preserve the saved WeChat override.
-        wxClientVersion: migrateStoredClientVersion(config.wxClientVersion ?? globalConfig.systemConfig?.wxClientVersion, 'wx'),
-        platform: String(config.platform || 'qq').trim(),
-        os: String(config.os || 'iOS').trim()
-    };
+    validateSystemConfig(config);
+    const next = Object.fromEntries(['serverUrl', 'clientVersion', 'wxClientVersion', 'platform', 'os'].map(key => [key, config[key].trim()]));
     saveGlobalConfig({ systemConfig: next });
     return { ...globalConfig.systemConfig };
 }
@@ -1787,8 +1695,7 @@ const DEFAULT_WX_CONFIG = {
     apiKey: '',
     proxyApiUrl: 'https://code.z74d.top/api',
     appId: 'wx5306c5978fdb76e4',
-    autoAddAccount: true,
-    userIsolation: true,
+
     // 【2026-08-12 修复】内置 YYB 自动重连默认为开（原 false 导致多数用户从未触发重连，
     // 表现为"老是没重连"）。第三方 YYB 账号级默认本就是 true，二者对齐。
     autoReconnect: true,
@@ -1796,51 +1703,34 @@ const DEFAULT_WX_CONFIG = {
     reconnectMaxAttempts: 3
 };
 
-function getGlobalWxConfig() {
-    return globalConfig.globalWxConfig
-        ? { ...globalConfig.globalWxConfig }
-        : { ...DEFAULT_WX_CONFIG };
+function pickUserWxConfigs(configs = {}) {
+    return Object.fromEntries(Object.entries(configs).map(([id, config]) => [
+        id, Object.fromEntries(Object.entries(config).filter(([key]) => Object.hasOwn(DEFAULT_WX_CONFIG, key))),
+    ]));
 }
 
-function setGlobalWxConfig(config) {
-    if (!config || typeof config !== 'object') return null;
+function getUserWxConfig(userId) {
+    assertUserId(userId);
+    return { ...DEFAULT_WX_CONFIG, ...globalConfig.userWxConfigs[userId] };
+}
+
+function setUserWxConfig(config, userId) {
+    assertUserId(userId);
+    if (!config || typeof config !== 'object') throw new Error('无效的微信配置');
     const next = {
         enabled: config.enabled !== false,
-        apiBase: String(config.apiBase || DEFAULT_WX_CONFIG.apiBase).trim(),
-        apiKey: String(config.apiKey || '').trim(),
-        proxyApiUrl: String(config.proxyApiUrl || DEFAULT_WX_CONFIG.proxyApiUrl).trim(),
-        appId: String(config.appId || DEFAULT_WX_CONFIG.appId).trim(),
-        autoAddAccount: config.autoAddAccount !== false,
-        userIsolation: config.userIsolation !== false,
-        autoReconnect: config.autoReconnect === true,
-        reconnectDelayMin: Math.max(1, Number(config.reconnectDelayMin) || DEFAULT_WX_CONFIG.reconnectDelayMin),
-        reconnectMaxAttempts: Math.max(1, Number(config.reconnectMaxAttempts) || DEFAULT_WX_CONFIG.reconnectMaxAttempts)
+        apiBase: String(config.apiBase ?? DEFAULT_WX_CONFIG.apiBase).trim(),
+        apiKey: String(config.apiKey ?? '').trim(),
+        proxyApiUrl: String(config.proxyApiUrl ?? DEFAULT_WX_CONFIG.proxyApiUrl).trim(),
+        appId: String(config.appId ?? DEFAULT_WX_CONFIG.appId).trim(),
+        autoReconnect: config.autoReconnect !== false,
+        reconnectDelayMin: Number(config.reconnectDelayMin ?? 5),
+        reconnectMaxAttempts: Number(config.reconnectMaxAttempts ?? 3),
     };
-    saveGlobalConfig({ globalWxConfig: next });
-    return { ...globalConfig.globalWxConfig };
+    if (!Number.isFinite(next.reconnectDelayMin) || next.reconnectDelayMin <= 0 || !Number.isSafeInteger(next.reconnectMaxAttempts) || next.reconnectMaxAttempts < 0) throw new Error('无效的重连设置');
+    saveGlobalConfig({ userWxConfigs: { ...globalConfig.userWxConfigs, [userId]: next } });
+    return getUserWxConfig(userId);
 }
-
-// 单镜像部署时，start.sh 会自动生成应用宝 API Token 并导出为环境变量
-// YYB_API_KEY（与 YYB_API_TOKEN 同值）。若 wx-config 尚未保存过（apiKey 为空），
-// 则自动把接口地址与 token 写入配置，使前端“应用宝”配置开箱即预填好。
-// 仅在确实未配置时才写入，避免覆盖用户手动设置（如指向外部 yyb 服务）。
-function ensureYybAutoConfig() {
-    const cfg = globalConfig.globalWxConfig || {};
-    if (!cfg.apiKey && process.env.YYB_API_KEY) {
-        setGlobalWxConfig({
-            ...DEFAULT_WX_CONFIG,
-            ...cfg,
-            apiBase: process.env.YYB_API_URL || DEFAULT_WX_CONFIG.apiBase,
-            apiKey: process.env.YYB_API_KEY,
-            enabled: true,
-            confirmed: true,
-        });
-    }
-}
-
-// 模块加载完成后调用：若环境变量里已注入自动生成的 YYB_API_KEY，
-// 且 wx-config 尚未保存过，则自动预填，使前端“应用宝”配置开箱即用。
-ensureYybAutoConfig();
 
 // ==================== 设备协议 ====================
 
@@ -1854,36 +1744,15 @@ const DEFAULT_DEVICE_PROTOCOL = {
     imei: ''
 };
 
-function getDeviceProtocol() {
-    return globalConfig.deviceProtocol
-        ? { ...globalConfig.deviceProtocol }
-        : { ...DEFAULT_DEVICE_PROTOCOL };
-}
-
-function setDeviceProtocol(config) {
-    if (!config || typeof config !== 'object') return null;
-    const next = {
-        enabled: config.enabled === true,
-        userAgent: String(config.userAgent || DEFAULT_DEVICE_PROTOCOL.userAgent).trim(),
-        deviceModel: String(config.deviceModel || DEFAULT_DEVICE_PROTOCOL.deviceModel).trim(),
-        deviceBrand: String(config.deviceBrand || DEFAULT_DEVICE_PROTOCOL.deviceBrand).trim(),
-        deviceMac: String(config.deviceMac || '').trim(),
-        deviceId: String(config.deviceId || '').trim(),
-        imei: String(config.imei || '').trim()
-    };
-    saveGlobalConfig({ deviceProtocol: next });
-    return { ...globalConfig.deviceProtocol };
-}
-
-function getUserDeviceProtocol(username) {
-    if (!username) return { ...DEFAULT_DEVICE_PROTOCOL };
-    const userProtocol = globalConfig.userDeviceProtocols && globalConfig.userDeviceProtocols[username];
+function getUserDeviceProtocol(userId) {
+    assertUserId(userId);
+    const userProtocol = globalConfig.userDeviceProtocols && globalConfig.userDeviceProtocols[userId];
     if (userProtocol) return { ...userProtocol };
     return { ...DEFAULT_DEVICE_PROTOCOL };
 }
 
-function setUserDeviceProtocol(config, username) {
-    if (!username) return { ...DEFAULT_DEVICE_PROTOCOL };
+function setUserDeviceProtocol(config, userId) {
+    assertUserId(userId);
     const next = {
         enabled: config.enabled === true,
         userAgent: String(config.userAgent || DEFAULT_DEVICE_PROTOCOL.userAgent).trim(),
@@ -1893,17 +1762,20 @@ function setUserDeviceProtocol(config, username) {
         deviceId: String(config.deviceId || '').trim(),
         imei: String(config.imei || '').trim()
     };
-    saveGlobalConfig({ userDeviceProtocols: { ...globalConfig.userDeviceProtocols, [username]: next } });
-    return getUserDeviceProtocol(username);
+    saveGlobalConfig({ userDeviceProtocols: { ...globalConfig.userDeviceProtocols, [userId]: next } });
+    return getUserDeviceProtocol(userId);
 }
 
-function deleteUserDeviceProtocol(username) {
-    if (globalConfig.userDeviceProtocols && globalConfig.userDeviceProtocols[username]) {
+function deleteUserDeviceProtocol(userId) {
+    assertUserId(userId);
+    if (globalConfig.userDeviceProtocols && globalConfig.userDeviceProtocols[userId]) {
         const next = { ...globalConfig.userDeviceProtocols };
-        delete next[username];
+        delete next[userId];
         saveGlobalConfig({ userDeviceProtocols: next });
     }
 }
+
+loadGlobalConfig();
 
 // ==================== 模块导出 ====================
 
@@ -1951,9 +1823,8 @@ module.exports = {
     getAccounts,
     loadAccounts,
     addOrUpdateAccount,
+    beginAccountDeletion,
     deleteAccount,
-    getAdminPasswordHash,
-    setAdminPasswordHash,
     getAccountsByUser,
     deleteAccountsByUser,
     deleteUserConfig,
@@ -1973,11 +1844,9 @@ module.exports = {
     getLoginLinks,
     setLoginLinks,
     DEFAULT_LOGIN_LINKS,
-    getGlobalWxConfig,
-    setGlobalWxConfig,
+    getUserWxConfig,
+    setUserWxConfig,
     DEFAULT_WX_CONFIG,
-    getDeviceProtocol,
-    setDeviceProtocol,
     DEFAULT_DEVICE_PROTOCOL,
     getUserDeviceProtocol,
     setUserDeviceProtocol,

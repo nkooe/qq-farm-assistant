@@ -1,7 +1,6 @@
 const {
     findAccountByRef,
-    normalizeAccountRef,
-    resolveAccountId: resolveAccountIdByList
+    normalizeAccountRef
 } = require('../services/account-resolver');
 const { getSchedulerRegistrySnapshot } = require('../services/scheduler');
 const { loginIdentity } = require('../services/login-recovery');
@@ -32,6 +31,40 @@ function createDataProvider(deps) {
     } = deps;
     const manualRefreshes = new Map();
     const refreshControllers = new Map();
+    const deletingUsers = new Set();
+    const suspendingUsers = new Map();
+    const accountDeletions = new Map();
+    const getAccountAccessRejection = deps.getAccountAccessRejection || require('../services/account-access').getAccountAccessRejection;
+    function assertAccountAccess(account) {
+        const rejection = getAccountAccessRejection(account);
+        if (deletingUsers.has(account.userId) || suspendingUsers.has(account.userId) || rejection) {
+            throw Object.assign(new Error(rejection?.error || '用户已停用'), { status: 403 });
+        }
+    }
+
+    function suspendUser(userId) {
+        if (suspendingUsers.has(userId)) return suspendingUsers.get(userId);
+        const ids = new Set(getAllAccountList().filter(account => account.userId === userId).map(account => String(account.id)));
+        for (const [id, worker] of Object.entries(workers)) if (worker.userId === userId) ids.add(id);
+        const operations = [];
+        const refreshes = [];
+        const issue = action => { try { operations.push(action()); } catch (error) { operations.push(Promise.reject(error)); } };
+        // Issue every cancellation before awaiting any individual upstream request.
+        for (const id of ids) {
+            refreshControllers.get(id)?.abort();
+            issue(() => deps.cancelCodeRefresh(id));
+            issue(() => deps.stopWorkerAndWait(id));
+            refreshes.push(manualRefreshes.get(id));
+        }
+        const operation = Promise.all([Promise.allSettled(operations), Promise.allSettled(refreshes)]).then(([results]) => {
+            const failure = results.find(result => result.status === 'rejected');
+            if (failure) throw failure.reason;
+        }).finally(() => {
+            if (suspendingUsers.get(userId) === operation) suspendingUsers.delete(userId);
+        });
+        suspendingUsers.set(userId, operation);
+        return operation;
+    }
 
     /** 获取账号列表 */
     function getAllAccountList() {
@@ -41,10 +74,7 @@ function createDataProvider(deps) {
 
     /** 解析账号引用（account-ref / accountId） */
     function resolveAccountId(ref) {
-        const normalized = normalizeAccountRef(ref);
-        if (!normalized) return '';
-        const id = resolveAccountIdByList(getAllAccountList(), normalized);
-        return id || normalized;
+        return normalizeAccountRef(ref);
     }
 
     /** 根据引用查找账号 */
@@ -283,6 +313,7 @@ function createDataProvider(deps) {
             if (!id) throw new Error('Missing x-account-id');
             const account = findAccount(id);
             if (!account) throw new Error('账号不存在');
+            assertAccountAccess(account);
             if (manualRefreshes.has(id)) return manualRefreshes.get(id);
             if (account.loginType === 'yyb' && account.yybOpenid) {
                 if (typeof refreshYybCodeIfNeeded !== 'function') {
@@ -296,6 +327,7 @@ function createDataProvider(deps) {
                     const result = await refreshYybCodeIfNeeded({ ...account }, { signal: controller.signal });
                     const current = findAccount(id);
                     if (controller.signal.aborted || !current) return { ok: false, source: 'yyb', error: '账号已停止或删除，本次结果已丢弃' };
+                    assertAccountAccess(current);
                     if (loginIdentity(current) !== identity) {
                         // A concurrent startup may already have committed this same shared result.
                         if (result?.ok && current.code === result.code && loginIdentity({ ...current, code: originalCode }) === identity) return { ok: true, source: 'yyb' };
@@ -329,9 +361,9 @@ function createDataProvider(deps) {
             };
         },
 
-        setUITheme: async (theme) => {
-            const result = store.setUITheme(theme);
-            return { ui: result.ui || store.getUI() };
+        setUITheme: async (theme, userId) => {
+            const result = store.setUITheme(theme, userId);
+            return { ui: result.ui || store.getUI(userId) };
         },
 
         broadcastConfig: (accountId) => {
@@ -366,6 +398,46 @@ function createDataProvider(deps) {
             return data;
         },
 
+        removeUserData: async (userId) => {
+            deletingUsers.add(userId);
+            const ids = getAllAccountList().filter(account => account.userId === userId).map(account => String(account.id));
+            await suspendUser(userId);
+            for (const logs of [globalLogs, accountLogs]) {
+                for (let i = logs.length - 1; i >= 0; i--) if (ids.includes(String(logs[i].accountId))) logs.splice(i, 1);
+            }
+        },
+
+        suspendUser,
+        reloadProxyProfile: async (profileId) => {
+            const accounts = getAllAccountList().filter(account => account.proxyMode === 'static' && account.proxyProfileId === profileId);
+            const operations = [];
+            for (const account of accounts) {
+                const id = String(account.id);
+                refreshControllers.get(id)?.abort();
+                operations.push(deps.cancelCodeRefresh(id), deps.stopWorkerAndWait(id));
+            }
+            await Promise.all(operations);
+            for (const previous of accounts) {
+                const account = findAccount(previous.id);
+                if (!account || account.autoStart === false || getAccountAccessRejection(account)) continue;
+                scheduleAutoCodeRefresh(account.id);
+                // Credentials may take a minute to refresh; the save response waits for
+                // old connections to stop, while the new startup reports its own status.
+                void Promise.resolve(startWorker(account, { automatic: true })).catch(error => deps.addAccountLog('start_failed', error.message, account.id, account.name));
+            }
+        },
+        resumeUser: async (userId) => {
+            if (suspendingUsers.has(userId)) await suspendingUsers.get(userId);
+            const accounts = getAllAccountList().filter(account => account.userId === userId);
+            for (const previous of accounts) {
+                const account = findAccount(previous.id);
+                if (!account || account.userId !== userId || account.deleting) continue;
+                assertAccountAccess(account);
+                scheduleAutoCodeRefresh(account.id);
+                if (account.autoStart === true) await startWorker(account, { automatic: true });
+            }
+        },
+
         getAccountRuntime: (ref) => {
             const id = resolveAccountId(ref);
             if (!findAccount(id || ref)) return null;
@@ -379,6 +451,7 @@ function createDataProvider(deps) {
             const id = resolveAccountId(ref);
             const account = findAccount(id || ref);
             if (!account) return false;
+            assertAccountAccess(account);
             refreshControllers.get(id)?.abort();
             deps.cancelCodeRefresh?.(id);
             account.autoStart = true;
@@ -386,9 +459,9 @@ function createDataProvider(deps) {
             scheduleAutoCodeRefresh?.(id);
             const runtime = typeof getWorkerRuntime === 'function' ? getWorkerRuntime(account.id) : null;
             if (workers[account.id] && !workers[account.id]?.status?.connection?.connected && runtime?.state !== 'starting') {
-                Promise.resolve(restartWorker(account, options)).catch(() => {});
+                Promise.resolve(restartWorker(account, options)).catch(error => deps.addAccountLog('start_failed', error.message, id, account.name));
             } else {
-                Promise.resolve(startWorker(account, options)).catch(() => {});
+                Promise.resolve(startWorker(account, options)).catch(error => deps.addAccountLog('start_failed', error.message, id, account.name));
             }
             return true;
         },
@@ -405,13 +478,38 @@ function createDataProvider(deps) {
             return true;
         },
 
+        deleteAccount: (ref) => {
+            const id = resolveAccountId(ref);
+            if (accountDeletions.has(id)) return accountDeletions.get(id);
+            const operation = Promise.resolve().then(async () => {
+                const account = store.beginAccountDeletion(id);
+                refreshControllers.get(id)?.abort();
+                // Issue both cancellations before waiting; stop may itself wait
+                // for the cancelled credential request to settle.
+                const issue = action => { try { return Promise.resolve(action()); } catch (error) { return Promise.reject(error); } };
+                const cancellations = [issue(() => deps.cancelCodeRefresh(id)), issue(() => deps.stopWorkerAndWait(id))];
+                const [results] = await Promise.all([Promise.allSettled(cancellations), Promise.allSettled([manualRefreshes.get(id)])]);
+                const failure = results.find(result => result.status === 'rejected');
+                if (failure) throw failure.reason;
+                await (deps.purgeQqAccount || (account => require('../services/qq-login-service').getQqLoginService().purgeAccount(account)))(account);
+                const data = store.deleteAccount(id);
+                for (const logs of [globalLogs, accountLogs]) {
+                    for (let i = logs.length - 1; i >= 0; i--) if (String(logs[i].accountId) === id) logs.splice(i, 1);
+                }
+                return data;
+            }).finally(() => { if (accountDeletions.get(id) === operation) accountDeletions.delete(id); });
+            accountDeletions.set(id, operation);
+            return operation;
+        },
+
         restartAccount: (ref, options = {}) => {
             const id = resolveAccountId(ref);
             const account = findAccount(id || ref);
             if (!account) return false;
             refreshControllers.get(id)?.abort();
             deps.cancelCodeRefresh?.(id);
-            restartWorker(account, options);
+            assertAccountAccess(account);
+            Promise.resolve(restartWorker(account, options)).catch(error => deps.addAccountLog('restart_failed', error.message, id, account.name));
             return true;
         },
 

@@ -15,12 +15,17 @@ function proxySetting(input = {}) {
   return { proxyMode: mode, proxyProfileId: mode === 'static' ? id : null };
 }
 
-async function resolveProxyURL(input) {
+async function resolveProxyURL(input, context) {
   const setting = proxySetting(input);
+  const userId = context?.userId;
+  if (!require('../models/user-id').isUserId(userId)) throw new Error('缺少账号所属用户');
+  // Runtime account fields are user editable; role comes from the user database.
+  const headers = require('./user-identity').trustedUserHeaders(userId);
   if (setting.proxyMode === 'direct') return '';
   const { apiBase, apiKey } = resolveYybCreds();
   const result = await callYybApi(apiBase, '/internal/proxy-url', apiKey, {
     method: 'POST', body: JSON.stringify({ proxy_profile_id: setting.proxyProfileId }),
+    headers,
     signal: AbortSignal.timeout(10000),
   });
   if (!result.ok || typeof result.data?.url !== 'string') throw new Error('代理配置读取失败，请检查代理服务；连接已停止');

@@ -13,6 +13,7 @@ function response() {
 function setup(accounts, refreshAccountCode, extra = {}) {
   const routes = { get: new Map(), post: new Map() };
   registerAdminAccountRoutes({
+    refreshJobStore: { load: () => [], save() {} },
     app: {
       get(path, handler) { routes.get.set(path, handler); },
       delete() {},
@@ -54,9 +55,9 @@ async function waitFor(predicate, message) {
 
 test('bulk refresh returns a job immediately and exposes per-account progress', async () => {
   const accounts = [
-    { id: '1', name: 'YYB', loginType: 'yyb', yybOpenid: 'openid-a', username: 'admin' },
-    { id: '2', name: 'Legacy', loginType: 'manual', wxid: 'wxid-a', username: 'admin' },
-    { id: '3', name: 'QQ', platform: 'qq', username: 'admin' },
+    { id: '1', name: 'YYB', loginType: 'yyb', yybOpenid: 'openid-a', userId: 1000 },
+    { id: '2', name: 'Legacy', loginType: 'manual', wxid: 'wxid-a', userId: 1000 },
+    { id: '3', name: 'QQ', platform: 'qq', userId: 1000 },
   ];
   const refreshed = [];
   let finishFirst;
@@ -67,7 +68,7 @@ test('bulk refresh returns a job immediately and exposes per-account progress', 
     return { ok: true, source: 'wxid' };
   });
 
-  const res = await startRefresh(routes, { username: 'admin', role: 'admin' });
+  const res = await startRefresh(routes, { id: 1000, role: 'admin' });
   assert.equal(res.statusCode, 202);
   assert.equal(res.body.ok, true);
   assert.equal(res.body.data.state, 'queued');
@@ -76,7 +77,7 @@ test('bulk refresh returns a job immediately and exposes per-account progress', 
   assert.ok(res.body.data.jobId);
 
   await waitFor(() => refreshed.length === 1, 'refresh worker did not start');
-  const running = getRefreshJob(routes, { username: 'admin', role: 'admin' }, res.body.data.jobId);
+  const running = getRefreshJob(routes, { id: 1000, role: 'admin' }, res.body.data.jobId);
   assert.equal(running.statusCode, 200);
   assert.equal(running.body.data.state, 'running');
   assert.equal(running.body.data.completed, 0);
@@ -84,11 +85,11 @@ test('bulk refresh returns a job immediately and exposes per-account progress', 
 
   finishFirst({ ok: true, source: 'yyb' });
   await waitFor(() => {
-    const job = getRefreshJob(routes, { username: 'admin', role: 'admin' }, res.body.data.jobId).body.data;
+    const job = getRefreshJob(routes, { id: 1000, role: 'admin' }, res.body.data.jobId).body.data;
     return job.state === 'completed';
   }, 'refresh worker did not complete');
 
-  const finished = getRefreshJob(routes, { username: 'admin', role: 'admin' }, res.body.data.jobId).body.data;
+  const finished = getRefreshJob(routes, { id: 1000, role: 'admin' }, res.body.data.jobId).body.data;
   assert.deepEqual(refreshed, ['1', '2']);
   assert.equal(finished.completed, 2);
   assert.equal(finished.success, 2);
@@ -110,13 +111,13 @@ test('one refresh failure does not prevent remaining accounts from refreshing', 
       : { ok: true, source: 'yyb' };
   });
 
-  const res = await startRefresh(routes, { username: 'admin', role: 'admin' });
+  const res = await startRefresh(routes, { id: 1000, role: 'admin' });
   await waitFor(() => {
-    const job = getRefreshJob(routes, { username: 'admin', role: 'admin' }, res.body.data.jobId).body.data;
+    const job = getRefreshJob(routes, { id: 1000, role: 'admin' }, res.body.data.jobId).body.data;
     return job.state === 'completed';
   }, 'refresh worker did not complete after a failure');
 
-  const job = getRefreshJob(routes, { username: 'admin', role: 'admin' }, res.body.data.jobId).body.data;
+  const job = getRefreshJob(routes, { id: 1000, role: 'admin' }, res.body.data.jobId).body.data;
   assert.deepEqual(refreshed, ['1', '2']);
   assert.equal(job.success, 1);
   assert.equal(job.failed, 1);
@@ -124,16 +125,16 @@ test('one refresh failure does not prevent remaining accounts from refreshing', 
   assert.equal(job.results[1].ok, true);
 });
 
-test('refresh jobs are isolated by username', async () => {
+test('refresh jobs are isolated by userId', async () => {
   const accounts = [
-    { id: '1', name: 'Account', loginType: 'yyb', yybOpenid: 'openid-a', username: 'admin' },
+    { id: '1', name: 'Account', loginType: 'yyb', yybOpenid: 'openid-a', userId: 1000 },
   ];
   let finishRefresh;
   const refresh = new Promise(resolve => { finishRefresh = resolve; });
   const routes = setup(accounts, async () => refresh);
 
-  const res = await startRefresh(routes, { username: 'admin', role: 'admin' });
-  const denied = getRefreshJob(routes, { username: 'other-user', role: 'user' }, res.body.data.jobId);
+  const res = await startRefresh(routes, { id: 1000, role: 'admin' });
+  const denied = getRefreshJob(routes, { id: 'other-user', role: 'user' }, res.body.data.jobId);
   assert.equal(denied.statusCode, 404);
   assert.equal(denied.body.ok, false);
 
@@ -151,7 +152,7 @@ test('repeating a request id while a job is active does not start another refres
     refreshCalls++;
     return refresh;
   });
-  const user = { username: 'admin', role: 'admin' };
+  const user = { id: 1000, role: 'admin' };
 
   const first = await startRefresh(routes, user, 'same-request');
   await waitFor(() => refreshCalls === 1, 'refresh worker did not start');
@@ -174,7 +175,7 @@ test('a retry returns its original completed job while another job is active', a
     refreshCalls++;
     return refreshCalls === 1 ? { ok: true, source: 'yyb' } : secondRefresh;
   });
-  const user = { username: 'admin', role: 'admin' };
+  const user = { id: 1000, role: 'admin' };
 
   const first = await startRefresh(routes, user, 'first-request');
   await waitFor(() => {
@@ -199,28 +200,28 @@ test('refresh endpoint rejects unauthenticated requests and reports no eligible 
   const unauthorized = await startRefresh(routes, null);
   assert.equal(unauthorized.statusCode, 401);
 
-  const empty = await startRefresh(routes, { username: 'admin', role: 'admin' });
+  const empty = await startRefresh(routes, { id: 1000, role: 'admin' });
   assert.equal(empty.statusCode, 200);
   assert.equal(empty.body.ok, false);
   assert.equal(empty.body.error, '没有可刷新的微信账号');
 });
 
 test('retry refresh selects only failed accounts and checks current ownership', async () => {
-  const accounts = ['1', '2', '3'].map(id => ({ id, wxid: `wx-${id}`, username: 'alice' }));
+  const accounts = ['1', '2', '3'].map(id => ({ id, wxid: `wx-${id}`, userId: 1001 }));
   const refreshed = [];
   const routes = setup(accounts, async (id) => {
     refreshed.push(id);
     return { ok: id === '1', error: '凭证失效' };
   });
-  const user = { username: 'alice', role: 'user' };
+  const user = { id: 1001, role: 'user' };
   const first = await startRefresh(routes, user);
   await waitFor(() => getRefreshJob(routes, user, first.body.data.jobId).body.data.state === 'completed', 'job did not finish');
-  accounts[2].username = 'bob';
+  accounts[2].userId = 1002;
   const retry = await startRefresh(routes, user, 'retry', first.body.data.jobId);
   await waitFor(() => getRefreshJob(routes, user, retry.body.data.jobId).body.data.state === 'completed', 'retry did not finish');
   assert.deepEqual(refreshed, ['1', '2', '3', '2']);
   assert.equal(retry.body.data.total, 1);
-  const denied = await startRefresh(routes, { username: 'bob', role: 'user' }, 'steal', first.body.data.jobId);
+  const denied = await startRefresh(routes, { id: 1002, role: 'user' }, 'steal', first.body.data.jobId);
   assert.equal(denied.statusCode, 404);
 });
 
@@ -234,7 +235,7 @@ test('restarting preserves deduplication and excludes the uncertain account from
   const filePath = path.join(directory, 'jobs.json');
   const now = Date.now();
   createRefreshJobStore({ filePath }).save([{
-    id: 'restart-job', username: 'alice', requestKey: 'alice:same-request', state: 'running',
+    id: 'restart-job', userId: 1001, requestKey: '1001:same-request', state: 'running',
     total: 4, completed: 2, success: 1, failed: 1, skipped: 0,
     targets: ['1', '2', '3', '4'].map(id => ({ id, name: id, code: 'private-code' })),
     currentAccount: { id: '3', name: '未确认' },
@@ -243,13 +244,13 @@ test('restarting preserves deduplication and excludes the uncertain account from
     code: 'private-code', wxid: 'private-wxid', token: 'private-token',
   }]);
   assert.doesNotMatch(fs.readFileSync(filePath, 'utf8'), /private-/);
-  const accounts = ['1', '2', '3', '4'].map(id => ({ id, wxid: `wx-${id}`, username: 'alice' }));
+  const accounts = ['1', '2', '3', '4'].map(id => ({ id, wxid: `wx-${id}`, userId: 1001 }));
   const refreshed = [];
   const routes = setup(accounts, async (id) => {
     refreshed.push(id);
     return { ok: true };
   }, { refreshJobStore: createRefreshJobStore({ filePath }) });
-  const user = { username: 'alice', role: 'user' };
+  const user = { id: 1001, role: 'user' };
   const recovered = getRefreshJob(routes, user, 'restart-job').body.data;
   assert.equal(recovered.state, 'interrupted');
   assert.equal(recovered.success, 1);
@@ -275,7 +276,7 @@ test('persistence failure prevents credential operations', async () => {
   const routes = setup([{ id: '1', wxid: 'wx' }], async () => { refreshCalls++; }, {
     refreshJobStore: { load: () => [], save() { if (++writes > 1) throw new Error('磁盘不可写'); } },
   });
-  const res = await startRefresh(routes, { username: 'admin', role: 'admin' });
+  const res = await startRefresh(routes, { id: 1000, role: 'admin' });
   assert.equal(res.statusCode, 500);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(refreshCalls, 0);
@@ -284,7 +285,7 @@ test('persistence failure prevents credential operations', async () => {
 test('a full history preserves request-id deduplication before making space for new jobs', async () => {
   const now = Date.now();
   const jobs = Array.from({ length: 100 }, (_, index) => ({
-    id: `job-${index}`, username: 'admin', requestKey: `admin:request-${index}`,
+    id: `job-${index}`, userId: 1000, requestKey: `1000:request-${index}`,
     state: 'completed', total: 1, completed: 1, success: 1, failed: 0, skipped: 0,
     targets: [{ id: '1', name: 'Account' }], currentAccount: null,
     results: [{ accountId: '1', name: 'Account', ok: true }], createdAt: now, updatedAt: now,
@@ -293,7 +294,7 @@ test('a full history preserves request-id deduplication before making space for 
   const routes = setup([{ id: '1', wxid: 'wx' }], async () => { refreshCalls++; return { ok: true }; }, {
     refreshJobStore: { load: () => jobs, save() {} },
   });
-  const user = { username: 'admin', role: 'admin' };
+  const user = { id: 1000, role: 'admin' };
   const duplicate = await startRefresh(routes, user, 'request-0');
   assert.equal(duplicate.body.data.jobId, 'job-0');
   await new Promise(resolve => setImmediate(resolve));
@@ -313,11 +314,11 @@ test('refresh errors redact credentials before persistence and when returned to 
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'farm-refresh-redaction-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const filePath = path.join(directory, 'jobs.json');
-  const routes = setup([{ id: '1', wxid: 'wx', username: 'alice' }], async () => ({
+  const routes = setup([{ id: '1', wxid: 'wx', userId: 1001 }], async () => ({
     ok: false,
     error: 'request failed https://example.test/?api_key=secret-key&token=secret-token&wxid=private-wxid&code=private-code Bearer secret-bearer',
   }), { refreshJobStore: createRefreshJobStore({ filePath }) });
-  const user = { username: 'alice', role: 'user' };
+  const user = { id: 1001, role: 'user' };
   const started = await startRefresh(routes, user);
   await waitFor(() => getRefreshJob(routes, user, started.body.data.jobId).body.data.state === 'completed', 'job did not finish');
   const finished = getRefreshJob(routes, user, started.body.data.jobId).body.data;
@@ -331,8 +332,8 @@ test('refresh errors redact credentials before persistence and when returned to 
 
 test('native QQ accounts with a stale wxid never enter the WX batch refresh queue', async () => {
   let calls = 0;
-  const routes = setup([{ id: 'qq-1', username: 'alice', platform: 'qq', wxid: 'old-wxid', loginType: 'manual' }], async () => { calls++; return { ok: true }; });
-  const started = await startRefresh(routes, { username: 'alice', role: 'user' });
+  const routes = setup([{ id: 'qq-1', userId: 1001, platform: 'qq', wxid: 'old-wxid', loginType: 'manual' }], async () => { calls++; return { ok: true }; });
+  const started = await startRefresh(routes, { id: 1001, role: 'user' });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 0);
   assert.equal(started.body.data.total, 0);

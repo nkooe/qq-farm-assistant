@@ -58,6 +58,7 @@ function registerAdminSystemRoutes({
   updateRuntimeConfig,
   broadcastConfig,
   cleanupInvalidAdminSessions,
+  enforceUserAccess,
 }) {
   /** 保存/重置系统配置后同步到所有账号 Worker（config_sync 广播，秒级生效） */
   function syncSystemConfigToWorkers() {
@@ -89,7 +90,7 @@ function registerAdminSystemRoutes({
     try {
       const announcement = { ...store.getAnnouncement() };
       announcement.shouldShow = store.shouldShowAnnouncement(
-        req.currentUser?.username,
+        req.currentUser?.id,
       );
       res.json({ ok: true, data: announcement });
     } catch (error) {
@@ -99,8 +100,8 @@ function registerAdminSystemRoutes({
 
   app.post("/api/announcement/read", requireAdminToken, (req, res) => {
     try {
-      if (req.currentUser?.username) {
-        store.markAnnouncementRead(req.currentUser.username, req.body?.updatedAt);
+      if (req.currentUser?.id) {
+        store.markAnnouncementRead(req.currentUser.id, req.body?.updatedAt);
       }
       res.json({ ok: true });
     } catch (error) {
@@ -123,7 +124,7 @@ function registerAdminSystemRoutes({
         }
         const data = store.setAnnouncement(content, showOnce, { enabled, title });
         logger.warn("更新系统公告", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           hasContent: !!String(content || "").trim(),
           showOnce: showOnce !== false,
           enabled,
@@ -144,7 +145,7 @@ function registerAdminSystemRoutes({
     res.json({ ok: true, data: getAccessPolicy() });
   });
 
-  app.post('/api/admin/access-policy', requireAdminToken, requireAdminRole, (req, res) => {
+  app.post('/api/admin/access-policy', requireAdminToken, requireAdminRole, async (req, res) => {
     if (!requireDangerConfirmation(req, res, 'UPDATE_ACCESS_POLICY')) return;
     if (typeof req.body?.cardVerificationEnabled !== 'boolean') {
       return res.status(400).json({ ok: false, error: '卡密验证开关必须为布尔值' });
@@ -152,7 +153,8 @@ function registerAdminSystemRoutes({
     try {
       const data = setAccessPolicy(req.body);
       if (typeof cleanupInvalidAdminSessions === 'function') cleanupInvalidAdminSessions();
-      logger.warn('更新卡密验证配置', { admin: req.currentUser.username, ...data });
+      if (enforceUserAccess) await enforceUserAccess();
+      logger.warn('更新卡密验证配置', { admin: req.currentUser.id, ...data });
       res.json({ ok: true, data });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
@@ -219,7 +221,7 @@ function registerAdminSystemRoutes({
           const data = store.setLoginLinks({ ...previous, logoUrl });
           if (previous.logoUrl !== logoUrl) deleteManagedLoginLogo(previous.logoUrl);
           logger.warn("上传登录页图标", {
-            admin: req.currentUser?.username || "",
+            admin: req.currentUser?.id || "",
             logoUrl,
             size: req.file.size,
           });
@@ -273,7 +275,7 @@ function registerAdminSystemRoutes({
         const data = store.setLoginLinks(req.body || {});
         if (previous.logoUrl !== data.logoUrl) deleteManagedLoginLogo(previous.logoUrl);
         logger.warn("更新登录页设置", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           hasCustomLogo: !!data.logoUrl,
           title: data.title,
           purchaseUrl: data.purchaseUrl,
@@ -298,7 +300,7 @@ function registerAdminSystemRoutes({
         const data = store.setLoginLinks(store.DEFAULT_LOGIN_LINKS);
         if (previous.logoUrl !== data.logoUrl) deleteManagedLoginLogo(previous.logoUrl);
         logger.warn("恢复登录页默认设置", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           confirmation: "RESET_LOGIN_LINKS",
         });
         res.json({ ok: true, data });
@@ -326,7 +328,7 @@ function registerAdminSystemRoutes({
         updateRuntimeConfig(saved);
         syncSystemConfigToWorkers();
         logger.warn("更新系统配置", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           serverUrl: saved?.serverUrl || "",
           clientVersion: saved?.clientVersion || "",
           wxClientVersion: saved?.wxClientVersion || "",
@@ -359,7 +361,7 @@ function registerAdminSystemRoutes({
         updateRuntimeConfig(saved);
         syncSystemConfigToWorkers();
         logger.warn("重置系统配置", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           confirmation: "RESET_SYSTEM_CONFIG",
         });
         res.json({
@@ -375,41 +377,6 @@ function registerAdminSystemRoutes({
     },
   );
 
-  app.get(
-    "/api/admin/wx-config",
-    requireAdminToken,
-    requireAdminRole,
-    (req, res) => {
-      try {
-        res.json({ ok: true, data: store.getGlobalWxConfig() });
-      } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
-      }
-    },
-  );
-
-  app.post(
-    "/api/admin/wx-config",
-    requireAdminToken,
-    requireAdminRole,
-    (req, res) => {
-      try {
-        if (!requireDangerConfirmation(req, res, "UPDATE_WX_CONFIG")) return;
-        const data = store.setGlobalWxConfig(req.body || {});
-        logger.warn("更新微信配置", {
-          admin: req.currentUser?.username || "",
-          enabled: data?.enabled === true,
-          autoAddAccount: data?.autoAddAccount === true,
-          userIsolation: data?.userIsolation === true,
-          apiBase: data?.apiBase || "",
-          confirmation: "UPDATE_WX_CONFIG",
-        });
-        res.json({ ok: true, data });
-      } catch (error) {
-        res.status(500).json({ ok: false, error: error.message });
-      }
-    },
-  );
 }
 
 module.exports = { registerAdminSystemRoutes };

@@ -80,7 +80,7 @@ export function useAdminCards(options: UseAdminCardsOptions) {
   const pendingCardClaimEnabled = ref<boolean | null>(null)
 
   const unusedTimeCardsCount = computed(() => {
-    return cards.value.filter(c => c.type === 'time' && !c.usedBy && c.enabled).length
+    return cards.value.filter(c => c.type === 'time' && !c.usedBy && !c.claimedAt && c.enabled).length
   })
   const usedCardsCount = computed(() => cards.value.filter(c => !!c.usedBy).length)
   const enabledCardsCount = computed(() => cards.value.filter(c => c.enabled).length)
@@ -93,7 +93,7 @@ export function useAdminCards(options: UseAdminCardsOptions) {
       result = result.filter(card =>
         card.code.toLowerCase().includes(query)
         || card.description.toLowerCase().includes(query)
-        || (card.usedBy && card.usedBy.toLowerCase().includes(query)),
+        || (card.usedBy && String(card.usedBy).toLowerCase().includes(query)),
       )
     }
 
@@ -156,7 +156,7 @@ export function useAdminCards(options: UseAdminCardsOptions) {
       const result = await userStore.getAllCards()
       if (result.ok) {
         cards.value = result.data
-        availableTimeCards.value = result.data.filter((card: Card) => card.type === 'time' && !card.usedBy && card.enabled).length
+        availableTimeCards.value = result.data.filter((card: Card) => card.type === 'time' && !card.usedBy && !card.claimedAt && card.enabled).length
       }
       else {
         toast.error(result.error || '获取卡密列表失败')

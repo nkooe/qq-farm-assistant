@@ -32,9 +32,10 @@ interface YybAccountResult {
 interface YybProxyProfile {
   id: number
   name: string
-  protocol: 'http-connect' | 'socks5'
-  host: string
-  port: number
+  protocol?: 'http-connect' | 'socks5'
+  host?: string
+  port?: number
+  redacted?: boolean
 }
 
 const activeTab = ref<AccountTab>('manual')
@@ -75,10 +76,10 @@ const yybStatusText = computed(() => {
     pending: '请使用微信扫码',
     scanned: '已扫码，请在手机确认',
     unknown: yybPollErrCode.value === null
-      ? '暂时无法识别扫码状态，仍在查询；也可重新生成'
-      : `暂时无法识别扫码状态（${yybPollErrCode.value}），仍在查询；也可重新生成`,
+      ? '状态查询中…'
+      : `状态查询中（${yybPollErrCode.value}）`,
     authorized: '授权成功，正在获取账号',
-    importing: '正在写入 Code 并启动账号',
+    importing: '正在保存账号',
     starting: '账号已保存，正在连接游戏',
     success: '游戏已上线',
     expired: '二维码已失效',
@@ -148,7 +149,7 @@ async function loadYybProxyOptions() {
   catch (error: any) {
     if (version !== yybProxyLoadVersion)
       return
-    yybProxyError.value = getRequestError(error, '代理设置读取失败，请重试；扫码已暂停')
+    yybProxyError.value = getRequestError(error, '代理加载失败，请重试')
   }
   finally {
     if (version === yybProxyLoadVersion)
@@ -243,7 +244,7 @@ async function startSavedYybAccount(version = yybPollVersion) {
           throw error
       }
       if (Date.now() >= deadline)
-        throw new Error('等待游戏上线超时，账号已保存；可重试启动或在账号管理查看状态')
+        throw new Error('连接超时，账号已保存，可重试启动')
       await waitYybRetry(controller.signal, 2000)
     }
   }
@@ -271,7 +272,7 @@ async function importYybAccount(sessionId: string, version: number) {
     throw new Error('应用宝未返回 openid')
   const expectedOpenid = String(props.editData?.yybOpenid || '').trim()
   if (props.yybUpdateOnly && expectedOpenid && openid !== expectedOpenid)
-    throw new Error('扫码微信与当前应用宝账号不一致，请使用原微信重新扫码')
+    throw new Error('账号不符，请用原微信扫码')
 
   yybStage.value = 'importing'
   const codeResponse = await api.post('/api/yyb/getcode', { openid }, { timeout: 60000 })
@@ -618,7 +619,7 @@ onBeforeUnmount(() => {
             <div class="flex items-start gap-2 border border-green-200 rounded-lg bg-green-50 px-3 py-3 text-sm text-green-800 leading-6 dark:border-green-800 dark:bg-green-900/20 dark:text-green-200">
               <span class="i-carbon-renew mt-1 flex-none" />
               <span aria-live="polite">
-                {{ yybSuccess.status === 'online' ? '游戏已上线；后续启动和断线重连会自动刷新 Code。' : yybSuccess.status === 'starting' ? '账号和 Code 已保存，正在连接游戏，请稍候…' : '账号和 Code 已保存，可直接重试启动，无需重新扫码。' }}
+                {{ yybSuccess.status === 'online' ? '游戏已上线' : yybSuccess.status === 'starting' ? '账号已保存，正在连接…' : '账号已保存，可重试启动' }}
               </span>
             </div>
 
@@ -641,7 +642,7 @@ onBeforeUnmount(() => {
               v-if="yybUpdateOnly"
               class="border border-blue-200 rounded-lg bg-blue-50 px-3 py-2 text-xs text-blue-800 leading-5 dark:border-blue-800 dark:bg-blue-900/20 dark:text-blue-200"
             >
-              此操作只更新当前应用宝账号。请使用原微信扫码；若扫码身份不匹配，不会新增账号。
+              请用原微信扫码。
             </div>
             <BaseInput
               v-model="yybAccountName"
@@ -673,21 +674,20 @@ onBeforeUnmount(() => {
                 >
                   <option :value="null">{{ yybProxyProfiles.length ? '请选择代理' : '请先到代理设置添加' }}</option>
                   <option v-for="profile in yybProxyProfiles" :key="profile.id" :value="profile.id">
-                    {{ profile.name }}（{{ profile.host }}:{{ profile.port }}）
+                    {{ profile.name }}<template v-if="!profile.redacted && profile.host && profile.port">（{{ profile.host }}:{{ profile.port }}）</template>
                   </option>
                 </select>
               </label>
             </div>
 
             <div v-if="yybProxyError" role="alert" class="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-900/20 dark:text-red-300">
-              <p>{{ yybProxyError }}。为避免出口改变，暂不生成二维码。</p>
+              <p>{{ yybProxyError }}</p>
               <BaseButton variant="outline" class="mt-2" :loading="yybProxyLoading" @click="retryYybProxyOptions">
-                重新读取代理设置
+                重试加载
               </BaseButton>
             </div>
             <div class="rounded-lg px-3 py-2 text-xs leading-5" style="background-color: color-mix(in srgb, var(--theme-primary) 8%, transparent); color: var(--theme-text);">
-              扫码、凭据刷新、Code 获取和协议连接均使用此账号出口；静态代理故障时不会自动回退直连。
-              切换代理会自动更换二维码，请扫描新码。
+              切换代理后请扫新码。
             </div>
 
             <div

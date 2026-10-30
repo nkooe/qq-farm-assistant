@@ -8,10 +8,10 @@
  * - 每日免费礼包领取
  * - 根据化肥容器剩余时间阈值自动补货
  */
-const { Buffer } = require('node:buffer');
 const { sendMsgAsync, getUserState } = require('../utils/network');
 const { types } = require('../utils/proto');
 const { toNum, log, sleep } = require('../utils/utils');
+const { getAmbientRequestSignal } = require('../utils/request-context');
 
 // ---- 商品 ID 常量 ----
 
@@ -53,145 +53,80 @@ function getDateKey() {
 
 // ---- RPC 调用 ----
 
+let mallMutationTail = Promise.resolve();
+function serializeMallPurchase(operation) {
+  const result = mallMutationTail.then(operation);
+  mallMutationTail = result.catch(() => {});
+  return result;
+}
+
+function validatePositiveInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name}必须为正整数`);
+}
+
+function checkPurchaseCancellation() {
+  getAmbientRequestSignal()?.throwIfAborted();
+}
+
 async function getMallListBySlotType(slotType = 1) {
+  if (!Number.isInteger(slotType) || slotType < 0 || slotType > 2147483647) throw new Error('商城槽位无效');
   const request = types.GetMallListBySlotTypeRequest.encode(
-    types.GetMallListBySlotTypeRequest.create({ slot_type: Number(slotType) || 1 })
+    types.GetMallListBySlotTypeRequest.create({ slot_type: slotType })
   ).finish();
   const { body } = await sendMsgAsync('gamepb.mallpb.MallService', 'GetMallListBySlotType', request);
   return types.GetMallListBySlotTypeResponse.decode(body);
 }
 
-async function purchaseMallGoods(goodsId, count = 1) {
+function purchaseMallGoods(goodsId, count = 1) {
+  return serializeMallPurchase(() => performPurchaseMallGoods(goodsId, count));
+}
+
+async function performPurchaseMallGoods(goodsId, count) {
+  validatePositiveInteger(goodsId, '商品 ID');
+  validatePositiveInteger(count, '购买数量');
+  checkPurchaseCancellation();
   const request = types.PurchaseRequest.encode(
-    types.PurchaseRequest.create({
-      goods_id: Number(goodsId) || 0,
-      count: Number(count) || 1,
-    })
+    types.PurchaseRequest.create({ goods_id: goodsId, count })
   ).finish();
   const { body } = await sendMsgAsync('gamepb.mallpb.MallService', 'Purchase', request);
-  return types.PurchaseResponse.decode(body);
+  const reply = types.PurchaseResponse.decode(body);
+  if (reply.success !== true || toNum(reply.goods_id) !== goodsId) throw new Error('商城未确认购买成功');
+  return reply;
 }
 
-/**
- * 获取指定槽位的商品列表
- */
 async function getMallGoodsList(slotType = 1) {
   const reply = await getMallListBySlotType(slotType);
-  const rawList = Array.isArray(reply && reply.goods_list) ? reply.goods_list : [];
-  const goodsList = [];
-  for (const raw of rawList) {
-    try {
-      goodsList.push(types.MallGoods.decode(raw));
-    } catch {
-      // 跳过解码失败的
-    }
-  }
-  return goodsList;
+  return Array.isArray(reply.goods_list) ? reply.goods_list : [];
 }
 
-// ---- 字节解析工具 ----
-
-function bytesToBuffer(value) {
-  if (value == null) return null;
-  if (Buffer.isBuffer(value)) return value;
-  if (value instanceof Uint8Array || (value.constructor && value.constructor.name === 'Uint8Array')) {
-    return Buffer.from(value);
-  }
-  if (Array.isArray(value)) return Buffer.from(value);
-  if (typeof value === 'object') {
-    const numKeys = Object.keys(value).filter((k) => /^\d+$/.test(k));
-    numKeys.sort((a, b) => Number(a) - Number(b));
-    if (numKeys.length === 0) return null;
-    return Buffer.from(numKeys.map((k) => value[k]));
-  }
-  return null;
+function parseMallPriceValue(price) {
+  const count = toNum(price?.count);
+  if (!Number.isSafeInteger(count) || count < 0) throw new Error('商城价格无效');
+  return count;
 }
 
-/**
- * 解析商城价格字段（protobuf varint + zigzag 编码）
- */
-function parseMallPriceValue(raw) {
-  if (raw == null) return 0;
-  if (typeof raw === 'number') return Math.max(0, Math.floor(raw));
-
-  const buf = bytesToBuffer(raw);
-  if (!buf || !buf.length) return 0;
-
-  let pos = 0; let result = 0;
-  while (pos < buf.length) {
-    const byte = buf[pos++];
-    const fieldNum = byte >> 3;
-    const wireType = byte & 0x7;
-    if (wireType !== 0) break;
-    let value = 0; let shift = 0;
-    while (pos < buf.length) {
-      const b = buf[pos++];
-      value |= (b & 0x7F) << shift;
-      if ((b & 0x80) === 0) break;
-      shift += 7;
-    }
-    if (fieldNum === 1) result = value;
+function getMallUnitPrice(goods) {
+  const price = parseMallPriceValue(goods?.price);
+  if (goods?.is_free === true) return 0;
+  const discounted = toNum(goods?.discount_price);
+  if (goods?.is_discounted === true && discounted > 0) {
+    validatePositiveInteger(discounted, '折扣价格');
+    return discounted;
   }
-  return Math.max(0, Math.floor(result || 0));
+  if (price <= 0) throw new Error('付费商品价格缺失');
+  return price;
 }
 
-/**
- * 解析限购信息
- */
-function parseMallLimitInfo(raw) {
-  const empty = { limitCount: 0, boughtNum: 0 };
-  if (raw == null) return empty;
-
-  const buf = bytesToBuffer(raw);
-  if (!buf || !buf.length) return empty;
-
-  let pos = 0; let limitCount = 0; let boughtNum = 0;
-  while (pos < buf.length) {
-    const byte = buf[pos++];
-    const fieldNum = byte >> 3;
-    const wireType = byte & 0x7;
-    if (wireType !== 0) break;
-    let value = 0; let shift = 0;
-    while (pos < buf.length) {
-      const b = buf[pos++];
-      value |= (b & 0x7F) << shift;
-      if ((b & 0x80) === 0) break;
-      shift += 7;
-    }
-    if (fieldNum === 1) limitCount = value;
-    else if (fieldNum === 2) boughtNum = value;
-  }
-  return {
-    limitCount: Math.max(0, limitCount),
-    boughtNum: Math.max(0, boughtNum),
-  };
+function parseMallLimitInfo(limit) {
+  const limitCount = toNum(limit?.limit_count);
+  const boughtNum = toNum(limit?.bought_count);
+  if (!Number.isSafeInteger(limitCount) || limitCount < 0 || !Number.isSafeInteger(boughtNum) || boughtNum < 0)
+    throw new Error('商城限购信息无效');
+  return { limitCount, boughtNum };
 }
 
-/**
- * 解析商城物品 ID 列表
- */
-function parseMallItemIds(raw) {
-  if (raw == null) return [];
-  const buf = bytesToBuffer(raw);
-  if (!buf || !buf.length) return [];
-
-  const ids = [];
-  let pos = 0;
-  while (pos < buf.length) {
-    const byte = buf[pos++];
-    const fieldNum = byte >> 3;
-    const wireType = byte & 0x7;
-    if (wireType !== 0) break;
-    let value = 0; let shift = 0;
-    while (pos < buf.length) {
-      const b = buf[pos++];
-      value |= (b & 0x7F) << shift;
-      if ((b & 0x80) === 0) break;
-      shift += 7;
-    }
-    if (fieldNum === 1) ids.push(value);
-  }
-  return ids;
+function parseMallItemIds(items) {
+  return Array.isArray(items) ? items.map(item => toNum(item.id)).filter(id => id > 0) : [];
 }
 
 // ---- 商品查找 ----
@@ -214,194 +149,74 @@ function findFertilizerMallGoods(goodsList, type = 'organic') {
 // ---- 自动购买 ----
 
 /**
- * 通过商城自动购买有机化肥
- */
-async function autoBuyOrganicFertilizerViaMall() {
-  const goodsList = await getMallGoodsList(1);
-  const goods = findOrganicFertilizerMallGoods(goodsList);
-  if (!goods) return 0;
-
-  const goodsId = toNum(goods.goods_id);
-  if (goodsId <= 0) return 0;
-
-  const price = parseMallPriceValue(goods.price);
-  let ticket = Math.max(0, toNum((getUserState() || {}).ticket));
-  let totalBought = 0;
-  let perRound = BUY_PER_ROUND;
-
-  // 根据余额调整每轮购买量
-  if (price > 0 && ticket > 0) {
-    perRound = Math.max(1, Math.min(BUY_PER_ROUND, Math.floor(ticket / price) || 1));
-  }
-
-  for (let round = 0; round < MAX_ROUNDS; round++) {
-    if (price > 0 && ticket > 0 && ticket < price) {
-      buyPausedNoGoldDateKey = getDateKey();
-      break;
-    }
-
-    try {
-      await purchaseMallGoods(goodsId, perRound);
-      totalBought += perRound;
-
-      if (price > 0 && ticket > 0) {
-        ticket = Math.max(0, ticket - price * perRound);
-        if (ticket < price) break;
-      }
-      await sleep(300);
-    } catch (err) {
-      const msg = String(err && err.message || '');
-      log('商城', `购买化肥失败: ${msg}`, {
-        module: 'warehouse', event: '购买化肥', result: 'error', error: msg,
-      });
-
-      if (msg.includes('余额不足') || msg.includes('点券不足') || msg.includes('code=1000019')) {
-        if (perRound > 1) {
-          perRound = 1;
-          continue;
-        }
-        buyPausedNoGoldDateKey = getDateKey();
-      }
-      break;
-    }
-  }
-
-  if (totalBought > 0) {
-    log('商城', `购买化肥成功，共购买 ${totalBought} 个`, {
-      module: 'warehouse', event: '购买化肥', result: 'ok', count: totalBought, type: 'organic',
-    });
-  }
-  return totalBought;
-}
-
-/**
  * 通过商城自动购买指定类型化肥
  */
-async function autoBuyFertilizerViaMall(type = 'organic', targetCount = 0) {
+async function autoBuyFertilizerViaMall(type, targetCount) {
   const typeLabel = type === 'normal' ? '无机化肥' : '有机化肥';
-  log('商城', `开始购买化肥, 类型: ${typeLabel}, 数量: ${targetCount || '不限'}`, {
-    module: 'warehouse', event: '购买化肥', type, targetCount,
-  });
-
+  checkPurchaseCancellation();
   const goodsList = await getMallGoodsList(1);
+  checkPurchaseCancellation();
   const goods = findFertilizerMallGoods(goodsList, type);
-  if (!goods) {
-    log('商城', '未找到化肥商品', {
-      module: 'warehouse', event: '购买化肥', result: 'error', type, error: '商品不存在',
-    });
-    return 0;
-  }
-
+  if (!goods) throw new Error(`未找到${typeLabel}商品`);
+  if (goods.is_available !== true) return 0;
+  if (goods.ad_only === true || goods.share?.share_only === true) throw new Error('化肥商品需要专用领取流程');
   const goodsId = toNum(goods.goods_id);
-  if (goodsId <= 0) return 0;
-
-  const price = parseMallPriceValue(goods.price);
-  let ticket = Math.max(0, toNum((getUserState() || {}).ticket));
+  const price = getMallUnitPrice(goods);
+  if (price > 0 && toNum(goods.price?.id) !== 1002) throw new Error('化肥商品的支付货币不是点券');
+  const { limitCount, boughtNum } = parseMallLimitInfo(goods.purchase_limit);
+  const stockLimit = limitCount > 0 ? Math.max(0, limitCount - boughtNum) : Infinity;
+  const limit = Math.min(targetCount > 0 ? targetCount : MAX_ROUNDS * BUY_PER_ROUND, stockLimit);
+  let budget = Math.max(0, toNum(getUserState()?.coupon));
   let totalBought = 0;
-  let perRound = BUY_PER_ROUND;
-
-  if (price > 0 && ticket > 0) {
-    perRound = Math.max(1, Math.min(BUY_PER_ROUND, Math.floor(ticket / price) || 1));
-  }
-
-  log('商城', `准备购买化肥: goodsId=${goodsId}, 单价=${price}`, {
-    module: 'warehouse', event: '购买化肥', goodsId, singlePrice: price, ticket, perRound,
-  });
-
-  const limit = targetCount > 0 ? targetCount : Infinity;
-
-  for (let round = 0; round < MAX_ROUNDS; round++) {
-    if (targetCount > 0 && totalBought >= limit) break;
-
-    if (price > 0 && ticket > 0 && ticket < price) {
+  for (let round = 0; round < MAX_ROUNDS && totalBought < limit; round++) {
+    checkPurchaseCancellation();
+    // 本轮预算只减已确认支出；服务端推送可进一步缩小预算，但不估算写回余额。
+    budget = Math.min(budget, Math.max(0, toNum(getUserState()?.coupon)));
+    const affordable = price > 0 ? Math.floor(budget / price) : BUY_PER_ROUND;
+    const count = Math.min(BUY_PER_ROUND, limit - totalBought, affordable);
+    if (count <= 0) {
       buyPausedNoGoldDateKey = getDateKey();
-      break;
-    }
-
-    const buyCount = targetCount > 0 ? Math.min(perRound, limit - totalBought) : perRound;
-
-    try {
-      await purchaseMallGoods(goodsId, buyCount);
-      totalBought += buyCount;
-
-      if (price > 0 && ticket > 0) {
-        ticket = Math.max(0, ticket - price * buyCount);
-        if (ticket < price) break;
-      }
-      await sleep(300);
-    } catch (err) {
-      const msg = String(err && err.message || '');
-      log('商城', `购买化肥失败: ${msg}`, {
-        module: 'warehouse', event: '购买化肥', result: 'error', error: msg, type,
+      log('商城', `${typeLabel}点券不足，单价 ${price}，当前点券 ${budget}`, {
+        module: 'warehouse', event: '购买化肥', result: 'insufficient_coupon', type, price, coupon: budget,
       });
-
-      if (msg.includes('余额不足') || msg.includes('点券不足') || msg.includes('code=1000019')) {
-        if (perRound > 1) {
-          perRound = 1;
-          continue;
-        }
-        buyPausedNoGoldDateKey = getDateKey();
-      }
       break;
     }
+    try {
+      await performPurchaseMallGoods(goodsId, count);
+    } catch (error) {
+      log('商城', `购买${typeLabel}失败: ${error.message}`, {
+        module: 'warehouse', event: '购买化肥', result: 'error', type, bought: totalBought, error: error.message,
+      });
+      throw error;
+    }
+    totalBought += count;
+    budget -= price * count;
+    if (totalBought < limit && (price === 0 || budget >= price)) await sleep(300);
   }
-
   if (totalBought > 0) {
-    log('商城', `购买化肥成功，共购买 ${totalBought} 个`, {
+    buyDoneDateKey = getDateKey();
+    buyLastSuccessAt = Date.now();
+    log('商城', `购买${typeLabel}成功，共购买 ${totalBought} 个`, {
       module: 'warehouse', event: '购买化肥', result: 'ok', count: totalBought, type,
     });
   }
-
   return totalBought;
 }
 
-/**
- * 自动购买有机化肥（带冷却检查）
- */
-async function autoBuyOrganicFertilizer(force = false) {
-  const now = Date.now();
-  if (!force && now - lastBuyAt < BUY_COOLDOWN_MS) return 0;
-
-  lastBuyAt = now;
-
-  try {
-    const bought = await autoBuyOrganicFertilizerViaMall();
-    if (bought > 0) {
-      buyDoneDateKey = getDateKey();
-      buyLastSuccessAt = Date.now();
-      log('商城', `自动购买有机化肥 x${bought}`, {
-        module: 'warehouse', event: '购买化肥', result: 'ok', count: bought,
-      });
-    }
-    return bought;
-  } catch {
-    return 0;
-  }
+function autoBuyOrganicFertilizer(force = false) {
+  return autoBuyFertilizer(force, 'organic', 0);
 }
 
-/**
- * 自动购买化肥（带冷却检查，通用版）
- */
-async function autoBuyFertilizer(force = false, type = 'organic', targetCount = 0) {
-  const now = Date.now();
-  if (!force && now - lastBuyAt < BUY_COOLDOWN_MS) return 0;
-
-  lastBuyAt = now;
-
-  try {
-    const bought = await autoBuyFertilizerViaMall(type, targetCount);
-    if (bought > 0) {
-      buyDoneDateKey = getDateKey();
-      buyLastSuccessAt = Date.now();
-      const label = type === 'normal' ? '无机化肥' : '有机化肥';
-      log('商城', `自动购买${label} x${bought}`, {
-        module: 'warehouse', event: '购买化肥', result: 'ok', count: bought, type,
-      });
-    }
-    return bought;
-  } catch {
-    return 0;
-  }
+function autoBuyFertilizer(force = false, type = 'organic', targetCount = 0) {
+  return serializeMallPurchase(async () => {
+    if (!['organic', 'normal'].includes(type)) throw new Error('化肥类型无效');
+    if (!Number.isSafeInteger(targetCount) || targetCount < 0) throw new Error('化肥购买数量无效');
+    checkPurchaseCancellation();
+    const now = Date.now();
+    if (!force && now - lastBuyAt < BUY_COOLDOWN_MS) return 0;
+    lastBuyAt = now;
+    return autoBuyFertilizerViaMall(type, targetCount);
+  });
 }
 
 // ---- 免费礼包 ----
@@ -424,21 +239,11 @@ async function buyFreeGifts(force = false) {
   try {
     // 抓包显示“每日福利”(goodsId=1001)位于 slot_type=1。
     // 旧实现请求 slot_type=2，导致自动任务无法找到免费商品。
-    const reply = await getMallListBySlotType(1);
-    const rawList = Array.isArray(reply && reply.goods_list) ? reply.goods_list : [];
-    const goodsList = [];
-
-    for (const raw of rawList) {
-      try {
-        goodsList.push(types.MallGoods.decode(raw));
-      } catch {
-        // skip
-      }
-    }
-
-    const freeGoods = goodsList.filter(
-      (g) => !!g && g.is_free === true && Number(g.goods_id || 0) > 0
-    );
+    const goodsList = await getMallGoodsList(1);
+    const freeGoods = goodsList.filter(g => g.is_free === true && g.is_available === true
+      && !g.ad_only && !g.share?.share_only && toNum(g.goods_id) > 0
+      && (toNum(g.purchase_limit?.limit_count) <= 0
+        || toNum(g.purchase_limit?.bought_count) < toNum(g.purchase_limit.limit_count)));
 
     if (!freeGoods.length) {
       freeGiftDoneDateKey = getDateKey();
@@ -449,15 +254,18 @@ async function buyFreeGifts(force = false) {
     }
 
     let claimed = 0;
+    const failures = [];
     for (const goods of freeGoods) {
       try {
         await purchaseMallGoods(Number(goods.goods_id || 0), 1);
         claimed += 1;
-      } catch {
-        // skip failed
+      } catch (error) {
+        failures.push(error);
       }
     }
 
+    if (claimed > 0) freeGiftLastAt = Date.now();
+    if (failures.length) throw new AggregateError(failures, failures.map(error => error.message).join('; '));
     freeGiftDoneDateKey = getDateKey();
 
     if (claimed > 0) {
@@ -476,11 +284,27 @@ async function buyFreeGifts(force = false) {
     log('商城', `领取免费礼包失败: ${err.message}`, {
       module: 'task', event: FREE_GIFTS_DAILY_KEY, result: 'error',
     });
-    return 0;
+    throw err;
   }
 }
 
 // ---- 按阈值补货 ----
+
+function normalizeFertilizerCheckOptions(options = {}) {
+  if (!options || typeof options !== 'object' || Array.isArray(options)) throw new Error('化肥检测参数无效');
+  const normalized = { buyOrganic: false, buyNormal: false, organicCount: 0, normalCount: 0,
+    organicThresholdHours: 0, normalThresholdHours: 0, ...options };
+  for (const [enabled, count, hours] of [
+    ['buyOrganic', 'organicCount', 'organicThresholdHours'], ['buyNormal', 'normalCount', 'normalThresholdHours'],
+  ]) {
+    if (typeof normalized[enabled] !== 'boolean'
+      || !Number.isSafeInteger(normalized[count]) || normalized[count] < 0
+      || typeof normalized[hours] !== 'number' || !Number.isFinite(normalized[hours]) || normalized[hours] < 0
+      || (normalized[enabled] && (normalized[count] <= 0 || normalized[hours] <= 0)))
+      throw new Error('化肥检测开关、数量或阈值无效');
+  }
+  return normalized;
+}
 
 /**
  * 根据化肥容器剩余时间阈值自动补货
@@ -488,9 +312,9 @@ async function buyFreeGifts(force = false) {
 async function checkAndBuyFertilizerByThreshold(type, count, thresholdHours) {
   const { getBag, getBagItems, getContainerHoursFromBagItems } = require('./warehouse');
 
-  if (count <= 0 || thresholdHours <= 0) {
-    return { bought: 0, message: '参数无效' };
-  }
+  if (!['organic', 'normal'].includes(type) || !Number.isSafeInteger(count) || count <= 0
+    || typeof thresholdHours !== 'number' || !Number.isFinite(thresholdHours) || thresholdHours <= 0)
+    throw new Error('化肥类型、数量或阈值无效');
 
   try {
     const bag = await getBag();
@@ -513,7 +337,7 @@ async function checkAndBuyFertilizerByThreshold(type, count, thresholdHours) {
     log('商城', `检测化肥容器失败: ${err.message}`, {
       module: 'mall', event: 'check_fertilizer', result: 'error', error: err.message,
     });
-    return { bought: 0, error: err.message };
+    throw err;
   }
 }
 
@@ -530,7 +354,7 @@ async function checkAndBuyFertilizerBoth(options = {}) {
     organicThresholdHours = 0,
     normalCount = 0,
     normalThresholdHours = 0,
-  } = options || {};
+  } = normalizeFertilizerCheckOptions(options);
 
   const result = { organicBought: 0, normalBought: 0, organicCurrentHours: 0, normalCurrentHours: 0 };
 
@@ -577,7 +401,7 @@ async function checkAndBuyFertilizerBoth(options = {}) {
     log('商城', `检测化肥容器失败: ${err.message}`, {
       module: 'mall', event: 'check_fertilizer', result: 'error', error: err.message,
     });
-    return { ...result, error: err.message };
+    throw err;
   }
 }
 
@@ -592,8 +416,10 @@ module.exports = {
   getMallGoodsList,
   purchaseMallGoods,
   parseMallPriceValue,
+  getMallUnitPrice,
   parseMallLimitInfo,
   parseMallItemIds,
+  normalizeFertilizerCheckOptions,
 
   getFertilizerBuyDailyState: () => ({
     key: 'fertilizer_buy',

@@ -7,7 +7,7 @@ import { useAppStore } from '@/stores/app'
 const appStore = useAppStore()
 
 // 立即应用保存的主题（在组件挂载前）
-const savedTheme = localStorage.getItem('ui_theme') as Theme
+const savedTheme = appStore.currentTheme as Theme
 if (savedTheme && appStore.themes[savedTheme]) {
   appStore.applyTheme(savedTheme)
 }

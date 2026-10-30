@@ -21,7 +21,7 @@ function registerAdminLoginLogRoutes({
       if (!requireDangerConfirmation(req, res, 'CLEAR_LOGIN_LOGS')) return;
       const result = userStore.clearLoginLogs();
       logger.warn('清空登录日志', {
-        admin: req.currentUser?.username || '',
+        admin: req.currentUser?.id || '',
         confirmation: 'CLEAR_LOGIN_LOGS',
       });
       res.json(result);

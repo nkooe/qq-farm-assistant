@@ -63,10 +63,7 @@ function extractVarintField(bodyBytes, fieldNo) {
 async function fetchDogInfoRaw() {
   const { body } = await sendMsgAsync(DOG_SERVICE, 'GetDogInfo', Buffer.alloc(0));
   const GetDogInfoReply = types.GetDogInfoReply;
-  if (!GetDogInfoReply) {
-    // protobuf 未就绪时降级：仅返回礼包数
-    return { pending_gift_count: extractVarintField(body, 7) || 0 };
-  }
+  if (!GetDogInfoReply) throw new Error('宠物协议未初始化');
   const reply = GetDogInfoReply.decode(body);
   return GetDogInfoReply.toObject(reply, { longs: Number, defaults: false });
 }
@@ -173,7 +170,7 @@ async function getDogPanelData() {
 }
 
 /**
- * 查询礼包状态（兼容旧接口）
+ * 查询礼包状态
  */
 async function getDogGiftStatus() {
   const { body } = await sendMsgAsync(DOG_SERVICE, 'GetDogInfo', Buffer.alloc(0));

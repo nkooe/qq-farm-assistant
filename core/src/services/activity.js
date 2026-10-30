@@ -5,7 +5,7 @@
  * - 获取活动分组信息
  * - 操作活动（购买/刷新随机商店）
  * - 解析随机商店与活动抽奖数据
- * - 原始 protobuf 回退解码
+ * - 按当前协议解码活动数据
  */
 const protobuf = require('protobufjs/minimal');
 const { sendMsgAsync, getUserState, isConnected } = require('../utils/network');
@@ -138,12 +138,6 @@ async function getActivityGroup(activityId = NANGUA_SHOP_ACTIVITY_ID, uid = NANG
 
   const { body } = await sendMsgAsync('gamepb.activitypb.ActivityService', 'GetGroup', request);
   const decoded = types.ActivityGetGroupReply.decode(body);
-
-  // 附加原始字节供回退解析
-  Object.defineProperty(decoded, '__rawBody', {
-    value: Buffer.from(body || []),
-    enumerable: false,
-  });
 
   return decoded;
 }
@@ -427,70 +421,26 @@ function getRandomShopStateSignature(group) {
 /**
  * 解析活动 payload（JSON 字符串）
  */
-function getField(raw, ...names) {
-  if (!raw) return undefined;
-  for (const name of names) {
-    if (raw[name] !== undefined) return raw[name];
-    const numeric = String(name).replace(/^field_/, '');
-    if (/^\d+$/.test(numeric) && raw[numeric] !== undefined) return raw[numeric];
-  }
-  return undefined;
-}
-
 function parsePayload(rawPayload) {
-  if (!rawPayload) return null;
-  if (typeof rawPayload === 'object') return rawPayload;
-  if (typeof rawPayload !== 'string') return null;
-  const text = rawPayload.trim();
-  if (!text) return null;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return null;
-  }
-}
-
-function decodeItemHex(raw) {
-  if (typeof raw !== 'string' || !/^[0-9a-f]+$/i.test(raw) || raw.length < 4) return null;
-  try {
-    return types.CoreItem ? types.CoreItem.decode(Buffer.from(raw, 'hex')) : null;
-  } catch {
-    return null;
-  }
+  if (rawPayload === undefined || rawPayload === null || rawPayload === '') return null;
+  if (typeof rawPayload !== 'string') throw new Error('活动 payload 必须为 JSON 字符串');
+  return JSON.parse(rawPayload);
 }
 
 function readProtoFields(rawBytes) {
-  const buf = Buffer.from(rawBytes || []);
-  const reader = protobuf.Reader.create(buf);
+  const reader = protobuf.Reader.create(Buffer.from(rawBytes));
   const entries = [];
-
   while (reader.pos < reader.len) {
-    let tag = 0;
-    try {
-      tag = reader.uint32();
-    } catch {
-      break;
-    }
-
+    const tag = reader.uint32();
     const field = tag >>> 3;
-    const wire = tag & 0x7;
-    try {
-      if (wire === 0) {
-        entries.push({ field, wire, value: toNum(reader.uint64()) });
-      } else if (wire === 2) {
-        entries.push({ field, wire, value: Buffer.from(reader.bytes()) });
-      } else if (wire === 5) {
-        entries.push({ field, wire, value: reader.uint32() });
-      } else if (wire === 1) {
-        entries.push({ field, wire, value: reader.fixed64() });
-      } else {
-        reader.skipType(wire);
-      }
-    } catch {
-      break;
-    }
+    const wire = tag & 7;
+    if (!field) throw new Error('活动协议字段号无效');
+    if (wire === 0) entries.push({ field, wire, value: toNum(reader.uint64()) });
+    else if (wire === 2) entries.push({ field, wire, value: Buffer.from(reader.bytes()) });
+    else if (wire === 5) entries.push({ field, wire, value: reader.uint32() });
+    else if (wire === 1) entries.push({ field, wire, value: reader.fixed64() });
+    else reader.skipType(wire);
   }
-
   return entries;
 }
 
@@ -513,11 +463,7 @@ function getProtoBytesAll(entries, field) {
 function getProtoString(entries, field, fallback = '') {
   const bytes = getProtoBytes(entries, field);
   if (!bytes || bytes.length === 0) return fallback;
-  try {
-    return bytes.toString('utf8');
-  } catch {
-    return fallback;
-  }
+  return bytes.toString('utf8');
 }
 
 function parseActivityItemMessage(rawBytes) {
@@ -571,15 +517,15 @@ function normalizeHeluSubActivities(activities) {
     byKey.set(key, {
       key,
       id: toNum(activity?.id),
-      parentId: toNum(activity?.parent_id ?? activity?.parentId),
+      parentId: toNum(activity?.parent_id),
       title: String(activity?.title || ''),
       type: toNum(activity?.type),
       sort: toNum(activity?.sort),
       status: toNum(activity?.status),
       visible: activity?.visible !== false,
       enabled: activity?.enabled !== false,
-      startTime: toNum(activity?.start_time ?? activity?.startTime),
-      endTime: toNum(activity?.end_time ?? activity?.endTime),
+      startTime: toNum(activity?.start_time),
+      endTime: toNum(activity?.end_time),
       payload,
       payloadSummary: summarizeActivityPayload(payload),
       hasDraw: !!(activity?.draw_info || activity?.drawInfo),
@@ -616,9 +562,9 @@ function normalizeHeluSubActivities(activities) {
  */
 function normalizeActivityItem(raw) {
   if (!raw) return null;
-  const decoded = decodeItemHex(raw) || raw;
-  const itemId = toNum(getField(decoded, 'id', 'field_1', 1));
-  const count = Math.max(0, toNum(getField(decoded, 'count', 'field_2', 2)) || 1);
+  const decoded = raw;
+  const itemId = toNum(decoded?.id);
+  const count = Math.max(0, toNum(decoded?.count) || 1);
   if (itemId <= 0) return null;
 
   const info = getItemById(itemId);
@@ -633,25 +579,25 @@ function normalizeActivityItem(raw) {
 }
 
 function normalizeDrawPoolItem(raw) {
-  const item = normalizeActivityItem(getField(raw, 'item', 'field_3', 3));
+  const item = normalizeActivityItem(raw?.item);
   if (!item) return null;
   return {
-    id: toNum(getField(raw, 'id', 'field_1', 1)),
-    rarity: toNum(getField(raw, 'rarity', 'field_2', 2)),
+    id: toNum(raw?.id),
+    rarity: toNum(raw?.rarity),
     itemId: item.itemId,
     itemCount: item.count,
     itemName: item.name,
     image: item.image || '',
-    probability: String(getField(raw, 'probability', 'field_6', 6) || ''),
+    probability: String(raw?.probability || ''),
   };
 }
 
 function normalizeDrawReward(raw) {
-  const item = normalizeActivityItem(getField(raw, 'item', 'field_2', 2));
+  const item = normalizeActivityItem(raw?.item);
   if (!item) return null;
   return {
-    slotId: toNum(getField(raw, 'slot_id', 'slotId', 'field_1', 1)),
-    rarityFlag: toNum(getField(raw, 'flag', 'field_4', 4)),
+    slotId: toNum(raw?.slot_id),
+    rarityFlag: toNum(raw?.flag),
     itemId: item.itemId,
     itemCount: item.count,
     itemName: item.name,
@@ -662,10 +608,10 @@ function normalizeDrawReward(raw) {
 function normalizeDrawInfo(raw) {
   if (!raw) return null;
 
-  const freeMax = toNum(getField(raw, 'max_free_count', 'maxFreeCount', 'field_2', 2)) || 4;
-  const paidMax = toNum(getField(raw, 'max_paid_count', 'maxPaidCount', 'field_4', 4)) || 4;
-  const freeRemainingRaw = getField(raw, 'free_remaining_count', 'freeRemainingCount', 'field_1', 1);
-  const paidRemainingRaw = getField(raw, 'paid_remaining_count', 'paidRemainingCount', 'free_used_count', 'freeUsedCount', 'field_3', 3);
+  const freeMax = toNum(raw?.max_free_count) || 4;
+  const paidMax = toNum(raw?.max_paid_count) || 4;
+  const freeRemainingRaw = raw?.free_remaining_count;
+  const paidRemainingRaw = raw?.paid_remaining_count;
   const hasFreeRemaining = freeRemainingRaw !== undefined;
   const hasPaidRemaining = paidRemainingRaw !== undefined;
   const freeRemaining = Math.max(0, Math.min(freeMax,
@@ -678,10 +624,10 @@ function normalizeDrawInfo(raw) {
   ));
   const freeUsed = Math.max(0, freeMax - freeRemaining);
   const paidUsed = Math.max(0, paidMax - paidRemaining);
-  const paidCurrencyId = toNum(getField(raw, 'paid_currency_id', 'paidCurrencyId', 'field_5', 5)) || 1002;
-  const paidPrice = toNum(getField(raw, 'paid_price', 'paidPrice', 'field_6', 6)) || 30;
-  const fallbackPrice = toNum(getField(raw, 'fallback_price', 'fallbackPrice', 'field_7', 7)) || paidPrice;
-  const rewardPoolRaw = getField(raw, 'rewards', 'field_8', 8);
+  const paidCurrencyId = toNum(raw?.paid_currency_id) || 1002;
+  const paidPrice = toNum(raw?.paid_price) || 30;
+  const fallbackPrice = toNum(raw?.fallback_price) || paidPrice;
+  const rewardPoolRaw = raw?.rewards;
   const rewardPool = (Array.isArray(rewardPoolRaw) ? rewardPoolRaw : [])
     .map(normalizeDrawPoolItem)
     .filter(Boolean);
@@ -704,9 +650,9 @@ function normalizeDrawInfo(raw) {
 
 function normalizeDrawResult(raw) {
   if (!raw) return null;
-  const rewardsRaw = getField(raw, 'rewards', 'field_1', 1);
-  const itemsRaw = getField(raw, 'items', 'field_2', 2);
-  const costRaw = getField(raw, 'cost', 'field_3', 3);
+  const rewardsRaw = raw?.rewards;
+  const itemsRaw = raw?.items;
+  const costRaw = raw?.cost;
   return {
     rewards: (Array.isArray(rewardsRaw) ? rewardsRaw : [])
       .map(normalizeDrawReward)
@@ -727,8 +673,8 @@ function normalizeRandomShopItem(raw) {
   if (!item) return null;
 
   const name = String(raw?.name || item.name || '').trim() || item.name;
-  const stockCount = toNum(raw?.stock_count ?? raw?.stockCount ?? raw?.limit_count ?? raw?.limitCount);
-  const boughtCount = toNum(raw?.bought_count ?? raw?.boughtCount);
+  const stockCount = toNum(raw?.stock_count ?? raw?.limit_count);
+  const boughtCount = toNum(raw?.bought_count);
   const hasStock = stockCount > 0;
   const isSpecial = !!raw?.special;
   const noStock = !isSpecial;
@@ -771,20 +717,12 @@ function normalizeRandomShopInfo(raw) {
 
   return {
     items,
-    nextRefreshTime: toNum(raw?.next_refresh_time ?? raw?.nextRefreshTime),
-    manualRefreshCost: toNum(raw?.manual_refresh_cost ?? raw?.manualRefreshCost),
-    manualRefreshCurrencyId: toNum(raw?.manual_refresh_currency_id ?? raw?.manualRefreshCurrencyId),
-    manualRefreshExtraValue: toNum(
-      raw?.manual_refresh_extra_value ??
-      raw?.manualRefreshExtraValue ??
-      raw?.fallback_refresh_cost ??
-      raw?.fallbackRefreshCost ??
-      raw?.manual_refresh_count ??
-      raw?.manualRefreshCount ??
-      0
-    ),
+    nextRefreshTime: toNum(raw?.next_refresh_time),
+    manualRefreshCost: toNum(raw?.manual_refresh_cost),
+    manualRefreshCurrencyId: toNum(raw?.manual_refresh_currency_id),
+    manualRefreshExtraValue: toNum(raw.manual_refresh_extra_value),
     maxManualRefreshCount: 6,
-    manualRefreshUsedCount: toNum(raw?.manual_refresh_used_count ?? raw?.manualRefreshUsedCount),
+    manualRefreshUsedCount: toNum(raw?.manual_refresh_used_count),
   };
 }
 
@@ -868,205 +806,15 @@ function flattenActivityChildren(reply) {
   return list.filter(Boolean);
 }
 
-// ---- 原始 Protobuf 扫描（回退方案） ----
-
-function skipUnknown(reader, wireType) {
-  try {
-    reader.skipType(wireType);
-  } catch {
-    reader.pos = reader.len;
-  }
-}
-
-/**
- * 扫描长度分隔字段
- */
-function scanLengthDelimitedFields(rawBytes, targetFieldNum, maxDepth = 3, results = []) {
-  const buf = Buffer.from(rawBytes || []);
-  if (buf.length === 0 || maxDepth <= 0) return results;
-
-  const reader = protobuf.Reader.create(buf);
-  while (reader.pos < reader.len) {
-    let tag = 0;
-    try {
-      tag = reader.uint32();
-    } catch {
-      break;
-    }
-    const fieldNum = tag >>> 3;
-    const wireType = tag & 0x7;
-
-    if (wireType === 2) {
-      let bytes = null;
-      try {
-        bytes = reader.bytes();
-      } catch {
-        break;
-      }
-      if (fieldNum === targetFieldNum) results.push(Buffer.from(bytes));
-      scanLengthDelimitedFields(bytes, targetFieldNum, maxDepth - 1, results);
-      continue;
-    }
-
-    skipUnknown(reader, wireType);
-  }
-  return results;
-}
-
-/**
- * 从原始 body 中扫描随机商店信息
- */
-function scanRandomShopInfoFromRawBody(rawBody) {
-  if (!rawBody || rawBody.length === 0) return null;
-
-  const RandomShopInfo = types.ActivityRandomShopInfo;
-  if (!RandomShopInfo) return null;
-
-  let best = null;
-  const seen = new Set();
-
-  for (const chunk of scanLengthDelimitedFields(rawBody, 7)) {
-    try {
-      const decoded = RandomShopInfo.decode(chunk);
-      const normalized = normalizeRandomShopInfo(decoded);
-      if (!normalized || normalized.items.length === 0) continue;
-
-      const deduped = [];
-      for (const item of normalized.items) {
-        if (!item) continue;
-        const key = `${item.id}:${item.itemId}:${item.price}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        deduped.push(item);
-      }
-
-      normalized.items = deduped;
-
-      if (!best || normalized.items.length > best.items.length) {
-        best = normalized;
-      }
-    } catch {
-      // 跳过解码失败的块
-    }
-  }
-
-  return best;
-}
-
-/**
- * 从原始 body 中扫描兑换商店信息
- */
-function scanExchangeShopInfoFromRawBody(rawBody) {
-  if (!rawBody || rawBody.length === 0) return null;
-
-  const ExchangeShopInfo = types.ActivityExchangeShopInfo;
-  if (!ExchangeShopInfo) return null;
-
-  let best = null;
-  const seen = new Set();
-
-  for (const chunk of scanLengthDelimitedFields(rawBody, 102)) {
-    try {
-      const decoded = ExchangeShopInfo.decode(chunk);
-      const items = (Array.isArray(decoded?.items) ? decoded.items : [])
-        .map(normalizeExchangeShopItem)
-        .filter(Boolean);
-      if (items.length === 0) continue;
-
-      const deduped = [];
-      for (const item of items) {
-        const key = `${item.id}:${item.itemId}:${item.currencyId}:${item.price}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        deduped.push(item);
-      }
-
-      const normalized = {
-        items: deduped.sort((a, b) => {
-          if (a.sort !== b.sort) return a.sort - b.sort;
-          return a.id - b.id;
-        }),
-      };
-
-      if (!best || normalized.items.length > best.items.length) best = normalized;
-    } catch {
-      // skip
-    }
-  }
-
-  return best;
-}
-
-function scanDrawInfoFromRawBody(rawBody) {
-  if (!rawBody || rawBody.length === 0) return null;
-
-  const DrawInfo = types.ActivityDrawInfo;
-  if (!DrawInfo) return null;
-
-  let best = null;
-  for (const chunk of scanLengthDelimitedFields(rawBody, 105)) {
-    try {
-      const decoded = DrawInfo.decode(chunk);
-      const normalized = normalizeDrawInfo(decoded);
-      if (!normalized || normalized.rewardPool.length === 0) continue;
-      if (!best || normalized.rewardPool.length > best.rewardPool.length) best = normalized;
-    } catch {
-      // skip
-    }
-  }
-  return best;
-}
-
-function getHeluActivityUidCandidates() {
-  return [HELU_ACTIVITY_UID, 'SAIJI_DRAW', 'SaiJi', 'HeLu', 'Helu', ''];
-}
-
-async function getActivityGroupWithUidFallback(activityId, uidCandidates) {
-  let lastErr = null;
-  for (const uid of uidCandidates) {
-    try {
-      const reply = await getActivityGroup(activityId, uid);
-      const activities = flattenActivityChildren(reply);
-      if (activities.length > 0) {
-        Object.defineProperty(reply, '__activityUid', {
-          value: uid,
-          enumerable: false,
-          configurable: true,
-        });
-        return reply;
-      }
-    } catch (err) {
-      lastErr = err;
-    }
-  }
-  if (lastErr) throw lastErr;
-  return getActivityGroup(activityId, uidCandidates[0]);
-}
-
 async function getHeluBalance() {
-  try {
-    const bag = await getBag();
-    const items = getBagItems(bag);
-    for (const item of items || []) {
-      if (toNum(item?.id) === HELU_CURRENCY_ITEM_ID) {
-        return Math.max(0, toNum(item?.count));
-      }
-    }
-  } catch {
-    // ignore
-  }
-  return 0;
+  return getBagItemCount(HELU_CURRENCY_ITEM_ID);
 }
 
 async function getBagItemCount(itemId) {
-  try {
-    const bag = await getBag();
-    return (getBagItems(bag) || [])
-      .filter(entry => toNum(entry?.id) === toNum(itemId))
-      .reduce((sum, item) => sum + Math.max(0, toNum(item?.count)), 0);
-  } catch {
-    return 0;
-  }
+  const bag = await getBag();
+  return getBagItems(bag)
+    .filter(entry => toNum(entry.id) === toNum(itemId))
+    .reduce((sum, item) => sum + Math.max(0, toNum(item.count)), 0);
 }
 
 async function getQingmeiWineMaterialItems() {
@@ -1103,7 +851,7 @@ function normalizeQingmeiActivity(reply) {
   const materialInfo = getItemById(QINGMEI_FRUIT_ITEM_ID);
 
   return {
-    uid: reply?.__activityUid || QINGMEI_ACTIVITY_UID,
+    uid: QINGMEI_ACTIVITY_UID,
     title: '青酿换万金',
     activityId: toNum(root?.id) || QINGMEI_ACTIVITY_ID,
     claimActivityId: toNum(claim?.id) || QINGMEI_SEED_CLAIM_ACTIVITY_ID,
@@ -1113,8 +861,8 @@ function normalizeQingmeiActivity(reply) {
     winePreviewCommand: QINGMEI_WINE_PREVIEW_CMD,
     wineBrewCommand: QINGMEI_WINE_BREW_CMD,
     wineSellCommand: QINGMEI_WINE_SELL_CMD,
-    startTime: toNum(root?.start_time ?? root?.startTime ?? claim?.start_time ?? claim?.startTime),
-    endTime: toNum(root?.end_time ?? root?.endTime ?? claim?.end_time ?? claim?.endTime),
+    startTime: toNum(root?.start_time ?? claim?.start_time),
+    endTime: toNum(root?.end_time ?? claim?.end_time),
     status,
     claimed: claimedToday || status === 3,
     claimable: !claimedToday && status !== 3 && claim?.enabled !== false,
@@ -1135,41 +883,11 @@ function normalizeQingmeiActivity(reply) {
 }
 
 async function getQingmeiActivity() {
-  try {
-    const reply = await getActivityGroupWithUidFallback(QINGMEI_ACTIVITY_ID, [QINGMEI_ACTIVITY_UID, '']);
-    const activity = normalizeQingmeiActivity(reply);
-    activity.material.itemCount = await getBagItemCount(QINGMEI_FRUIT_ITEM_ID);
-    return activity;
-  } catch (err) {
-    const materialInfo = getItemById(QINGMEI_FRUIT_ITEM_ID);
-    return {
-      uid: QINGMEI_ACTIVITY_UID,
-      title: '青酿换万金',
-      activityId: QINGMEI_ACTIVITY_ID,
-      claimActivityId: QINGMEI_SEED_CLAIM_ACTIVITY_ID,
-      claimCommand: QINGMEI_SEED_CLAIM_CMD,
-      wineActivityId: QINGMEI_WINE_ACTIVITY_ID,
-      wineTitle: '青酿换万金',
-      winePreviewCommand: QINGMEI_WINE_PREVIEW_CMD,
-      wineBrewCommand: QINGMEI_WINE_BREW_CMD,
-      wineSellCommand: QINGMEI_WINE_SELL_CMD,
-      claimed: false,
-      claimable: false,
-      reward: {
-        itemId: QINGMEI_SEED_ITEM_ID,
-        itemCount: QINGMEI_SEED_REWARD_COUNT,
-        itemName: getItemById(QINGMEI_SEED_ITEM_ID)?.name || '青梅种子',
-        image: getItemImageById(QINGMEI_SEED_ITEM_ID) || '',
-      },
-      material: {
-        itemId: QINGMEI_FRUIT_ITEM_ID,
-        itemCount: await getBagItemCount(QINGMEI_FRUIT_ITEM_ID),
-        itemName: materialInfo?.name || '青梅',
-        image: getItemImageById(QINGMEI_FRUIT_ITEM_ID) || '',
-      },
-      warning: err?.message || String(err),
-    };
-  }
+  assertActivityConnection('获取青梅活动');
+  const reply = await getActivityGroup(QINGMEI_ACTIVITY_ID, QINGMEI_ACTIVITY_UID);
+  const activity = normalizeQingmeiActivity(reply);
+  activity.material.itemCount = await getBagItemCount(QINGMEI_FRUIT_ITEM_ID);
+  return activity;
 }
 
 async function claimQingmeiSeeds() {
@@ -1231,43 +949,17 @@ async function brewAndSellQingmeiWine(options = {}) {
     throw createQingmeiWineError('material', '青梅不足，无法精酿');
   }
 
-  let previewReply = null;
-  let previewWarning = '';
-  try {
-    previewReply = await operateActivityReply(QINGMEI_WINE_ACTIVITY_ID, QINGMEI_WINE_PREVIEW_CMD, {
-      qingmeiWineStart: { items: materialItems },
-    });
-  } catch (err) {
-    previewWarning = `打开青梅酿售卖失败，已尝试直接精酿: ${err.message}`;
-  }
+  const previewReply = await operateActivityReply(QINGMEI_WINE_ACTIVITY_ID, QINGMEI_WINE_PREVIEW_CMD, {
+    qingmeiWineStart: { items: materialItems },
+  });
   const preview = normalizeQingmeiPreviewResult(previewReply?.qingmei_preview);
   await delay(QINGMEI_WINE_STEP_DELAY_MS);
 
   const brews = [];
   for (let index = 0; index < brewSteps; index += 1) {
-    let brewReply = null;
-    try {
-      brewReply = await operateActivityReply(QINGMEI_WINE_ACTIVITY_ID, QINGMEI_WINE_BREW_CMD, {
-        qingmeiWineBrew: true,
-      });
-    } catch (err) {
-      if (index === 0 && isNoOngoingQingmeiBrewError(err)) {
-        try {
-          const retryMaterialItems = await getQingmeiWineMaterialItems();
-          previewReply = await operateActivityReply(QINGMEI_WINE_ACTIVITY_ID, QINGMEI_WINE_PREVIEW_CMD, {
-            qingmeiWineStart: { items: retryMaterialItems },
-          });
-          await delay(QINGMEI_WINE_STEP_DELAY_MS);
-          brewReply = await operateActivityReply(QINGMEI_WINE_ACTIVITY_ID, QINGMEI_WINE_BREW_CMD, {
-            qingmeiWineBrew: true,
-          });
-        } catch (retryErr) {
-          throw createQingmeiWineError('brew', `青梅酿精酿失败: ${retryErr.message}`, retryErr);
-        }
-      } else {
-        throw createQingmeiWineError('brew', `青梅酿精酿失败: ${err.message}`, err);
-      }
-    }
+    const brewReply = await operateActivityReply(QINGMEI_WINE_ACTIVITY_ID, QINGMEI_WINE_BREW_CMD, {
+      qingmeiWineBrew: true,
+    });
     const brew = normalizeQingmeiBrewResult(brewReply?.qingmei_brew);
     if (brew) brews.push(brew);
     await delay(QINGMEI_WINE_STEP_DELAY_MS);
@@ -1326,12 +1018,11 @@ async function brewAndSellQingmeiWine(options = {}) {
     consumedCount: Math.max(0, beforeMaterialCount - afterMaterialCount),
     materialBatchCount: materialItems.length,
     preview,
-    previewWarning,
     brews,
     brew: finalBrew,
     share: shareResult,
     sell,
-    activity: await getHeluActivity().catch(() => null),
+    activity: await getHeluActivity(),
   };
 }
 
@@ -1569,8 +1260,8 @@ async function claimSolarTermsReward(termId = 0) {
 
 function normalizeHeluGroup(reply, lastDrawResult = null) {
   const activities = flattenActivityChildren(reply);
-  const getDrawInfo = (act) => act?.draw_info || act?.drawInfo || null;
-  const getExchangeShop = (act) => act?.exchange_shop || act?.exchangeShop || null;
+  const getDrawInfo = (act) => act?.draw_info || null;
+  const getExchangeShop = (act) => act?.exchange_shop || null;
 
   const drawAct = activities.find((a) => toNum(a?.id) === HELU_DRAW_ACTIVITY_ID)
     || activities.find((a) => /奇遇礼莲/.test(String(a?.title || '')))
@@ -1582,15 +1273,11 @@ function normalizeHeluGroup(reply, lastDrawResult = null) {
       || (getExchangeShop(a) && Array.isArray(getExchangeShop(a).items) && getExchangeShop(a).items.length > 0)
   ) || null;
 
-  let drawInfo = normalizeDrawInfo(getDrawInfo(drawAct)) || scanDrawInfoFromRawBody(reply?.__rawBody);
+  const drawInfo = normalizeDrawInfo(getDrawInfo(drawAct));
+  if (!drawInfo) throw new Error('荷露活动缺少 draw_info');
   let exchangeItems = (getExchangeShop(exchangeAct)?.items || [])
     .map(normalizeExchangeShopItem)
     .filter(Boolean);
-  const rawExchange = scanExchangeShopInfoFromRawBody(reply?.__rawBody);
-  if (exchangeItems.length === 0 && rawExchange) {
-    exchangeItems = rawExchange.items;
-  }
-  if (!drawInfo) drawInfo = normalizeDrawInfo({});
   if (!drawInfo._hasPaidRemaining && drawInfo.freeRemaining <= 0) {
     drawInfo.paidUsed = drawInfo.paidMax;
     drawInfo.paidRemaining = 0;
@@ -1603,7 +1290,7 @@ function normalizeHeluGroup(reply, lastDrawResult = null) {
   const root = reply?.group?.activity || {};
   const subActivities = normalizeHeluSubActivities(activities);
   return {
-    uid: reply?.__activityUid || HELU_ACTIVITY_UID,
+    uid: HELU_ACTIVITY_UID,
     title: String(root?.title || '荷风十里蝉初鸣'),
     activityId: toNum(root?.id) || HELU_ACTIVITY_ID,
     drawActivityId: toNum(drawAct?.id) || HELU_DRAW_ACTIVITY_ID,
@@ -1630,63 +1317,11 @@ function normalizeHeluGroup(reply, lastDrawResult = null) {
 }
 
 async function getHeluActivity() {
-  const state = getUserState();
-  if (!state) {
-    return {
-      uid: HELU_ACTIVITY_UID,
-      title: '荷风十里蝉初鸣',
-      draw: {
-        ...normalizeDrawInfo({}),
-        actions: computeHeluDrawActions(normalizeDrawInfo({})),
-      },
-      heluBalance: 0,
-      subActivities: normalizeHeluSubActivities([]),
-      passport: {
-        uid: HELU_PASSPORT_UID,
-        title: '荷风游记',
-        currentLevel: 0,
-        claimableLevels: 0,
-        rewards: [],
-        levelRewardTiers: [],
-      },
-      solarTerms: {
-        terms: [],
-        claimableCount: 0,
-        currentTerm: null,
-      },
-      summary: { rewardPoolCount: 0, subActivityCount: HELU_SUB_ACTIVITY_DEFS.length },
-      qingmei: await getQingmeiActivity(),
-      warning: 'runtime connection is not open',
-    };
-  }
-
-  const activity = normalizeHeluGroup(
-    await getActivityGroupWithUidFallback(HELU_ACTIVITY_ID, getHeluActivityUidCandidates())
-  );
+  assertActivityConnection('获取荷露活动');
+  const activity = normalizeHeluGroup(await getActivityGroup(HELU_ACTIVITY_ID, HELU_ACTIVITY_UID));
   activity.heluBalance = await getHeluBalance();
-  try {
-    activity.passport = await getSeasonPassport();
-  } catch (err) {
-    activity.passport = {
-      uid: HELU_PASSPORT_UID,
-      title: '荷风游记',
-      currentLevel: 0,
-      claimableLevels: 0,
-      rewards: [],
-      levelRewardTiers: [],
-      warning: err?.message || String(err),
-    };
-  }
-  try {
-    activity.solarTerms = await getSolarTermsInfo();
-  } catch (err) {
-    activity.solarTerms = {
-      terms: [],
-      claimableCount: 0,
-      currentTerm: null,
-      warning: err?.message || String(err),
-    };
-  }
+  activity.passport = await getSeasonPassport();
+  activity.solarTerms = await getSolarTermsInfo();
   activity.qingmei = await getQingmeiActivity();
   return activity;
 }
@@ -1742,7 +1377,6 @@ async function drawHeluGiftLotus(options = {}) {
       paidPrice: toNum(before?.draw?.paidPrice),
     },
     payload: usingFree ? drawPayload : paidPayload,
-    legacyDrawPayload: usingFree ? null : drawPayload,
   };
   activityLogger.info('奇遇礼莲抽奖开始', drawContext);
 
@@ -1891,8 +1525,8 @@ async function exchangeHeluShopItem(slotId, count = 1) {
 function normalizeNanguaGroup(reply) {
   const activities = flattenActivityChildren(reply);
 
-  const getRandomShop = (act) => act?.random_shop || act?.randomShop || null;
-  const getExchangeShop = (act) => act?.exchange_shop || act?.exchangeShop || null;
+  const getRandomShop = (act) => act?.random_shop || null;
+  const getExchangeShop = (act) => act?.exchange_shop || null;
 
   const randomAct = activities.find(
     (a) => getRandomShop(a) && Array.isArray(getRandomShop(a).items) && getRandomShop(a).items.length > 0
@@ -1902,35 +1536,14 @@ function normalizeNanguaGroup(reply) {
     (a) => getExchangeShop(a) && Array.isArray(getExchangeShop(a).items) && getExchangeShop(a).items.length > 0
   ) || null;
 
-  // 优先使用 proto 解码
-  let randomShop = normalizeRandomShopInfo(getRandomShop(randomAct));
-
-  // 原始 body 扫描作为回退
-  const rawRandomShop = scanRandomShopInfoFromRawBody(reply?.__rawBody);
-  if (!randomShop || randomShop.items.length === 0) {
-    randomShop = rawRandomShop;
-  } else if (rawRandomShop) {
-    randomShop = {
-      ...randomShop,
-      nextRefreshTime: randomShop.nextRefreshTime || rawRandomShop.nextRefreshTime,
-      manualRefreshCost: randomShop.manualRefreshCost || rawRandomShop.manualRefreshCost,
-      manualRefreshCurrencyId: randomShop.manualRefreshCurrencyId || rawRandomShop.manualRefreshCurrencyId,
-      manualRefreshExtraValue: randomShop.manualRefreshExtraValue || rawRandomShop.manualRefreshExtraValue,
-      maxManualRefreshCount: 6,
-      manualRefreshUsedCount: randomShop.manualRefreshUsedCount || rawRandomShop.manualRefreshUsedCount,
-    };
-  }
+  const randomShop = normalizeRandomShopInfo(getRandomShop(randomAct));
+  if (!randomShop) throw new Error('南瓜活动缺少 random_shop');
 
   const randomItems = randomShop?.items || [];
 
   let exchangeItems = (getExchangeShop(exchangeAct)?.items || [])
     .map(normalizeExchangeShopItem)
     .filter(Boolean);
-
-  const rawExchange = scanExchangeShopInfoFromRawBody(reply?.__rawBody);
-  if (exchangeItems.length === 0 && rawExchange) {
-    exchangeItems = rawExchange.items;
-  }
 
   const refreshInfo = {
     nextRefreshTime: randomShop?.nextRefreshTime || 0,
@@ -1966,46 +1579,24 @@ function normalizeNanguaGroup(reply) {
  * 获取南瓜商店
  */
 async function getNanguaShop() {
-  const state = getUserState();
-  if (!state) {
-    return {
-      uid: NANGUA_ACTIVITY_UID,
-      title: '南瓜乐翻天',
-      randomShop: [],
-      exchangeShop: [],
-      summary: { randomShopCount: 0, exchangeShopCount: 0 },
-      warning: 'runtime connection is not open',
-    };
-  }
-
+  assertActivityConnection('获取南瓜商店');
   return normalizeNanguaGroup(await getActivityGroup(NANGUA_SHOP_ACTIVITY_ID));
 }
 
 // ========== 观星礼录（二十八星宿·每日馈赠） ==========
 
-/**
- * 提取星宿数据段
- * GetGroup 与 Operate 的回包外层结构不同（前者 reply.1.2.110，后者 reply.3.110），
- * 这里统一按字段号递归扫描并取最完整的一段，两种回包共用一套解析
- */
-function findConstellationBytes(rawBody) {
-  const found = scanLengthDelimitedFields(rawBody, CONSTELLATION_DATA_FIELD, 5);
-  if (found.length === 0) return null;
-  return found.reduce((best, cur) => (cur.length > (best?.length || 0) ? cur : best), null);
-}
-
-/**
- * 在活动回包中定位指定活动的 ActivityInfo 字段表
- */
-function findActivityInfoEntries(rawBody, activityId) {
-  const targetId = Number(activityId) || 0;
-  for (const bytes of scanLengthDelimitedFields(rawBody, 1, 5)) {
-    const entries = readProtoFields(bytes);
-    if (getProtoNumber(entries, 1) !== targetId) continue;
-    if (!getProtoString(entries, 4, '')) continue;
-    return entries;
-  }
-  return null;
+function guanxingNodeEntries(rawBody, operationReply) {
+  const envelope = readProtoFields(rawBody);
+  const group = getProtoBytes(envelope, operationReply ? 3 : 1);
+  if (!group) throw new Error('观星活动缺少 group');
+  const root = readProtoFields(group);
+  if (operationReply) return root;
+  const child = getProtoBytesAll(root, 2).find(bytes => {
+    const info = getProtoBytes(readProtoFields(bytes), 1);
+    return info && getProtoNumber(readProtoFields(info), 1) === GUANXING_ACTIVITY_ID;
+  });
+  if (!child) throw new Error('观星活动缺少指定活动节点');
+  return readProtoFields(child);
 }
 
 /** 合并同种奖励，便于展示"本次共获得" */
@@ -2024,15 +1615,6 @@ function mergeRewardItems(items) {
   return [...merged.values()];
 }
 
-/** 服务端未下发当前天数时，按活动开始时间推算 */
-function estimateConstellationDay(startTime, nowTime, totalDays) {
-  const start = Number(startTime) || 0;
-  const now = Number(nowTime) || Math.floor(Date.now() / 1000);
-  if (start <= 0 || now <= start) return 1;
-  const maxDay = Math.max(1, Number(totalDays) || 28);
-  return Math.min(Math.max(Math.floor((now - start) / 86400) + 1, 1), maxDay);
-}
-
 /** 星宿分组：名称、四象归类与释义 */
 function normalizeConstellationGroup(rawBytes) {
   const entries = readProtoFields(rawBytes);
@@ -2043,13 +1625,9 @@ function normalizeConstellationGroup(rawBytes) {
   let explain = '';
   const configText = getProtoString(entries, 5, '');
   if (configText) {
-    try {
-      const config = JSON.parse(configText);
-      category = String(config?.category || '').trim();
-      explain = String(config?.explain || '').trim();
-    } catch {
-      // 配置串异常时保留空值，不影响星宿主体展示
-    }
+    const config = JSON.parse(configText);
+    category = String(config.category || '').trim();
+    explain = String(config.explain || '').trim();
   }
 
   return {
@@ -2095,31 +1673,11 @@ function normalizeConstellationNode(rawBytes, groupMap) {
   };
 }
 
-function buildEmptyGuanxingActivity(warning = '') {
-  return {
-    activityId: GUANXING_ACTIVITY_ID,
-    title: GUANXING_TITLE,
-    seasonTitle: '',
-    startTime: 0,
-    endTime: 0,
-    nowTime: Math.floor(Date.now() / 1000),
-    currentDay: 0,
-    totalDays: 0,
-    nodes: [],
-    summary: {
-      totalDays: 0,
-      currentDay: 0,
-      unlockedCount: 0,
-      claimedCount: 0,
-      claimableCount: 0,
-      pendingRewards: [],
-    },
-    warning,
-  };
-}
-
-function normalizeGuanxingActivity(rawBody) {
-  const infoEntries = findActivityInfoEntries(rawBody, GUANXING_ACTIVITY_ID);
+function normalizeGuanxingActivity(rawBody, operationReply = false) {
+  const node = guanxingNodeEntries(rawBody, operationReply);
+  const info = getProtoBytes(node, 1);
+  if (!info) throw new Error('观星活动缺少 activity');
+  const infoEntries = readProtoFields(info);
   const nowTime = Math.floor(Date.now() / 1000);
   const base = {
     activityId: GUANXING_ACTIVITY_ID,
@@ -2130,9 +1688,9 @@ function normalizeGuanxingActivity(rawBody) {
     nowTime,
   };
 
-  const constellationBytes = findConstellationBytes(rawBody);
+  const constellationBytes = getProtoBytes(node, CONSTELLATION_DATA_FIELD);
   if (!constellationBytes) {
-    return { ...buildEmptyGuanxingActivity('未解析到星宿数据'), ...base };
+    throw new Error('观星活动缺少星宿数据');
   }
 
   const entries = readProtoFields(constellationBytes);
@@ -2144,9 +1702,8 @@ function normalizeGuanxingActivity(rawBody) {
     .sort((a, b) => a.id - b.id);
 
   const serverDay = getProtoNumber(entries, 1);
-  const currentDay = serverDay > 0
-    ? serverDay
-    : estimateConstellationDay(base.startTime, nowTime, nodes.length);
+  if (serverDay <= 0) throw new Error('观星活动缺少当前天数');
+  const currentDay = serverDay;
   const claimableNodes = nodes.filter((node) => node.claimable);
 
   return {
@@ -2202,9 +1759,7 @@ function isGuanxingNoRewardError(err) {
 }
 
 async function getGuanxingActivity() {
-  if (!getUserState()) {
-    return buildEmptyGuanxingActivity('runtime connection is not open');
-  }
+  assertActivityConnection('获取观星活动');
   return normalizeGuanxingActivity(await getGuanxingRaw());
 }
 
@@ -2227,7 +1782,7 @@ async function claimGuanxingRewards() {
     noReward = true;
   }
 
-  const after = replyBody ? normalizeGuanxingActivity(replyBody) : await getGuanxingActivity();
+  const after = replyBody ? normalizeGuanxingActivity(replyBody, true) : await getGuanxingActivity();
   const claimedBefore = new Set((before.nodes || []).filter((node) => node.claimed).map((node) => node.id));
   const claimedNodes = (after.nodes || []).filter((node) => node.claimed && !claimedBefore.has(node.id));
   const rewards = mergeRewardItems(claimedNodes.flatMap((node) => node.rewards));

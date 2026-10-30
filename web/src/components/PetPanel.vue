@@ -53,8 +53,7 @@ const feedCounts = ref<Record<number, number>>({})
 const lastClaim = ref(0)
 
 // 我的宠物（已拥有或已激活 —— 服务端激活后 owned 会重置为 false）
-// 兜底：兼容未含 hasDog 字段的旧响应
-const isMine = (d: DogItem) => d.hasDog ?? (d.owned || d.activated)
+const isMine = (d: DogItem) => d.hasDog === true
 const myDogs = computed(() => dogs.value.filter(isMine))
 const activatedDogs = computed(() => myDogs.value.filter(d => d.activated))
 // 未拥有且未激活的宠物（含可购买/活动获取）
@@ -335,9 +334,9 @@ onMounted(fetchPanel)
         宠物（护主犬）系统
       </div>
       <ul class="list-disc pl-5 space-y-1 text-blue-700/90 dark:text-blue-200/80">
-        <li><b>我的宠物</b>：展示你已拥有的宠物，可激活、选择出战护农。</li>
-        <li><b>投喂狗粮</b>：宠物需要食物才能保持看护状态，食物耗尽后停止护农。</li>
-        <li><b>同气礼包</b>：护主犬在护农时有概率掉落礼包，可直接领取。</li>
+        <li>激活宠物后可出战护农。</li>
+        <li>食物耗尽后停止护农。</li>
+        <li>护农时有机会获得礼包。</li>
       </ul>
     </div>
 
@@ -566,7 +565,7 @@ onMounted(fetchPanel)
 
         <div class="mt-3 rounded-lg bg-gray-50 p-2.5 text-xs text-gray-500 dark:bg-gray-900/50 dark:text-gray-400">
           <div class="i-carbon-information inline-block align-text-bottom" />
-          提示：食物时长会累加到现有剩余时间上（上限 {{ fmtDuration(maxFoodLastSec) }}），食物耗尽后宠物停止护农。
+          投喂时长累加，上限 {{ fmtDuration(maxFoodLastSec) }}。
         </div>
       </div>
 

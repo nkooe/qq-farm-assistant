@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -58,7 +59,7 @@ func generateSessionID() string {
 }
 
 func requireAuth(w http.ResponseWriter, r *http.Request) bool {
-	if r.URL.Path == "/internal/proxy-url" {
+	if strings.HasPrefix(r.URL.Path, "/internal/") {
 		w.Header().Set("Cache-Control", "no-store")
 		if ApiToken != "" && r.Header.Get("Authorization") == "Bearer "+ApiToken {
 			return true
@@ -67,7 +68,7 @@ func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	// Paths that don't need auth
-	if r.URL.Path == "/login" || r.URL.Path == "/health" || r.URL.Path == "/token" {
+	if r.URL.Path == "/login" || r.URL.Path == "/health" {
 		return true
 	}
 
@@ -84,12 +85,14 @@ func requireAuth(w http.ResponseWriter, r *http.Request) bool {
 		s, ok := sessions[c.Value]
 		sessionsMu.Unlock()
 		if ok && !time.Now().After(s.expiresAt) {
+			r.Header.Set("X-Farm-Role", "admin")
+			r.Header.Set("X-Farm-User-ID", "1000")
 			return true
 		}
 	}
 
 	// API calls without token -> 401
-	if len(r.URL.Path) >= 6 && (r.URL.Path[:6] == "/wxapp" || r.URL.Path[:9] == "/accounts" || r.URL.Path[:4] == "/qr" || r.URL.Path[:4] == "/docs") {
+	if strings.HasPrefix(r.URL.Path, "/wxapp") || strings.HasPrefix(r.URL.Path, "/accounts") || strings.HasPrefix(r.URL.Path, "/qr") || strings.HasPrefix(r.URL.Path, "/docs") || strings.HasPrefix(r.URL.Path, "/proxy-profiles") || r.URL.Path == "/token" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		w.Write([]byte(`{"code":401,"msg":"invalid api token","data":null}`))
@@ -155,7 +158,7 @@ button:hover{background:oklch(0.48 0.195 3)}
 	u := r.FormValue("username")
 	p := r.FormValue("password")
 
-	if u != adminUser || p != adminPass {
+	if adminUser == "" || adminPass == "" || u != adminUser || p != adminPass {
 		http.Redirect(w, r, "/login?err=1", http.StatusFound)
 		return
 	}

@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import api from '@/api'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
+import { useUserStore } from '@/stores/user'
 
 interface ProxyProfile {
   id: number
@@ -12,9 +13,13 @@ interface ProxyProfile {
   port: number
   username: string
   password_configured: boolean
+  redacted?: boolean
+  shared_with_users?: boolean
+  owner_user_id?: number
 }
 
 const props = defineProps<{ accounts: any[] }>()
+const userStore = useUserStore()
 const emit = defineEmits<{ notify: [message: string, type?: 'primary' | 'danger'] }>()
 
 const loading = ref(false)
@@ -33,6 +38,8 @@ const form = reactive({
   username: '',
   password: '',
   passwordConfigured: false,
+  sharedWithUsers: false,
+  ownerUserId: 1000,
 })
 
 const accountRows = computed(() => yybAccounts.value.map((yyb) => {
@@ -52,7 +59,7 @@ function getAccountSetting(openid: unknown) {
 
 function resetForm() {
   editingId.value = 0
-  Object.assign(form, { name: '', protocol: 'http-connect', host: '', port: 0, username: '', password: '', passwordConfigured: false })
+  Object.assign(form, { name: '', protocol: 'http-connect', host: '', port: 0, username: '', password: '', passwordConfigured: false, sharedWithUsers: false, ownerUserId: 1000 })
 }
 
 function openCreate() {
@@ -61,6 +68,8 @@ function openCreate() {
 }
 
 function openEdit(profile: ProxyProfile) {
+  if (profile.redacted)
+    return
   editingId.value = profile.id
   Object.assign(form, {
     name: profile.name,
@@ -70,6 +79,8 @@ function openEdit(profile: ProxyProfile) {
     username: profile.username || '',
     password: '',
     passwordConfigured: profile.password_configured,
+    sharedWithUsers: !!profile.shared_with_users,
+    ownerUserId: profile.owner_user_id ?? 1000,
   })
   showForm.value = true
 }
@@ -81,11 +92,15 @@ async function loadData() {
       api.get('/api/yyb/proxy-profiles'),
       api.post('/api/yyb/accounts', {}),
     ])
-    profiles.value = Array.isArray(profilesResponse.data?.data) ? profilesResponse.data.data : []
-    yybAccounts.value = Array.isArray(accountsResponse.data?.data) ? accountsResponse.data.data : []
+    if (!profilesResponse.data.ok || !Array.isArray(profilesResponse.data.data) || !accountsResponse.data.ok || !Array.isArray(accountsResponse.data.data))
+      throw new Error('代理设置响应格式无效')
+    profiles.value = profilesResponse.data.data
+    yybAccounts.value = accountsResponse.data.data
     const entries = await Promise.all(yybAccounts.value.map(async (account) => {
       const response = await api.get('/api/yyb/account-proxy', { params: { ref: account.openid } })
-      const data = response.data?.data || {}
+      const data = response.data?.data
+      if (!response.data.ok || !data || !['static', 'direct'].includes(data.mode))
+        throw new Error('账号代理设置响应格式无效')
       return [String(account.openid), {
         mode: data.mode === 'static' ? 'static' : 'direct',
         proxyProfileId: Number(data.proxy_profile_id) || null,
@@ -116,6 +131,7 @@ async function saveProfile() {
       port: Number(form.port),
       username: form.username.trim(),
       password: form.password || (form.passwordConfigured ? '__KEEP__' : ''),
+      shared_with_users: userStore.isAdmin && form.ownerUserId === 1000 && form.sharedWithUsers,
     }
     if (editingId.value)
       await api.put('/api/yyb/proxy-profiles', payload)
@@ -190,7 +206,7 @@ onMounted(loadData)
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100">代理配置库</h3>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">账号密码只保存在本机应用宝数据库，页面不会回显密码。</p>
+          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">自建代理私用，共享代理仅显示名称。</p>
         </div>
         <BaseButton variant="primary" size="sm" @click="openCreate">
           <span class="i-carbon-add mr-1" />添加静态代理
@@ -211,6 +227,10 @@ onMounted(loadData)
           <BaseInput v-model.number="form.port" label="端口" type="number" placeholder="1080" />
           <BaseInput v-model="form.username" label="用户名（可选）" autocomplete="off" />
           <BaseInput v-model="form.password" label="密码（可选）" type="password" autocomplete="new-password" :placeholder="form.passwordConfigured ? '留空保留原密码' : '按需填写'" />
+          <label v-if="userStore.isAdmin && form.ownerUserId === 1000" class="flex items-center gap-2 text-sm">
+            <input v-model="form.sharedWithUsers" type="checkbox">
+            允许用户使用（用户仅可见代理名称）
+          </label>
         </div>
         <div class="mt-4 flex justify-end gap-2">
           <BaseButton variant="outline" @click="showForm = false">取消</BaseButton>
@@ -225,15 +245,19 @@ onMounted(loadData)
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <div class="truncate font-semibold">{{ profile.name }}</div>
-              <div class="mt-1 break-all text-sm text-gray-500 dark:text-gray-400">{{ profile.protocol === 'socks5' ? 'SOCKS5' : 'HTTP CONNECT' }} · {{ profile.host }}:{{ profile.port }}</div>
-              <div class="mt-1 text-xs text-gray-500">认证：{{ profile.username ? `${profile.username} / ${profile.password_configured ? '已配置密码' : '无密码'}` : '无' }}</div>
+              <template v-if="!profile.redacted">
+                <div class="mt-1 break-all text-sm text-gray-500 dark:text-gray-400">{{ profile.protocol === 'socks5' ? 'SOCKS5' : 'HTTP CONNECT' }} · {{ profile.host }}:{{ profile.port }}</div>
+                <div class="mt-1 text-xs text-gray-500">认证：{{ profile.username ? `${profile.username} / ${profile.password_configured ? '已配置密码' : '无密码'}` : '无' }}</div>
+                <div v-if="userStore.isAdmin" class="mt-1 text-xs text-gray-500">{{ profile.owner_user_id !== 1000 ? `所属用户：${profile.owner_user_id}` : profile.shared_with_users ? '已允许用户使用' : '未共享给用户' }}</div>
+              </template>
+              <div v-else class="mt-1 text-xs text-gray-500">管理员共享代理</div>
             </div>
             <span class="i-carbon-network-3 text-xl" style="color: var(--theme-primary)" />
           </div>
           <div class="mt-3 flex flex-wrap justify-end gap-2">
             <BaseButton variant="ghost" size="sm" :loading="testingId === profile.id" @click="testProfile(profile)">测试</BaseButton>
-            <BaseButton variant="ghost" size="sm" @click="openEdit(profile)">编辑</BaseButton>
-            <BaseButton variant="ghost" size="sm" class="text-red-500" @click="deleteProfile(profile)">删除</BaseButton>
+            <BaseButton v-if="!profile.redacted" variant="ghost" size="sm" @click="openEdit(profile)">编辑</BaseButton>
+            <BaseButton v-if="!profile.redacted" variant="ghost" size="sm" class="text-red-500" @click="deleteProfile(profile)">删除</BaseButton>
           </div>
         </article>
       </div>
@@ -242,7 +266,7 @@ onMounted(loadData)
     <section class="border-t border-gray-200 pt-5 dark:border-gray-700">
       <div class="mb-3">
         <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100">账号出口</h3>
-        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">每个应用宝账号独立选择；静态代理异常时请求直接失败，不会回退直连。</p>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">每个账号独立配置，代理异常即停止。</p>
       </div>
       <div v-if="!loading && accountRows.length === 0" class="border border-dashed border-gray-300 rounded-xl py-8 text-center text-sm text-gray-500 dark:border-gray-700">暂无应用宝账号，请先扫码添加</div>
       <div v-else class="space-y-3">

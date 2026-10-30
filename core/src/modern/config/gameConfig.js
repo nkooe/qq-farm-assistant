@@ -51,8 +51,7 @@ function loadConfigs() {
         sharedTables = sharedGameTables.loadSharedGameTables();
     }
     catch (e) {
-        console.warn('[配置] 公共配置读取失败，保留已有缓存:', e.message);
-        return false;
+        throw e;
     }
     // 加载等级经验配置
     try {
@@ -64,7 +63,7 @@ function loadConfigs() {
         console.warn(`[配置] 已加载等级经验表 (${roleLevelConfig.length} 级)`);
     }
     catch (e) {
-        console.warn('[配置] 加载 RoleLevel.json 失败:', e.message);
+        throw e;
     }
     // 加载植物配置
     try {
@@ -84,7 +83,7 @@ function loadConfigs() {
         console.warn(`[配置] 已加载植物配置 (${plantConfig.length} 种)`);
     }
     catch (e) {
-        console.warn('[配置] 加载 Plant.json 失败:', e.message);
+        throw e;
     }
     // 加载物品配置（含种子/果实价格）
     try {
@@ -109,7 +108,7 @@ function loadConfigs() {
         console.warn(`[配置] 已加载物品配置 (${itemInfoConfig.length} 项)`);
     }
     catch (e) {
-        console.warn('[配置] 加载 ItemInfo.json 失败:', e.message);
+        throw e;
     }
     // 加载土地网格配置（多格作物布局）
     try {
@@ -131,7 +130,7 @@ function loadConfigs() {
         }
     }
     catch (e) {
-        console.warn('[配置] 加载 Land.json 失败:', e.message);
+        throw e;
     }
     try {
         const mutantPath = path.join(configDir, 'MutantEffect.json');
@@ -148,7 +147,7 @@ function loadConfigs() {
         }
     }
     catch (e) {
-        console.warn('[配置] 加载 MutantEffect.json 失败:', e.message);
+        throw e;
     }
     try {
         const illustratedPath = path.join(configDir, 'Illustrated.json');
@@ -164,7 +163,7 @@ function loadConfigs() {
         }
     }
     catch (e) {
-        console.warn('[配置] 加载 Illustrated.json 失败:', e.message);
+        throw e;
     }
     try {
         const buffPath = path.join(configDir, 'BuffCfg.json');
@@ -180,7 +179,7 @@ function loadConfigs() {
         }
     }
     catch (e) {
-        console.warn('[配置] 加载 BuffCfg.json 失败:', e.message);
+        throw e;
     }
     // 图片目录只在加载配置时扫描，避免列表请求为每个物品反复访问磁盘。
     itemImageIds.clear();

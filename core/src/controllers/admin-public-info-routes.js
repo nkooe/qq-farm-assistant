@@ -3,16 +3,14 @@ const fetch = require("node-fetch");
 const { version: packageVersion, appVersion } = require("../../package.json");
 const version = appVersion || packageVersion;
 const { getRuntimeConfig } = require("../config/config");
-const { getSchedulerRegistrySnapshot } = require("../services/scheduler");
 
 const CHANGELOG_URL = "https://gitee.com/xlzcandy/qq-classic-farm-update-log/raw/master/README.md";
-const SCHEDULER_UNSUPPORTED_MESSAGE = "DataProvider does not support scheduler status";
 
 function registerAdminPublicInfoRoutes({
   app,
   provider,
-  store,
   userStore,
+  requireAdminRole,
   getAccountIdFromRequest,
   canAccessAccount,
   sendProviderError,
@@ -57,25 +55,14 @@ function registerAdminPublicInfoRoutes({
     res.json({ ok: true, data: { valid: true } });
   });
 
-  app.get("/api/scheduler", async (req, res) => {
+  app.get("/api/scheduler", requireAdminRole, async (req, res) => {
     try {
       const accountId = getAccountIdFromRequest(req);
       if (accountId && !canAccessAccount(req, accountId))
         return res.status(403).json({ ok: false, error: "无权访问此账号" });
 
-      if (provider && typeof provider.getSchedulerStatus === "function") {
-        const status = await provider.getSchedulerStatus(accountId);
-        return res.json({ ok: true, data: status });
-      }
-
-      return res.json({
-        ok: true,
-        data: {
-          runtime: getSchedulerRegistrySnapshot(),
-          worker: null,
-          workerError: SCHEDULER_UNSUPPORTED_MESSAGE,
-        },
-      });
+      const status = await provider.getSchedulerStatus(accountId);
+      return res.json({ ok: true, data: status });
     }
     catch (error) {
       return sendProviderError(res, error);

@@ -106,16 +106,17 @@ function registerAdminBagRoutes({
       return;
 
     try {
-      const { itemId, count, uid } = req.body;
-      if (!itemId)
-        return res.status(400).json({ ok: false, error: "缺少 itemId" });
+      const { itemId, count = 1, uid = 0 } = req.body || {};
+      if (!Number.isSafeInteger(itemId) || itemId <= 0 || !Number.isSafeInteger(count) || count <= 0
+        || !Number.isSafeInteger(uid) || uid < 0)
+        return res.status(400).json({ ok: false, error: "物品 ID、数量或 UID 无效" });
 
-      const usedItemId = toNum(itemId);
-      const usedCount = Math.max(1, toNum(count) || 1);
+      const usedItemId = itemId;
+      const usedCount = count;
       const usedItemName = getItemName(usedItemId);
       const bagBefore = await provider.getBag(accountId);
 
-      await provider.useItem(accountId, usedItemId, usedCount, toNum(uid) || 0);
+      await provider.useItem(accountId, usedItemId, usedCount, uid);
       await wait(500);
 
       const bagAfter = await provider.getBag(accountId);

@@ -53,7 +53,7 @@ test('selected proxy rejection never contacts a directly reachable game WebSocke
 
 test('missing selected profile is an error instead of falling back to direct', async () => {
   await assert.rejects(resolveProxyURL({ proxyMode: 'static' }));
-  assert.equal(await resolveProxyURL({ proxyMode: 'direct' }), '');
+  await assert.rejects(resolveProxyURL({ proxyMode: 'direct' }), /缺少账号所属用户/);
 });
 
 test('native bridge removes its handshake parser before relaying large binary payloads', async t => {

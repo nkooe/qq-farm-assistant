@@ -24,7 +24,7 @@ function harness(t, reconnect = {}, overrides = {}) {
   t.after(() => scheduler.clearAll());
   const config = { autoReconnect: false, reconnectDelayMin: 5, reconnectMaxAttempts: 3, ...reconnect };
   t.mock.method(store, 'getAccounts', () => ({ accounts }));
-  t.mock.method(store, 'getGlobalWxConfig', () => config);
+  t.mock.method(store, 'getUserWxConfig', () => config);
   const envBefore = { url: process.env.YYB_API_URL, key: process.env.YYB_API_KEY };
   process.env.YYB_API_URL = 'http://yyb.test';
   process.env.YYB_API_KEY = 'test-token';
@@ -55,7 +55,9 @@ function harness(t, reconnect = {}, overrides = {}) {
     terminate() { this.emit('exit', 0); }
   }
   const manager = createWorkerManager({
+    getAccountAccessRejection: () => null,
     WorkerThread: FakeWorker,
+    resolveAccountProxy: async () => '',
     processRef: { pkg: false },
     workers,
     workerScriptPath: 'fake-worker',
@@ -74,13 +76,44 @@ test('selected proxy reaches the worker and an unavailable proxy creates no dire
     if (account.proxyProfileId !== 7) throw new Error('代理配置不可用');
     return 'http://fixture-proxy:8080';
   } });
-  const good = { id: 'proxy-good', name: 'P', platform: 'qq', proxyMode: 'static', proxyProfileId: 7 };
+  const good = { autoStart: true, userId: 1000, id: 'proxy-good', name: 'P', platform: 'qq', proxyMode: 'static', proxyProfileId: 7 };
+  h.accounts.push(good);
+  const bad = { ...good, id: 'proxy-failed', proxyProfileId: 8 }; h.accounts.push(bad);
   assert.equal(await h.manager.startWorker(good), true);
   assert.equal(h.created[0].messages[0].config.proxyURL, 'http://fixture-proxy:8080');
-  assert.equal(await h.manager.startWorker({ ...good, id: 'proxy-failed', proxyProfileId: 8 }), false);
+  assert.equal(await h.manager.startWorker(bad), false);
   assert.equal(h.created.length, 1);
   assert.equal(h.manager.getWorkerRuntime('proxy-failed').state, 'failed');
 });
+
+for (const change of ['missing', 'stopped', 'credentials']) {
+  test(`worker startup rejects ${change} persisted state before refreshing credentials`, async t => {
+    let refreshes = 0;
+    const h = harness(t, {}, { refreshQqCode: async () => { refreshes++; return 'fixture-code'; } });
+    const account = { id: '1', userId: 1001, platform: 'qq', autoStart: true, qqLoginProfile: 'fixture', code: 'old' };
+    if (change !== 'missing') h.accounts.push({ ...account, ...(change === 'stopped' ? { autoStart: false } : { code: 'new' }) });
+    assert.equal(await h.manager.startWorker(account, { automatic: true }), false);
+    assert.equal(refreshes, 0);
+    assert.equal(h.created.length, 0);
+    assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+  });
+}
+
+for (const change of ['stopped', 'deleting']) {
+  test(`late startup refresh rechecks ${change} intent even without an explicit cancellation`, async t => {
+    let finish;
+    const h = harness(t, {}, { refreshQqCode: () => new Promise(resolve => { finish = resolve; }) });
+    const account = { id: '1', userId: 1001, platform: 'qq', autoStart: true, qqLoginProfile: 'fixture' };
+    h.accounts.push({ ...account });
+    const pending = h.manager.startWorker(account, { automatic: true });
+    if (change === 'stopped') h.accounts[0].autoStart = false;
+    else h.accounts[0].deleting = true;
+    finish('fixture-late-code');
+    assert.equal(await pending, false);
+    assert.equal(h.created.length, 0);
+    assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+  });
+}
 
 test('native QQ reconnection refreshes its own credentials with WX reconnect disabled and never calls YYB', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -92,11 +125,11 @@ test('native QQ reconnection refreshes its own credentials with WX reconnect dis
     addAccountLog: (_action, message) => messages.push(message),
   });
   t.mock.method(globalThis, 'fetch', async () => { yybCalls++; throw new Error('Must not call WX or YYB'); });
-  const account = { id: 'qq-1', name: 'QQ', username: 'alice', platform: 'qq', loginType: 'manual', qqLoginProfile: 'fixture-profile', uin: '12345678', code: 'old' };
+  const account = { autoStart: true, userId: 1000, id: 'qq-1', name: 'QQ', userId: 1001, platform: 'qq', loginType: 'manual', qqLoginProfile: 'fixture-profile', uin: '12345678', code: 'old' };
   h.accounts.push(account);
   assert.equal(await h.manager.startWorker(account), true);
   assert.equal(h.created[0].messages[0].config.code, 'fixture_QQ_FRESH_CODE_12345671');
-  h.created[0].emit('message', { type: 'ws_error', code: 400, message: 'expired' });
+  h.created[0].emit('message', { type: 'ws_error', code: 400, message: 1004 });
   assert.equal(h.manager.getWorkerRuntime('qq-1').state, 'reconnecting');
   t.mock.timers.tick(30000); await setImmediate();
   assert.equal(refreshes, 2); assert.equal(yybCalls, 0); assert.equal(saved.length, 2);
@@ -108,7 +141,7 @@ test('native QQ reconnection refreshes its own credentials with WX reconnect dis
 test('legacy QQ does not reuse a stale Code through the enabled WX reconnect queue', async t => {
   const messages = [];
   const h = harness(t, { autoReconnect: true }, { log: (_tag, message) => messages.push(message), addAccountLog: (_action, message) => messages.push(message) });
-  const account = { id: 'qq-1', platform: 'qq', loginType: 'manual', code: 'old' };
+  const account = { autoStart: true, userId: 1000, id: 'qq-1', platform: 'qq', loginType: 'manual', code: 'old' };
   h.accounts.push(account);
   await h.manager.startWorker(account);
   h.created[0].emit('message', { type: 'ws_reconnect_failed', reason: 'heartbeat_timeout' });
@@ -120,7 +153,7 @@ test('legacy QQ does not reuse a stale Code through the enabled WX reconnect que
 test('stopping a QQ credential refresh cancels it without persisting or starting a worker', async t => {
   let finish; let signal; const saved = [];
   const h = harness(t, {}, { refreshQqCode: async (_account, options) => { signal = options.signal; return new Promise(resolve => { finish = resolve; }); }, addOrUpdateAccount: patch => saved.push(patch) });
-  const account = { id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
+  const account = { autoStart: true, userId: 1000, id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
   const pending = h.manager.startWorker(account);
   h.manager.stopWorker('qq-1'); finish('fixture_QQ_CODE_12345678');
   assert.equal(await pending, false); assert.equal(signal.aborted, true);
@@ -132,7 +165,7 @@ for (const change of ['profile', 'proxy', 'deleted']) {
   test(`QQ credential refresh cannot start an account changed during the request: ${change}`, async t => {
     let finish; const saved = [];
     const h = harness(t, {}, { refreshQqCode: () => new Promise(resolve => { finish = resolve; }), addOrUpdateAccount: patch => saved.push(patch) });
-    const account = { id: 'qq-1', username: 'alice', platform: 'qq', qqLoginProfile: 'old-profile', proxyMode: 'direct', uin: '12345678' };
+    const account = { autoStart: true, userId: 1000, id: 'qq-1', userId: 1001, platform: 'qq', qqLoginProfile: 'old-profile', proxyMode: 'direct', uin: '12345678' };
     h.accounts.push({ ...account });
     const pending = h.manager.startWorker(account);
     if (change === 'profile') h.accounts[0].qqLoginProfile = 'new-profile';
@@ -149,7 +182,7 @@ for (const change of ['profile', 'proxy', 'deleted']) {
 test('new scan credentials replace a pending startup instead of sharing its stale result', async t => {
   let finish; let calls = 0;
   const h = harness(t, {}, { refreshQqCode: async () => { calls++; return new Promise(resolve => { finish = resolve; }); } });
-  const account = { id: 'qq-1', platform: 'qq', qqLoginProfile: 'old-profile', code: 'old' };
+  const account = { autoStart: true, userId: 1000, id: 'qq-1', platform: 'qq', qqLoginProfile: 'old-profile', code: 'old' };
   h.accounts.push({ ...account });
   const old = h.manager.startWorker(account);
   Object.assign(h.accounts[0], { qqLoginProfile: 'new-profile', code: 'new-scan' });
@@ -164,10 +197,11 @@ test('new scan credentials replace a pending startup instead of sharing its stal
 for (const order of ['manual-first', 'startup-first']) {
   test(`manual YYB refresh and automatic startup commit one shared result: ${order}`, async t => {
     const h = harness(t); let requests = 0; let finish;
-    const account = { id: 'shared-yyb', platform: 'wx', loginType: 'yyb', yybOpenid: 'shared', code: 'old' };
+    const account = { autoStart: true, userId: 1000, id: 'shared-yyb', platform: 'wx', loginType: 'yyb', yybOpenid: 'shared', code: 'old' };
     h.accounts.push(account);
     t.mock.method(globalThis, 'fetch', async () => { requests++; return new Promise(resolve => { finish = () => resolve({ ok: true, json: async () => ({ code: 0, data: { result: { code: 'shared-fresh' } } }) }); }); });
     const provider = createDataProvider({
+      getAccountAccessRejection: () => null,
       workers: h.workers, globalLogs: [], accountLogs: [], getAccounts: () => ({ accounts: h.accounts }),
       store: { addOrUpdateAccount: patch => Object.assign(account, patch) },
       getWorkerRuntime: h.manager.getWorkerRuntime, refreshYybCodeIfNeeded: h.manager.refreshYybCodeIfNeeded,
@@ -193,40 +227,94 @@ for (const change of ['stop', 'deleted', 'proxy', 'code']) {
   test(`worker restart cannot resurrect a changed account after ${change}`, async t => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const h = harness(t);
-    const account = { id: 'restart-1', platform: 'qq', code: 'old' };
+    const account = { autoStart: true, userId: 1000, id: 'restart-1', platform: 'qq', code: 'old' };
     h.accounts.push({ ...account });
     assert.equal(await h.manager.startWorker(account), true);
     const process = h.created[0];
     process.postMessage = message => process.messages.push(message);
-    await h.manager.restartWorker({ ...account });
+    const restarting = h.manager.restartWorker({ ...account });
     if (change === 'stop') h.manager.stopWorker(account.id);
     if (change === 'deleted') h.accounts.length = 0;
     if (change === 'proxy') h.accounts[0].proxyMode = 'static';
     if (change === 'code') h.accounts[0].code = 'new';
-    process.emit('exit', 0);
+    process.emit('exit', 0); await restarting;
     t.mock.timers.tick(2000); await setImmediate();
     assert.equal(h.created.length, 1);
     assert.equal(h.workers[account.id], undefined);
   });
 }
 
-test('restart timeout cannot delete the replacement worker after a synchronous exit', async t => {
+test('restart waits for confirmed exit before starting its replacement', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness(t);
-  const account = { id: 'restart-timeout', platform: 'qq', code: 'old' };
+  const account = { autoStart: true, userId: 1000, id: 'restart-timeout', platform: 'qq', code: 'old' };
   h.accounts.push(account);
   await h.manager.startWorker(account);
   h.created[0].postMessage = message => h.created[0].messages.push(message);
-  await h.manager.restartWorker({ ...account });
+  const restarting = h.manager.restartWorker({ ...account });
+  assert.equal(h.created.length, 1);
+  h.created[0].emit('exit', 0); await restarting;
   t.mock.timers.tick(2000); await setImmediate();
   assert.equal(h.created.length, 2);
   assert.equal(h.workers[account.id].process, h.created[1]);
 });
 
+test('user cleanup waits for a thread exit even without child-process exitCode fields', async t => {
+  const h = harness(t);
+  const account = { autoStart: true, userId: 1000, id: 'delete-thread', platform: 'qq', code: 'fixture' };
+  h.accounts.push(account);
+  await h.manager.startWorker(account);
+  const worker = h.created[0];
+  assert.equal(worker.exitCode, undefined);
+  worker.postMessage = message => worker.messages.push(message);
+  let stopped = false;
+  const operation = h.manager.stopWorkerAndWait(account.id).then(() => { stopped = true; });
+  await setImmediate();
+  assert.equal(stopped, false);
+  assert.equal(worker.messages.at(-1).type, 'stop');
+  worker.emit('exit', 0);
+  await operation;
+  assert.equal(stopped, true);
+  assert.equal(h.workers[account.id], undefined);
+});
+
+test('a force-kill timeout retains the worker so a deletion retry still waits for its real exit', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(t); const account = { id: '1', userId: 1001, platform: 'qq', autoStart: true }; h.accounts.push(account);
+  await h.manager.startWorker(account); const worker = h.created[0];
+  worker.postMessage = message => worker.messages.push(message); worker.terminate = () => {};
+  const first = h.manager.stopWorkerAndWait(account.id);
+  await assert.rejects(h.manager.callWorkerApi(account.id, 'doFarmOp', 'harvest'), /正在停止/);
+  const failure = assert.rejects(first, /停止超时/);
+  t.mock.timers.tick(7000); await failure;
+  assert.equal(h.workers[account.id].process, worker);
+  let completed = false; const retry = h.manager.stopWorkerAndWait(account.id).then(() => { completed = true; });
+  await setImmediate(); assert.equal(completed, false);
+  assert.doesNotThrow(() => worker.emit('message', { type: 'status_sync', data: { status: { name: 'late-name', uin: '12345678' } } }));
+  assert.equal(account.nick, undefined);
+  worker.emit('exit', 0); await retry; assert.equal(completed, true);
+});
+
+test('broken stop IPC still waits for forced termination and confirmed exit', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = harness(t); const account = { id: '1', userId: 1001, platform: 'qq', autoStart: true }; h.accounts.push(account);
+  await h.manager.startWorker(account); const worker = h.created[0];
+  worker.postMessage = () => { throw new Error('fixture IPC closed'); };
+  let completed = false;
+  const stopped = h.manager.stopWorkerAndWait(account.id).then(() => { completed = true; });
+  const settled = Promise.allSettled([stopped]);
+  assert.equal(h.scheduler.has('force_kill_1'), true);
+  assert.equal(completed, false);
+  t.mock.timers.tick(1000);
+  assert.deepEqual((await settled).map(result => result.status), ['fulfilled']);
+  assert.equal(completed, true);
+  assert.equal(h.workers[account.id], undefined);
+});
+
 test('repeated QQ credential failure stops at its independent retry limit', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] }); let calls = 0;
   const h = harness(t, { autoReconnect: false }, { refreshQqCode: async () => { calls++; throw new Error('QQ 登录态已失效，请重新扫码更新'); } });
-  const account = { id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
+  const account = { autoStart: true, userId: 1000, id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
   await h.manager.startWorker(account);
   for (const delay of [30000, 60000, 120000]) { t.mock.timers.tick(delay); await setImmediate(); }
   assert.equal(calls, 4); assert.equal(h.created.length, 0);
@@ -238,7 +326,7 @@ for (const kind of ['rescan', 'configuration']) {
   test(`QQ ${kind} stops without consuming automatic attempts`, async t => {
     t.mock.timers.enable({ apis: ['setTimeout'] }); let calls = 0;
     const h = harness(t, {}, { refreshQqCode: async () => { calls++; throw Object.assign(new Error('requires user action'), { kind }); } });
-    const account = { id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
+    const account = { autoStart: true, userId: 1000, id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
     await h.manager.startWorker(account);
     assert.equal(h.manager.getWorkerRuntime(account.id).reconnect.state, kind === 'rescan' ? 'needs_rescan' : 'blocked');
     assert.equal(h.scheduler.has('reconnect_attempt_qq-1'), false);
@@ -249,7 +337,7 @@ for (const kind of ['rescan', 'configuration']) {
 test('busy QQ service waits without spending retry attempts', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] }); let calls = 0;
   const h = harness(t, {}, { refreshQqCode: async () => { calls++; throw Object.assign(new Error('busy'), { status: 429 }); } });
-  const account = { id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
+  const account = { autoStart: true, userId: 1000, id: 'qq-1', platform: 'qq', qqLoginProfile: 'fixture-profile' }; h.accounts.push(account);
   await h.manager.startWorker(account);
   for (let i = 0; i < 5; i++) { t.mock.timers.tick(15000); await setImmediate(); }
   const plan = h.manager.getWorkerRuntime(account.id).reconnect;
@@ -259,7 +347,7 @@ test('busy QQ service waits without spending retry attempts', async t => {
 
 test('YYB explicit rescan response stops retries and never calls the credential watcher', async t => {
   const h = harness(t, { autoReconnect: true });
-  const account = { id: '1', loginType: 'yyb', yybOpenid: 'wx-a' }; h.accounts.push(account);
+  const account = { autoStart: true, userId: 1000, id: '1', loginType: 'yyb', yybOpenid: 'wx-a' }; h.accounts.push(account);
   t.mock.method(globalThis, 'fetch', async () => ({ ok: false, status: 409, json: async () => ({ code: 409, msg: 're-scan required' }) }));
   await h.manager.startWorker(account);
   assert.equal(h.manager.getWorkerRuntime('1').reconnect.state, 'needs_rescan');
@@ -268,7 +356,7 @@ test('YYB explicit rescan response stops retries and never calls the credential 
 
 test('stopping a YYB request aborts the actual upstream signal', async t => {
   const h = harness(t); let signal;
-  const account = { id: '1', loginType: 'yyb', yybOpenid: 'wx-a' }; h.accounts.push(account);
+  const account = { autoStart: true, userId: 1000, id: '1', loginType: 'yyb', yybOpenid: 'wx-a' }; h.accounts.push(account);
   t.mock.method(globalThis, 'fetch', async (_url, options) => { signal = options.signal; return new Promise(() => {}); });
   const pending = h.manager.startWorker(account);
   h.manager.stopWorker('1');
@@ -279,7 +367,7 @@ test('stopping a YYB request aborts the actual upstream signal', async t => {
 for (const change of ['deleted', 'identity', 'proxy', 'code']) {
   test(`YYB startup ignores a late credential after ${change}`, async t => {
     const h = harness(t);
-    const account = { id: '1', loginType: 'yyb', yybOpenid: 'wx-a', code: 'old' }; h.accounts.push({ ...account });
+    const account = { autoStart: true, userId: 1000, id: '1', loginType: 'yyb', yybOpenid: 'wx-a', code: 'old' }; h.accounts.push({ ...account });
     const pending = h.manager.startWorker(account);
     if (change === 'deleted') h.accounts.length = 0;
     if (change === 'identity') h.accounts[0].yybOpenid = 'wx-b';
@@ -293,7 +381,8 @@ for (const change of ['deleted', 'identity', 'proxy', 'code']) {
 
 test('concurrent starts of one YYB account create only one worker', async (t) => {
   const h = harness(t);
-  const account = { id: '1', name: 'A', platform: 'wx', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', platform: 'wx', loginType: 'yyb', yybOpenid: 'wx-a' };
+  h.accounts.push(account);
   const first = h.manager.startWorker(account);
   const second = h.manager.startWorker({ ...account });
   assert.equal(h.manager.getWorkerRuntime('1').state, 'starting');
@@ -315,7 +404,8 @@ test('runtime friend state is persisted by the parent before syncing it back to 
   const h = harness(t);
   const writes = [];
   t.mock.method(store, 'applyConfigSnapshot', (patch, options) => writes.push({ patch, options }));
-  await h.manager.startWorker({ id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
+  await h.manager.startWorker({ autoStart: true, userId: 1000, id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
   const worker = h.created[0];
   worker.emit('message', { type: 'automation_patch', patch: { friendHelpExpExhausted: true } });
   assert.deepEqual(writes, [{ patch: { friendHelpExpExhausted: true }, options: { accountId: '1' } }]);
@@ -326,7 +416,8 @@ test('known friend updates reach the parent and failed storage writes do not cra
   const h = harness(t);
   const writes = [];
   t.mock.method(store, 'setKnownFriendGids', (id, gids) => writes.push({ id, gids }));
-  await h.manager.startWorker({ id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
+  await h.manager.startWorker({ autoStart: true, userId: 1000, id: '1', name: 'fixture', loginType: 'manual', code: 'fixture' });
   const worker = h.created[0];
   worker.emit('message', { type: 'known_friend_gids_sync', gids: [101, 102] });
   assert.deepEqual(writes, [{ id: '1', gids: [101, 102] }]);
@@ -339,7 +430,8 @@ test('known friend updates reach the parent and failed storage writes do not cra
 test('YYB refresh failure is visible and never starts a worker with a stale code', async (t) => {
   const h = harness(t);
   t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ({ code: 502, msg: 'proxy unavailable' }) }));
-  const started = await h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a', code: 'stale' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a', code: 'stale' });
+  const started = await h.manager.startWorker({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a', code: 'stale' });
   assert.equal(started, false);
   assert.equal(h.created.length, 0);
   assert.equal(h.manager.getWorkerRuntime('1').state, 'failed');
@@ -350,8 +442,10 @@ test('YYB refresh failure is visible and never starts a worker with a stale code
 
 test('two YYB identities start independently and stopping A preserves B', async (t) => {
   const h = harness(t);
-  const first = h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
-  const second = h.manager.startWorker({ id: '2', name: 'B', loginType: 'yyb', yybOpenid: 'wx-b' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  const first = h.manager.startWorker({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '2', name: 'B', loginType: 'yyb', yybOpenid: 'wx-b' });
+  const second = h.manager.startWorker({ autoStart: true, userId: 1000, id: '2', name: 'B', loginType: 'yyb', yybOpenid: 'wx-b' });
   h.requests.get('wx-b')();
   await second;
   assert.deepEqual(Object.keys(h.workers), ['2']);
@@ -367,7 +461,8 @@ test('runtime diagnostics hide upstream proxy credentials and tokens', async (t)
   const h = harness(t);
   const message = 'proxy handshake failed at socks5://user:secret-pass@proxy.test:1080?key=secret-key Bearer secret-token refresh_token=secret-refresh';
   t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ({ code: 502, msg: message }) }));
-  await h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  await h.manager.startWorker({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
   const runtime = h.manager.getWorkerRuntime('1');
   assert.equal(runtime.state, 'failed');
   assert.match(runtime.error, /proxy handshake failed/);
@@ -376,7 +471,8 @@ test('runtime diagnostics hide upstream proxy credentials and tokens', async (t)
 
 test('stopping an account during code refresh cancels its pending startup', async (t) => {
   const h = harness(t);
-  const pending = h.manager.startWorker({ id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
+  const pending = h.manager.startWorker({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' });
   h.manager.stopWorker('1');
   h.requests.get('wx-a')();
   assert.equal(await pending, false);
@@ -387,7 +483,7 @@ test('stopping an account during code refresh cancels its pending startup', asyn
 test('YYB startup refresh failures retry until a fresh code is obtained', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness(t, { autoReconnect: true });
-  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a', code: 'stale' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a', code: 'stale' };
   h.accounts.push(account);
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ++calls < 3
@@ -419,7 +515,7 @@ test('YYB startup refresh failures retry until a fresh code is obtained', async 
 test('persistent YYB refresh failures stop at the configured retry limit', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 2 });
-  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
   h.accounts.push(account);
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async () => {
@@ -440,7 +536,7 @@ test('persistent YYB refresh failures stop at the configured retry limit', async
 
 test('a disconnected worker retains its reason and scheduled retry instead of appearing stopped', async t => {
   const h = harness(t, { autoReconnect: true });
-  const account = { id: '1', name: 'A', loginType: 'manual', code: 'fixture' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'manual', code: 'fixture' };
   h.accounts.push(account);
   await h.manager.startWorker(account);
   h.created[0].emit('message', { type: 'ws_reconnect_failed', reason: 'heartbeat_timeout' });
@@ -458,7 +554,7 @@ test('a disconnected worker retains its reason and scheduled retry instead of ap
 test('fresh background credentials reopen a capped retry cycle once and a manual stop cancels the watcher', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
-  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
   h.accounts.push(account);
   let recovered = false;
   let codeCalls = 0;
@@ -492,7 +588,7 @@ test('fresh background credentials reopen a capped retry cycle once and a manual
 test('stopping during a credential health read blocks a late successful recovery', async t => {
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
-  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
   h.accounts.push(account);
   let finish;
   t.mock.method(globalThis, 'fetch', async (_url, init) => init.body
@@ -515,7 +611,7 @@ for (const change of ['disabled', 'deleted', 'autostart_off', 'old_success']) {
   test(`credential recovery respects ${change} without starting a worker`, async t => {
     t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
     const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
-    const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+    const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
     h.accounts.push(account);
     t.mock.method(globalThis, 'fetch', async (_url, init) => init.body
       ? { json: async () => ({ code: 502, msg: 'refresh failed' }) }
@@ -537,7 +633,7 @@ for (const response of [null, { code: 0 }, { code: 0, data: [] }, { code: 502 },
   test(`credential recovery ignores an invalid health envelope ${JSON.stringify(response)}`, async t => {
     t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
     const h = harness(t, { autoReconnect: true, reconnectMaxAttempts: 1 });
-    const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+    const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
     h.accounts.push(account);
     t.mock.method(globalThis, 'fetch', async (_url, init) => init.body
       ? { json: async () => ({ code: 502, msg: 'refresh failed' }) }
@@ -558,7 +654,8 @@ test('offline reminder history waits for delivery and never claims a skipped rem
   const entries = [];
   const h = harness(t, {}, { triggerOfflineReminder: () => new Promise(resolve => { finish = resolve; }),
     addAccountLog: (...entry) => entries.push(entry) });
-  await h.manager.startWorker({ id: '1', name: 'A', loginType: 'manual', code: 'fixture' });
+  h.accounts.push({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'manual', code: 'fixture' });
+  await h.manager.startWorker({ autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'manual', code: 'fixture' });
   h.workers['1'].disconnectedSince = Date.now() - 61000;
   h.created[0].emit('message', { type: 'status_sync', data: { connection: { connected: false } } });
   assert.equal(entries.some(entry => entry[0] === 'offline_reminder'), false);
@@ -572,7 +669,7 @@ test('offline reminder history waits for delivery and never claims a skipped rem
 test('stopping a failed account without a worker cancels its scheduled retry', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness(t, { autoReconnect: true });
-  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
   h.accounts.push(account);
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async () => {
@@ -589,10 +686,27 @@ test('stopping a failed account without a worker cancels its scheduled retry', a
   assert.equal(h.manager.getWorkerRuntime('1').state, 'stopped');
 });
 
+test('offline auto deletion waits for the shared transaction and handles cleanup rejection', async t => {
+  let rejectDeletion; let called = 0; const messages = [];
+  const h = harness(t, {}, { getOfflineAutoDeleteMs: () => 1,
+    deleteAccount: () => { called++; return new Promise((_resolve, reject) => { rejectDeletion = reject; }); },
+    log: (_tag, message) => messages.push(message),
+  });
+  const account = { id: '1', userId: 1001, platform: 'qq', autoStart: true }; h.accounts.push(account);
+  await h.manager.startWorker(account);
+  const worker = h.created[0]; h.workers['1'].disconnectedSince = Date.now() - 100;
+  worker.emit('message', { type: 'status_sync', data: { connection: { connected: false } } });
+  await setImmediate(); assert.equal(called, 1);
+  assert.equal(worker.messages.some(message => message.type === 'stop'), false, 'the transaction owns cancellation and confirmed exit');
+  rejectDeletion(new Error('fixture cleanup failure')); await setImmediate();
+  assert(messages.some(message => /删除离线账号失败/.test(message)));
+  assert(!messages.some(message => /已自动删除/.test(message)));
+});
+
 test('stop during an automatic refresh prevents further startup and retries', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness(t, { autoReconnect: true });
-  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
   h.accounts.push(account);
   t.mock.method(globalThis, 'fetch', async () => ({ json: async () => ({ code: 502, msg: 'refresh failed' }) }));
   await h.manager.startWorker(account);
@@ -612,7 +726,7 @@ test('stop during an automatic refresh prevents further startup and retries', as
 test('disabled reconnect, deleted accounts and changed settings prevent automatic starts', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = harness(t);
-  const account = { id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
+  const account = { autoStart: true, userId: 1000, id: '1', name: 'A', loginType: 'yyb', yybOpenid: 'wx-a' };
   h.accounts.push(account);
   let calls = 0;
   t.mock.method(globalThis, 'fetch', async () => {

@@ -51,53 +51,13 @@ function withTimeout(promise, ms, label) {
 
 // ===== Batch helper =====
 
-/**
- * Run an operation on multiple land IDs. Batch-first, per-block fallback.
- * Returns the number of successful operations.
- *
- * 【2026-08-13 优化】批量优先：先用 batchFn 一次请求全部 landIds（单次网络往返），
- * 批量成功即按全部计数；批量失败（服务端不支持批量/整批报错）才逐块回退精确统计。
- * 原实现纯逐块调用（服务端对批量 land_ids 处理不可靠的顾虑），极速务农下是最大耗时源。
- * stepDelayMs 可调（极速务农传小值，普通模式保持 50ms 节奏）。
- */
-async function runBatchWithFallback(landIds, batchFn, singleFn, opts = {}) {
-  const ids = Array.isArray(landIds) ? landIds.filter(Boolean) : [];
-  if (ids.length === 0) return 0;
-  const rawDelay = opts.stepDelayMs === undefined ? 50 : Number(opts.stepDelayMs) || 0;
-  const delay = Math.max(0, Math.min(rawDelay, 500));
-
-  // 1) 批量优先：一次请求全部 landIds
-  try {
-    await batchFn(ids);
-    if (delay > 0) await sleep(delay);
-    return ids.length;
-  } catch (batchErr) {
-    // 批量失败（可能服务端部分处理/整批报错），落到逐块回退精确统计
-  }
-
-  // 2) 逐块回退：精确知道每块是否成功，统计准确。
-  let ok = 0;
-  for (const id of ids) {
-    try {
-      await singleFn([id]);
-      ok++;
-    } catch (singleErr) {
-      const msg = singleErr && singleErr.message ? singleErr.message : String(singleErr);
-      // 次数用完类错误、以及「作物当前无需该操作」类错误均静默跳过
-      // （服务端在并发帮助/状态滞后时会返回这些，属正常业务结果，无需告警刷屏）
-      const silenced = ['1001046', 'used up', '1001014', '1001015', '1001018',
-        '尚未干旱', '不需要除草', '不需要除虫'];
-      if (!silenced.some(s => msg.includes(s))) {
-        logWarn('好友', `操作失败: ${msg}`, {
-          module: 'friend',
-          event: 'operation_single_fail',
-          error: msg,
-        });
-      }
-    }
-    if (delay > 0) await sleep(delay);
-  }
-  return ok;
+/** Submit one batch. Failed requests are reported without replaying mutations. */
+async function runBatch(landIds, batchFn, opts = {}) {
+  const ids = landIds.filter(Boolean);
+  if (!ids.length) return 0;
+  await batchFn(ids);
+  if (opts.stepDelayMs > 0) await sleep(opts.stepDelayMs);
+  return ids.length;
 }
 
 // ===== Single friend operation =====
@@ -144,10 +104,9 @@ async function doFriendOperation(gid, opType) {
       // 直接发起偷取请求，服务端会自行截断可偷数量（is_all=true）。
       // 去掉 checkCanOperateRemote 预检查：被偷光时服务端返回错误码，catch 即可。
       try {
-        okCount = await runBatchWithFallback(
+        okCount = await runBatch(
           analysis.stealable,
-          ids => stealHarvest(numericGid, ids),
-          id => stealHarvest(numericGid, id)
+          ids => stealHarvest(numericGid, ids)
         );
       } catch (_) {
         return { ok: true, opType, count: 0, message: 'Ta已经被偷的精光了QAQ' };
@@ -177,10 +136,9 @@ async function doFriendOperation(gid, opType) {
       }
 
       try {
-        okCount = await runBatchWithFallback(
+        okCount = await runBatch(
           analysis.needWater,
-          ids => helpWater(numericGid, ids),
-          id => helpWater(numericGid, id)
+          ids => helpWater(numericGid, ids)
         );
       } catch (_) {
         return { ok: true, opType, count: 0, message: '浇水失败，来晚一步，可惜' };
@@ -197,10 +155,9 @@ async function doFriendOperation(gid, opType) {
       }
 
       try {
-        okCount = await runBatchWithFallback(
+        okCount = await runBatch(
           analysis.needWeed,
-          ids => helpWeed(numericGid, ids),
-          id => helpWeed(numericGid, id)
+          ids => helpWeed(numericGid, ids)
         );
       } catch (_) {
         return { ok: true, opType, count: 0, message: '除草失败，来晚一步，可惜' };
@@ -217,10 +174,9 @@ async function doFriendOperation(gid, opType) {
       }
 
       try {
-        okCount = await runBatchWithFallback(
+        okCount = await runBatch(
           analysis.needBug,
-          ids => helpInsecticide(numericGid, ids),
-          id => helpInsecticide(numericGid, id)
+          ids => helpInsecticide(numericGid, ids)
         );
       } catch (_) {
         return { ok: true, opType, count: 0, message: '除虫失败，来晚一步，可惜' };
@@ -411,10 +367,9 @@ async function visitFriend(friend, tally, myGid, accountId) {
         if (opt.list.length > 0 && canGetExp) {
           // 去掉 checkCanOperateRemote 预检查，直接发起帮忙操作
           try {
-            const okCount = await runBatchWithFallback(
+            const okCount = await runBatch(
               opt.list,
-              ids => opt.fn(gid, ids, useExpCheck),
-              id => opt.fn(gid, id, useExpCheck)
+              ids => opt.fn(gid, ids, useExpCheck)
             );
             if (okCount > 0) {
               actionLogs.push(`${opt.name}${okCount}`);
@@ -432,31 +387,19 @@ async function visitFriend(friend, tally, myGid, accountId) {
 
   // ---- Steal ----
   if (isAutomationOn('friend_steal') && analysis.stealable.length > 0) {
-    // 先批量偷，失败再逐块 fallback
+
     let stolen = 0;
     const stolenNames = [];
-    let batchSuccess = false;
 
     try {
       await stealHarvest(gid, analysis.stealable);
-      batchSuccess = true;
       stolen = analysis.stealable.length;
       analysis.stealable.forEach(landId => {
         const info = analysis.stealableInfo.find(s => s.landId === landId);
         if (info) stolenNames.push(info.name);
       });
-    } catch (_) {
-      for (const landId of analysis.stealable) {
-        try {
-          await stealHarvest(gid, [landId]);
-          stolen++;
-          const info = analysis.stealableInfo.find(s => s.landId === landId);
-          if (info) stolenNames.push(info.name);
-        } catch (_) {
-          // Skip individual failures
-        }
-        await randomDelay(50, 100);
-      }
+    } catch (error) {
+      throw error;
     }
 
     if (stolen > 0) {
@@ -464,7 +407,6 @@ async function visitFriend(friend, tally, myGid, accountId) {
       actionLogs.push(`偷${stolen}${namesStr ? `(${namesStr})` : ''}`);
       tally.steal += stolen;
       recordOperation('steal', stolen);
-      if (!batchSuccess) await randomDelay(50, 100);
     }
   }
 
@@ -598,37 +540,23 @@ async function visitFriendForSteal(friend, tally, myGid, accountId) {
     return { acted: false, entered: true };
   }
 
-  // Steal（先批量偷，失败再逐块 fallback，统计准确）
   if (analysis.stealable.length > 0) {
     let stolen = 0;
     const stolenNames = [];
 
     // 先尝试批量偷取（stealHarvest 用 is_all=true，服务端会截断到可偷数量）
-    let batchSuccess = false;
     try {
       await stealHarvest(gid, analysis.stealable);
-      // 批量成功：不能假设全部偷到，用 fallback 逐块验证哪些真正成功
+
       // 但为了效率，直接按 stealable.length 计数（服务端 is_all=true 语义是"尽量偷"）
-      // 如果服务端返回错误，走 catch fallback
-      batchSuccess = true;
+
       stolen = analysis.stealable.length;
       analysis.stealable.forEach(landId => {
         const info = analysis.stealableInfo.find(s => s.landId === landId);
         if (info) stolenNames.push(info.name);
       });
-    } catch (_) {
-      // 批量失败，逐块 fallback
-      for (const landId of analysis.stealable) {
-        try {
-          await stealHarvest(gid, [landId]);
-          stolen++;
-          const info = analysis.stealableInfo.find(s => s.landId === landId);
-          if (info) stolenNames.push(info.name);
-        } catch (_) {
-          // Skip individual failures
-        }
-        await randomDelay(50, 100);
-      }
+    } catch (error) {
+      throw error;
     }
 
     if (stolen > 0) {
@@ -636,7 +564,6 @@ async function visitFriendForSteal(friend, tally, myGid, accountId) {
       actionLogs.push(`偷${stolen}${namesStr ? `(${namesStr})` : ''}`);
       tally.steal += stolen;
       recordOperation('steal', stolen);
-      if (!batchSuccess) await randomDelay(50, 100);
     }
   }
 
@@ -731,26 +658,8 @@ function _emptyFarmingOutcome(effect = 'noop') {
   return { effect, operationCount: 0, landCount: 0, landIds: [], operationLimits: [], code: 0 };
 }
 
-function _mergeFarmingOutcomes(outcomes) {
-  const confirmed = [];
-  let operationCount = 0;
-  for (const o of outcomes) {
-    if (o && o.effect === 'confirmed') confirmed.push(...(o.landIds || []));
-    operationCount += (o && o.operationCount) || 0;
-  }
-  const uniq = [...new Set(confirmed.map(id => toNum(id)).filter(id => id > 0))];
-  return {
-    effect: uniq.length > 0 ? 'confirmed' : 'noop',
-    operationCount,
-    landCount: uniq.length,
-    landIds: uniq,
-    operationLimits: [],
-    code: 0,
-  };
-}
-
-/** 一键务农：批量优先，失败逐块回退，recent-help 去重（对齐参考仓库 runFarmingWithFallback）。 */
-async function runFarmingWithFallback(hostGid, ids, stopWhenExpLimit, snapshotKey) {
+/** 一键务农只发送一次；失败保留原始错误。 */
+async function runFarmingBatch(hostGid, ids, stopWhenExpLimit, snapshotKey) {
   const target = _filterRecentHelp(hostGid, ids, snapshotKey);
   if (target.length === 0) return _emptyFarmingOutcome();
   _markRecentHelp(hostGid, target, 'in_flight', _HELP_IN_FLIGHT_TTL_MS, snapshotKey);
@@ -766,23 +675,9 @@ async function runFarmingWithFallback(hostGid, ids, stopWhenExpLimit, snapshotKe
     const unconfirmed = target.filter(landId => !batch.landIds.includes(landId));
     _releaseRecentHelp(hostGid, unconfirmed);
     return batch;
-  } catch (_) {
+  } catch (error) {
     _releaseRecentHelp(hostGid, target);
-    const outcomes = [];
-    for (const landId of target) {
-      _markRecentHelp(hostGid, [landId], 'in_flight', _HELP_IN_FLIGHT_TTL_MS, snapshotKey);
-      try {
-        const outcome = await helpFarming(hostGid, [landId], stopWhenExpLimit);
-        outcomes.push(outcome);
-        if (outcome.effect === 'noop') _markRecentHelp(hostGid, [landId], 'noop', _HELP_RESULT_TTL_MS, snapshotKey);
-        else if (outcome.effect === 'confirmed') _markRecentHelp(hostGid, outcome.landIds, 'confirmed', _HELP_RESULT_TTL_MS, snapshotKey);
-        else _releaseRecentHelp(hostGid, [landId]);
-      } catch (_) {
-        _releaseRecentHelp(hostGid, [landId]);
-      }
-      await sleep(100);
-    }
-    return _mergeFarmingOutcomes(outcomes);
+    throw error;
   }
 }
 
@@ -843,7 +738,7 @@ async function visitFriendForHelp(friend, tally, myGid, accountId, ignoreExpLimi
 
   // 【2026-08-15】完整对齐参考仓库：帮好友用 PlantService.Farming 一键务农
   // （FarmingRequest{land_ids, host_gid, field_3:0, field_4:2}，回包 FarmingReply.results 逐地块确认，
-  //  code=1001057 静默），带 recent-help 去重 + 批量失败逐块回退，不再拆三个独立 RPC。
+  //  code=1001057 静默），带 recent-help 去重，失败直接上报，不再拆三个独立 RPC。
   const allHelpLandIds = [...new Set([...analysis.needWeed, ...analysis.needBug, ...analysis.needWater])];
   if (allHelpLandIds.length > 0) {
     const allowByExp = !checkExpLimit ||
@@ -851,7 +746,7 @@ async function visitFriendForHelp(friend, tally, myGid, accountId, ignoreExpLimi
       (canGetExpByCandidates([0x2713, 0x2712, 0x2711]) && getCanGetHelpExp());
     if (allowByExp) {
       try {
-        const outcome = await runFarmingWithFallback(gid, allHelpLandIds, useExpCheck, _getHelpSnapshotKey(lands));
+        const outcome = await runFarmingBatch(gid, allHelpLandIds, useExpCheck, _getHelpSnapshotKey(lands));
         if (outcome.landCount > 0) {
           const parts = [];
           if (analysis.needWeed.length) parts.push(`草${analysis.needWeed.length}`);
@@ -937,7 +832,7 @@ async function visitFriendForHelp(friend, tally, myGid, accountId, ignoreExpLimi
 
 // ===== Exports =====
 module.exports = {
-  runBatchWithFallback,
+  runBatch,
   doFriendOperation,
   visitFriend,
   visitFriendForSteal,

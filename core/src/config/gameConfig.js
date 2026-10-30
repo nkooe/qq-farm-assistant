@@ -43,8 +43,7 @@ function loadConfigs() {
     try {
         sharedTables = sharedGameTables.loadSharedGameTables();
     } catch (err) {
-        console.warn('[配置] 公共配置读取失败，保留已有缓存:', err.message);
-        return false;
+        throw err;
     }
 
     // 1. 加载等级经验表
@@ -59,7 +58,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载等级经验表 (${  roleLevelConfig.length  } 级)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 RoleLevel.json 失败:', err.message);
+        throw err;
     }
 
     // 2. 加载植物配置
@@ -78,7 +77,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载植物配置 (${  plantConfig.length  } 种)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 Plant.json 失败:', err.message);
+        throw err;
     }
 
     // 3. 加载物品配置
@@ -100,7 +99,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载物品配置 (${  itemInfoConfig.length  } 项)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 ItemInfo.json 失败:', err.message);
+        throw err;
     }
 
     // 4. 加载种子图片映射
@@ -144,7 +143,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载种子图片映射 (${  seedImageMap.size  } 项)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 seed_images_named 失败:', err.message);
+        throw err;
     }
 
     // 5.5 加载 manifest.csv 种子 CDN 映射
@@ -165,7 +164,7 @@ function loadConfigs() {
             console.log(`[配置] 已加载 manifest 种子映射 (${seedCdnFallback.size} 项)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 manifest.csv 失败:', err.message);
+        throw err;
     }
 
     // 5. 加载装扮道具图片映射
@@ -188,7 +187,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载装扮道具图片映射 (${  skinDetailImageMap.size  } 项)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 skinDetail 失败:', err.message);
+        throw err;
     }
 
     // 6. 加载变异效果配置
@@ -207,7 +206,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载变异效果配置 (${  mutantEffectConfig.length  } 种)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 MutantEffect.json 失败:', err.message);
+        throw err;
     }
 
     // 7. 加载宠物配置（DogCfg / FoodCfg / DogSkill）
@@ -223,7 +222,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载宠物配置 (${  dogCfgConfig.length  } 只)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 DogCfg.json 失败:', err.message);
+        throw err;
     }
     try {
         const foodCfgPath = path.join(basePath, 'FoodCfg.json');
@@ -237,7 +236,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载狗粮配置 (${  foodCfgConfig.length  } 种)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 FoodCfg.json 失败:', err.message);
+        throw err;
     }
     try {
         const skillPath = path.join(basePath, 'DogSkill.json');
@@ -251,7 +250,7 @@ function loadConfigs() {
             console.warn(`[配置] 已加载宠物技能配置 (${  dogSkillConfig.length  } 种)`);
         }
     } catch (err) {
-        console.warn('[配置] 加载 DogSkill.json 失败:', err.message);
+        throw err;
     }
     return true;
 }

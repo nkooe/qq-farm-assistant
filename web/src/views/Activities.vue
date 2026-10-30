@@ -38,7 +38,7 @@ function selectAccount(event: Event) {
       <button :aria-current="!calendar ? 'page' : undefined" @click="router.push('/activity')">活动大厅</button>
       <button :aria-current="calendar ? 'page' : undefined" @click="router.push('/solar-calendar')">节令日历</button>
     </nav>
-    <div v-if="!accounts.currentAccount?.connected" class="activity-offline" role="status">{{ accounts.currentAccountId ? '账号尚未连接，请先启动账号，连接成功后会自动加载活动。' : '请先选择或添加一个账号。' }}</div>
+    <div v-if="!accounts.currentAccount?.connected" class="activity-offline" role="status">{{ accounts.currentAccountId ? '账号离线，请先启动。' : '请选择账号。' }}</div>
     <NConfigProvider v-else :theme="app.isDark ? darkTheme : null" :theme-overrides="theme">
       <NNotificationProvider placement="top-right">
         <div :class="{ 'activity-stage': !calendar }">

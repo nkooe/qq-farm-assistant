@@ -30,28 +30,12 @@ function isValidHttpUrl(base) {
     return /^https?:\/\//i.test(base);
 }
 
-/**
- * 从第三方响应中灵活提取登录 code（兼容多种信封结构）。
- * 返回 string 或 null。
- */
 function extractCode(data) {
-    if (!data || typeof data !== 'object' || data.success === false || data.ok === false) return null;
-    const tries = [
-        data.data && data.data.code,
-        data.data && data.data.result && data.data.result.code,
-        data.data && data.data.token,
-        data.code, // 顶层 code：仅接受字符串，避开 {code:0} 这类状态码
-        data.token,
-    ];
-    for (const c of tries) {
-        if (typeof c === 'string' && c.trim().length >= 4) return c.trim();
-    }
-    return null;
+    if (data?.success !== true || typeof data.data?.code !== 'string' || !data.data.code.trim()) return null;
+    return data.data.code.trim();
 }
-
 function extractOpenid(data) {
-    if (!data || typeof data !== 'object') return undefined;
-    return (data.data && data.data.openid) || data.openid;
+    return typeof data?.data?.openid === 'string' ? data.data.openid : undefined;
 }
 
 /**
@@ -96,10 +80,9 @@ async function getThirdpartyYybCode({ apiBase, apiToken, openid, forceRefresh = 
             return { ok: false, error: '第三方接口返回非 JSON' };
         }
 
-        // 兼容多种第三方信封，灵活提取 code
         const code = extractCode(data);
-        if (code) {
-            return { ok: true, code: String(code), openid: extractOpenid(data) || openid };
+        if (code && extractOpenid(data) === openid) {
+            return { ok: true, code, openid };
         }
         return { ok: false, error: '第三方接口未返回有效 Code' };
     } catch (e) {

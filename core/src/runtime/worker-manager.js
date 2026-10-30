@@ -27,7 +27,9 @@ function createWorkerManager(deps) {
         addAccountLog,
         normalizeStatusForPanel,
         buildConfigSnapshotForAccount,
-        resolveAccountProxy = account => require('../services/account-proxy').resolveProxyURL(account),
+        resolveAccountProxy = account => require('../services/account-proxy').resolveProxyURL(account, {
+            userId: account?.userId || '',
+        }),
         refreshQqCode,
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
@@ -36,8 +38,10 @@ function createWorkerManager(deps) {
         onStatusSync,
         onWorkerLog
     } = deps;
+    const getAccountAccessRejection = deps.getAccountAccessRejection || require('../services/account-access').getAccountAccessRejection;
 
     const scheduler = createScheduler('worker_manager');
+    const workerExits = new WeakMap();
     const startingWorkers = new Map();
     const restartingWorkers = new Map();
     const startupResults = new Map();
@@ -74,10 +78,10 @@ function createWorkerManager(deps) {
 
     function builtinYybApi() {
         const store = require('../models/store');
-        const config = store.getGlobalWxConfig?.() || {};
-        const base = String(process.env.YYB_API_URL || config.apiBase || '').trim().replace(/\/+$/, '')
+
+        const base = String(process.env.YYB_API_URL || '').trim().replace(/\/+$/, '')
             .replace(/\/wxapp\/getCode$/i, '').replace(/\/wxapp$/i, '').replace(/\/accounts$/i, '');
-        return { base, key: String(process.env.YYB_API_KEY || config.apiKey || '').trim() };
+        return { base, key: String(process.env.YYB_API_KEY || '').trim() };
     }
 
     function clearCredentialRecoveryIfIdle() {
@@ -92,7 +96,7 @@ function createWorkerManager(deps) {
             if (plan.state !== 'waiting_credentials') continue;
             const eligible = () => {
                 const account = store.getAccounts().accounts.find(item => item.id === accountId);
-                return account && account.autoStart !== false && account.provider !== 'thirdparty'
+                return account && !getAccountAccessRejection(account) && account.autoStart !== false && account.provider !== 'thirdparty'
                     && account.loginType === 'yyb' && account.yybOpenid
                     && resolveReconnectConfig(account).autoReconnect && resolveReconnectConfig(account).reconnectDelayMin > 0 ? account : null;
             };
@@ -105,7 +109,7 @@ function createWorkerManager(deps) {
             if (!api.base || !api.key) continue;
             try {
                 const response = await fetch(`${api.base}/accounts/health?ref=${encodeURIComponent(account.yybOpenid)}`, {
-                    headers: { Authorization: `Bearer ${api.key}` }, signal: AbortSignal.timeout(4000),
+                    headers: { Authorization: `Bearer ${api.key}`, ...require('../services/user-identity').trustedUserHeaders(account.userId) }, signal: AbortSignal.timeout(4000),
                 });
                 const result = await response.json();
                 const health = result?.code === 0 && result.data && typeof result.data === 'object'
@@ -240,8 +244,9 @@ function createWorkerManager(deps) {
      * 根据运行模式创建 Worker
      */
     function createWorker(account) {
-        if (threadMode) return createThreadWorker(account);
-        return createForkWorker(account);
+        const worker = threadMode ? createThreadWorker(account) : createForkWorker(account);
+        workerExits.set(worker, new Promise(resolve => worker.once('exit', resolve)));
+        return worker;
     }
 
     /**
@@ -285,9 +290,9 @@ function createWorkerManager(deps) {
             }
             // 内置 YYB（走 yyb-go）
             const store = require('../models/store');
-            const wxConfig = store.getGlobalWxConfig ? store.getGlobalWxConfig() : null;
-            const yybApiBase = String(process.env.YYB_API_URL || (wxConfig && wxConfig.apiBase) || '').trim();
-            const yybApiKey = String(process.env.YYB_API_KEY || (wxConfig && wxConfig.apiKey) || '').trim();
+            const wxConfig = store.getUserWxConfig(account.userId);
+            const yybApiBase = String(process.env.YYB_API_URL || '').trim();
+            const yybApiKey = String(process.env.YYB_API_KEY || '').trim();
             if (!yybApiBase || !yybApiKey) {
                 const error = '应用宝接口未配置';
                 log('系统', `账号 ${account.name} 应用宝接口未配置，启动已暂停`, {
@@ -304,6 +309,7 @@ function createWorkerManager(deps) {
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${yybApiKey}`,
+                    ...require('../services/user-identity').trustedUserHeaders(account.userId),
                 },
                 body: JSON.stringify({ ref: account.yybOpenid, app_id: appId }),
                 signal: request.signal,
@@ -340,6 +346,14 @@ function createWorkerManager(deps) {
      */
     async function startWorker(account, options = {}) {
         if (!account || !account.id) return false;
+        const stored = require('../models/store').getAccounts().accounts.find(item => item.id === account.id);
+        if (!stored || stored.deleting || stored.autoStart !== true || loginIdentity(stored) !== loginIdentity(account)) return false;
+        const rejection = getAccountAccessRejection(account);
+        if (rejection) {
+            stopWorker(account.id);
+            startupResults.set(account.id, { updatedAt: Date.now(), error: rejection.error, kind: 'cancelled' });
+            return false;
+        }
         if (workers[account.id]) return false;
 
         const pending = startingWorkers.get(account.id);
@@ -365,7 +379,7 @@ function createWorkerManager(deps) {
                 return started;
             } catch (error) {
                 const current = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(account.id));
-                if (current && loginIdentity(current) !== start.identity) start.cancelled = true;
+                if (!current || current.deleting || current.autoStart !== true || loginIdentity(current) !== start.identity) start.cancelled = true;
                 if (!start.cancelled) {
                     startupResults.set(account.id, { updatedAt: Date.now(), error: safeRuntimeError(error.message || '启动失败'), category: error.startupCategory || '', kind: classifyLoginError(error) });
                     log('错误', `账号 ${account.name} 启动失败: ${safeRuntimeError(error.message)}`, { accountId: String(account.id) });
@@ -387,10 +401,10 @@ function createWorkerManager(deps) {
 
     async function performStartWorker(account, start, options) {
         const identity = loginIdentity(account);
-        const storedAtStart = require('../models/store').getAccounts().accounts.some(a => String(a.id) === String(account.id));
         const isCurrent = () => {
             const current = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(account.id));
-            const valid = !storedAtStart || (current && loginIdentity(current) === identity);
+            const valid = !!current && !current.deleting && current.autoStart === true
+                && loginIdentity(current) === identity && !getAccountAccessRejection(current);
             if (!valid) start.cancelled = true;
             return valid;
         };
@@ -424,7 +438,7 @@ function createWorkerManager(deps) {
         if (start.cancelled || workers[account.id] || !isCurrent()) return false;
         if (freshCode !== undefined) {
             account = { ...account, code: freshCode };
-            if (storedAtStart) addOrUpdateAccount({ id: account.id, code: freshCode });
+            addOrUpdateAccount({ id: account.id, code: freshCode });
         }
 
         let proc = null;
@@ -450,7 +464,7 @@ function createWorkerManager(deps) {
             requests: new Map(),
             reqId: 1,
             name: account.name,
-            username: account.username || '',
+            userId: account.userId || '',
             platform: account.platform || 'qq',
             gid: account.gid || '',
             openId: account.openId || account.open_id || '',
@@ -472,7 +486,7 @@ function createWorkerManager(deps) {
         // 发送启动配置
         proc.send({
             type: 'start',
-            config: { ...buildConfigSnapshotForAccount(account.id), code: account.code, platform: account.platform, proxyURL }
+            config: { ...buildConfigSnapshotForAccount(account.id), deviceProtocol: require('../models/store').getUserDeviceProtocol(account.userId), code: account.code, platform: account.platform, proxyURL }
         });
 
         // 发送配置快照
@@ -514,7 +528,6 @@ function createWorkerManager(deps) {
             });
 
             scheduler.clear(`force_kill_${  account.id}`);
-            scheduler.clear(`restart_fallback_${  account.id}`);
 
             // 清理所有未完成的 API 请求
             if (wrk && wrk.requests && wrk.requests.size > 0) {
@@ -546,7 +559,6 @@ function createWorkerManager(deps) {
         const { resetReconnect = true, preserveRestart = false } = opts;
         if (!preserveRestart) {
             restartingWorkers.delete(accountId);
-            scheduler.clear(`restart_fallback_${accountId}`);
         }
         if (resetReconnect) {
             startupResults.delete(accountId);
@@ -569,21 +581,41 @@ function createWorkerManager(deps) {
         // 即使尚未创建 Worker，也要取消启动失败留下的重试计划。
         const wrk = workers[accountId];
         if (!wrk) return;
+        if (wrk.stopping) return;
 
         const targetProc = wrk.process;
         wrk.stopping = true;
 
-        // 发送停止指令
-        wrk.process.send({ type: 'stop' });
-
-        // 1 秒后强制杀死
+        // Arm termination before IPC: a closed channel must not strand a
+        // stopping worker and prevent deletion or access revocation.
         scheduler.setTimeoutTask(`force_kill_${  accountId}`, 1000, () => {
             const current = workers[accountId];
             if (current && current.process === targetProc) {
-                delete workers[accountId];
                 current.process.kill();
             }
         });
+        try {
+            wrk.process.send({ type: 'stop' });
+        } catch (error) {
+            addAccountLog('stop_failed', '停止指令发送失败，等待强制终止', accountId, wrk.name, { reason: safeRuntimeError(error.message) });
+        }
+    }
+
+    async function stopWorkerAndWait(accountId, options = {}) {
+        const pending = startingWorkers.get(accountId);
+        const process = workers[accountId]?.process;
+        const exited = process ? workerExits.get(process) : null;
+        if (process && !exited) throw new Error('账号进程退出监听未初始化');
+        stopWorker(accountId, options);
+        if (pending) await pending.promise;
+        if (exited) {
+            let timer;
+            try {
+                await Promise.race([exited, new Promise((_, reject) => {
+                    timer = setTimeout(() => reject(new Error('账号进程停止超时，删除已中止')), 7000);
+                })]);
+            } finally { clearTimeout(timer); }
+        }
     }
 
     /**
@@ -592,56 +624,22 @@ function createWorkerManager(deps) {
     async function restartWorker(account, options = {}) {
         if (!account) return;
         const accountId = account.id;
+        const store = require('../models/store');
+        const current = store.getAccounts().accounts.find(item => item.id === accountId);
+        if (!current || current.deleting || current.autoStart !== true || loginIdentity(current) !== loginIdentity(account)) return false;
         const wrk = workers[accountId];
 
         // 如果未运行，直接启动
         if (!wrk) return startWorker(account, options);
 
-        const targetProc = wrk.process;
-        let restarted = false;
         const restart = { identity: loginIdentity(account) };
-        const storedAtStart = require('../models/store').getAccounts().accounts.some(a => String(a.id) === String(accountId));
         restartingWorkers.set(accountId, restart);
-
-        const doRestart = async () => {
-            if (restarted || restartingWorkers.get(accountId) !== restart) return;
-            restarted = true;
-            restartingWorkers.delete(accountId);
-            scheduler.clear(`restart_fallback_${  accountId}`);
-            const stored = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(accountId));
-            if (storedAtStart && (!stored || loginIdentity(stored) !== restart.identity)) return;
-
-            const current = workers[accountId];
-            if (!current) return startWorker(account, options);
-            if (current.process !== targetProc) return;
-
-            delete workers[accountId];
-            await startWorker(account, options);
-        };
-
-        const forceKill = () => {
-            const current = workers[accountId];
-            if (!current || current.process !== targetProc) return false;
-            delete workers[accountId];
-            try { current.process.kill(); } catch { }
-            return true;
-        };
-
-        // 如果进程已退出，直接重启
-        if (typeof targetProc.exitCode === 'number' || targetProc.signalCode) {
-            return doRestart();
-        }
-
-        // 先尝试正常停止，再等待退出事件
-        targetProc.once('exit', doRestart);
-        stopWorker(accountId, { preserveRestart: true });
-
-        // 1500ms 超时回退
-        scheduler.setTimeoutTask(`restart_fallback_${  accountId}`, 1500, () => {
-            if (restarted || restartingWorkers.get(accountId) !== restart) return;
-            forceKill();
-            doRestart();
-        });
+        await stopWorkerAndWait(accountId, { preserveRestart: true });
+        if (restartingWorkers.get(accountId) !== restart) return false;
+        restartingWorkers.delete(accountId);
+        const stored = store.getAccounts().accounts.find(a => String(a.id) === String(accountId));
+        if (!stored || stored.deleting || stored.autoStart !== true || loginIdentity(stored) !== restart.identity) return false;
+        return startWorker(stored, options);
     }
 
     /**
@@ -671,7 +669,7 @@ function createWorkerManager(deps) {
                 reconnectDelayMin: 0.5, reconnectMaxAttempts: 3, source: 'qq' };
         }
         const store = require('../models/store');
-        const wxConfig = store.getGlobalWxConfig ? store.getGlobalWxConfig() : null;
+        const wxConfig = store.getUserWxConfig(account.userId);
         const globalCfg = {
             autoReconnect: !!(wxConfig && wxConfig.autoReconnect),
             reconnectDelayMin: wxConfig ? wxConfig.reconnectDelayMin : 5,
@@ -725,7 +723,7 @@ function createWorkerManager(deps) {
             // 取完整账号（含第三方真实 token 与账号级离线重连配置）
             const accountsData = store.getAccounts();
             const account = (accountsData.accounts || []).find(a => a.id === accountId);
-            if (!account) {
+            if (!account || getAccountAccessRejection(account)) {
                 reconnectAttemptsMap.delete(accountId);
                 reconnectPlans.delete(accountId);
                 return;
@@ -794,7 +792,7 @@ function createWorkerManager(deps) {
                     const accountsData2 = store.getAccounts();
                     const account2 = (accountsData2.accounts || []).find(a => a.id === accountId);
                     if (!account2) {
-                        log('系统', `账号 ${name} 已被删除，取消自动重连`);
+                        log('系统', `账号 ${name} 已被删除，取消自动重连`, { accountId: String(accountId) });
                         reconnectAttemptsMap.delete(accountId);
                         return;
                     }
@@ -802,7 +800,7 @@ function createWorkerManager(deps) {
                     const currentConfig = resolveReconnectConfig(account2);
                     if (account2.autoStart === false || !currentConfig.autoReconnect || !(currentConfig.reconnectDelayMin > 0)
                         || nextAttempt > currentConfig.reconnectMaxAttempts) return;
-                    log('系统', `账号 ${name} 开始自动重连 (${nextAttempt}/${cfg.reconnectMaxAttempts})`);
+                    log('系统', `账号 ${name} 开始自动重连 (${nextAttempt}/${cfg.reconnectMaxAttempts})`, { accountId: String(accountId) });
                     const started = await startWorker(account2, { automatic: true });
                     if (started) {
                         // 【2026-08-12 修复】重连成功后：若账号稳定在线 10 分钟未再断线，清零重连计数。
@@ -818,11 +816,11 @@ function createWorkerManager(deps) {
                             accountId, name, { attempt: nextAttempt, maxAttempts: cfg.reconnectMaxAttempts });
                     }
                 } catch (e) {
-                    log('系统', `账号 ${name} 自动重连启动失败: ${e.message}`);
+                    log('系统', `账号 ${name} 自动重连启动失败: ${e.message}`, { accountId: String(accountId) });
                 }
             });
         } catch (e) {
-            log('系统', `账号 ${name} 自动重连逻辑异常: ${e.message}`);
+            log('系统', `账号 ${name} 自动重连逻辑异常: ${e.message}`, { accountId: String(accountId) });
         }
     }
 
@@ -834,6 +832,7 @@ function createWorkerManager(deps) {
         if (!wrk) return;
 
         if (msg.type === 'status_sync') {
+            if (wrk.stopping) return;
             // 状态同步
             wrk.status = normalizeStatusForPanel(msg.data, accountId, wrk.name);
             if (typeof onStatusSync === 'function') {
@@ -874,12 +873,12 @@ function createWorkerManager(deps) {
                 if (!wrk.offlineReminderTriggered && offlineDuration >= 60000) {
                     wrk.offlineReminderTriggered = true;
                     const offlineMinutes = Math.floor(offlineDuration / 60000);
-                    log('系统', `账号 ${  wrk.name  } 已离线 ${  offlineMinutes  } 分钟，发送下线提醒`);
+                    log('系统', `账号 ${  wrk.name  } 已离线 ${  offlineMinutes  } 分钟，发送下线提醒`, { accountId: String(accountId) });
 
                     Promise.resolve(triggerOfflineReminder({
                         accountId,
                         accountName: wrk.name,
-                        username: wrk.username,
+                        userId: wrk.userId,
                         reason: 'offline',
                         offlineMs: offlineDuration
                     })).then(result => {
@@ -893,7 +892,7 @@ function createWorkerManager(deps) {
                 }
 
                 const autoDeleteMs = typeof getOfflineAutoDeleteMs === 'function'
-                    ? getOfflineAutoDeleteMs(wrk.username)
+                    ? getOfflineAutoDeleteMs(wrk.userId)
                     : Infinity;
                 if (!wrk.autoDeleteTriggered && offlineDuration >= autoDeleteMs) {
                     wrk.autoDeleteTriggered = true;
@@ -905,19 +904,13 @@ function createWorkerManager(deps) {
                     triggerOfflineReminder({
                         accountId,
                         accountName: wrk.name,
-                        username: wrk.username,
+                        userId: wrk.userId,
                         reason: 'offline_timeout',
                         offlineMs: offlineDuration
                     });
-                    addAccountLog('offline_delete',
-                        `账号 ${  wrk.name  } 持续离线 ${  offlineMinutes  } 分钟，已自动删除`,
-                        accountId, wrk.name, { reason: 'offline_timeout', offlineMs: offlineDuration });
-                    stopWorker(accountId);
-                    try {
-                        if (typeof deleteAccount === 'function') deleteAccount(accountId);
-                    } catch (err) {
-                        log('错误', `删除离线账号失败: ${  err.message}`);
-                    }
+                    Promise.resolve().then(() => deleteAccount(accountId)).catch(err => {
+                        log('错误', `删除离线账号失败: ${safeRuntimeError(err.message)}`, { accountId: String(accountId) });
+                    });
                 }
             }
         } else if (msg.type === 'log') {
@@ -1059,6 +1052,7 @@ function createWorkerManager(deps) {
     function callWorkerApi(accountId, method, ...args) {
         const wrk = workers[accountId];
         if (!wrk) return Promise.reject(new Error('账号未运行'));
+        if (wrk.stopping) return Promise.reject(Object.assign(new Error('账号正在停止，操作已拒绝'), { status: 409 }));
 
         // 检查最后一个参数是否包含 _timeoutMs
         const lastArg = args.at(-1);
@@ -1094,6 +1088,7 @@ function createWorkerManager(deps) {
         getWorkerRuntime,
         startWorker,
         stopWorker,
+        stopWorkerAndWait,
         restartWorker,
         refreshYybCodeIfNeeded,
         callWorkerApi

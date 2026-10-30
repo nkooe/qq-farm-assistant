@@ -12,7 +12,7 @@ function sanitizeRefreshText(value) {
 function snapshot(job) {
   const account = value => value ? { id: String(value.id), name: String(value.name || value.id) } : null;
   return {
-    id: job.id, username: job.username, requestKey: job.requestKey,
+    id: job.id, userId: job.userId, requestKey: job.requestKey,
     state: job.state, total: job.total, completed: job.completed,
     success: job.success, failed: job.failed, skipped: job.skipped,
     targets: (job.targets || []).map(account),
@@ -30,9 +30,9 @@ function createRefreshJobStore({ filePath = getDataFile('refresh-code-jobs.json'
     load() {
       if (!filePath || !fs.existsSync(filePath)) return [];
       const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      if (data.version !== 1 || !Array.isArray(data.jobs)) throw new Error('刷新任务文件格式无效');
+      if (data.version !== 2 || !Array.isArray(data.jobs)) throw new Error('刷新任务文件格式无效');
       return data.jobs.map((raw) => {
-        if (!raw.id || typeof raw.username !== 'string' || !Array.isArray(raw.targets)
+        if (!raw.id || !require('./user-id').isUserId(raw.userId) || !Array.isArray(raw.targets)
           || !Array.isArray(raw.results) || !['queued', 'running', 'completed', 'failed', 'interrupted'].includes(raw.state)) {
           throw new Error('刷新任务记录无效');
         }
@@ -56,7 +56,7 @@ function createRefreshJobStore({ filePath = getDataFile('refresh-code-jobs.json'
       try {
         const descriptor = fs.openSync(temporaryFile, 'w', 0o600);
         try {
-          fs.writeFileSync(descriptor, JSON.stringify({ version: 1, jobs: jobs.map(snapshot) }), 'utf8');
+          fs.writeFileSync(descriptor, JSON.stringify({ version: 2, jobs: jobs.map(snapshot) }), 'utf8');
           fs.fsyncSync(descriptor);
         } finally {
           fs.closeSync(descriptor);

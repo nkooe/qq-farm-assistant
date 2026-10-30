@@ -5,7 +5,7 @@ const { registerAdminAccountRuntimeRoutes } = require('../src/controllers/admin-
 function harness(access = true) {
   const routes = new Map();
   const runtime = { state: 'starting', connected: false, running: true, error: '' };
-  const account = { id: '1', yybOpenid: 'wx-a' };
+  const account = { userId: 1000, id: '1', yybOpenid: 'wx-a' };
   registerAdminAccountRuntimeRoutes({
     app: { get: (path, handler) => routes.set(`GET ${path}`, handler), post: (path, handler) => routes.set(`POST ${path}`, handler) },
     provider: { getAccounts: () => ({ accounts: [account] }), getAccountRuntime: () => runtime, startAccount: () => true },

@@ -34,7 +34,7 @@ const friendsListCacheTtlSec = defineModel<number>('friendsListCacheTtlSec', { r
           </button>
         </div>
         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-          QQ 新好友接口依赖已知 GID。系统会自动从最近访客补充，进入好友农场明确失败时自动移除失效 GID。
+          最近访客会自动补充好友，失效记录自动移除。
         </p>
       </div>
       <div class="flex shrink-0 gap-2">
@@ -83,7 +83,7 @@ const friendsListCacheTtlSec = defineModel<number>('friendsListCacheTtlSec', { r
     </div>
 
     <div class="mt-3 rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:bg-amber-900/20 dark:text-amber-200">
-      {{ unsyncedGidCount > 0 ? `当前已知 GID 中还有 ${unsyncedGidCount} 个未同步进好友列表，适合先排查是否已失效。` : '当前已知 GID 都已同步进好友列表，可主要依赖最近访客继续补充。' }}
+      {{ unsyncedGidCount > 0 ? `${unsyncedGidCount} 个好友待同步。` : '好友已全部同步。' }}
     </div>
   </div>
 </template>

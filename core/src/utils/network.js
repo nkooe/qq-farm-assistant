@@ -448,10 +448,10 @@ function handleNotify(msg) {
                         // 这里调用 updateStatusLevel 会触发 status.js -> worker.js -> stats.js 的更新流程
                         updateStatusLevel(userState.level, userState.exp);
                     } else if (id === 1 || id === 1001) {
-                        // 金币通知有时只有 delta 没有总量，避免把未提供总量误当 0 覆盖
-                        if (count > 0) {
+                        // 显式零余额也是总量；只有未携带 count 时才应用 delta。
+                        if (hasOwn(item, 'count') && Number.isFinite(count) && count >= 0) {
                             userState.gold = count;
-                        } else if (delta !== 0) {
+                        } else if (!hasOwn(item, 'count') && Number.isFinite(delta) && delta !== 0) {
                             userState.gold = Math.max(0, Number(userState.gold || 0) + delta);
                         }
                         updateStatusGold(userState.gold);
@@ -765,14 +765,8 @@ function connect(code, onLoginSuccess, options = {}) {
     clientSeq = 1;
     serverSeq = 0;
     let userAgent = DEFAULT_USER_AGENT;
-    let deviceProtocol = null;
-    try {
-        const configured = getStoreModule().getDeviceProtocol();
-        deviceProtocol = configured?.enabled ? { ...configured } : null;
-        if (deviceProtocol?.userAgent) userAgent = deviceProtocol.userAgent;
-    } catch (error) {
-        logWarn('系统', `读取设备协议失败: ${error.message}`);
-    }
+    const deviceProtocol = options.deviceProtocol?.enabled ? { ...options.deviceProtocol } : null;
+    if (deviceProtocol?.userAgent) userAgent = deviceProtocol.userAgent;
     const profile = createClientProfile(deviceProtocol);
     const url = new URL(profile.serverUrl);
     for (const [key, value] of Object.entries({ platform: profile.platform, os: profile.os,

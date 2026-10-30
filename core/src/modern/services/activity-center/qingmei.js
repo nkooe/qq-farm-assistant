@@ -141,15 +141,8 @@ function createQingMeiActivityService(deps) {
         return serializeMutation(async () => {
             const bagReply = await getBag();
             const candidates = qingMeiIngredients(bagReply);
-            let requested;
-            if (Array.isArray(input)) {
-                requested = input;
-            }
-            else {
-                const legacyCount = positiveDecimal(input, 'INVALID_QINGMEI_COUNT', 'count');
-                const candidate = candidates.find((item) => BigInt(item.count) >= BigInt(legacyCount));
-                requested = [{ uid: candidate?.uid, count: legacyCount }];
-            }
+            if (!Array.isArray(input)) throw businessError('INVALID_QINGMEI_INGREDIENTS', '青梅配料必须为数组');
+            const requested = input;
             if (requested.length === 0)
                 throw businessError('INVALID_QINGMEI_INGREDIENTS', '至少选择一组青梅');
             const seenUids = new Set();

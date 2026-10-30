@@ -35,7 +35,7 @@ export function useAdminLoginLogs() {
   )
   const loginLogSummary = computed(() => {
     if (loginLogsTotal.value === 0)
-      return '当前没有登录日志，适合先保留现状，等出现真实登录事件后再排查。'
+      return '暂无登录记录。'
     if (loginFailedCount.value > 0)
       return `最近日志里有 ${loginFailedCount.value} 条失败记录，适合优先查看错误类型、来源 IP 和浏览器。`
     return `当前最近 ${loginSuccessCount.value} 条登录均为成功记录，暂未看到明显异常。`

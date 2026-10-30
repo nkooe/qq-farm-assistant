@@ -24,6 +24,7 @@ function registerAdminCurrentUserRoutes({
       res.json({
         ok: true,
         data: {
+          id: currentUser.id,
           username: currentUser.username,
           role: currentUser.role,
           card: currentUser.card,
@@ -40,13 +41,12 @@ function registerAdminCurrentUserRoutes({
   app.post(
     "/api/user/wxlogin-config",
     requireAdminToken,
-    requireAdminRole,
     (req, res) => {
       try {
         const currentUser = requireCurrentUser(req, res);
         if (!currentUser) return;
 
-        const config = store.setGlobalWxConfig(req.body || {});
+        const config = store.setUserWxConfig(req.body || {}, currentUser.id);
         res.json({ ok: true, config });
       } catch (error) {
         res.status(500).json({ ok: false, error: error.message });
@@ -59,7 +59,7 @@ function registerAdminCurrentUserRoutes({
       const currentUser = requireCurrentUser(req, res);
       if (!currentUser) return;
 
-      res.json({ ok: true, config: store.getGlobalWxConfig() });
+      res.json({ ok: true, config: store.getUserWxConfig(currentUser.id) });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
     }
@@ -72,7 +72,7 @@ function registerAdminCurrentUserRoutes({
 
       const config = store.setUserDeviceProtocol(
         req.body || {},
-        currentUser.username,
+        currentUser.id,
       );
       res.json({ ok: true, config });
     } catch (error) {
@@ -87,7 +87,7 @@ function registerAdminCurrentUserRoutes({
 
       res.json({
         ok: true,
-        config: store.getUserDeviceProtocol(currentUser.username),
+        config: store.getUserDeviceProtocol(currentUser.id),
       });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });

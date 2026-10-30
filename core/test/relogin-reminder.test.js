@@ -6,7 +6,7 @@ function harness(config, result = { ok: true }) {
     const messages = []; const sent = [];
     const service = createReloginReminderService({
         store: { getOfflineReminder: () => config },
-        getAccounts: () => ({ accounts: [{ id: '1', username: 'fixture' }] }),
+        getAccounts: () => ({ accounts: [{ id: '1', userId: 1001 }] }),
         log: (tag, message) => messages.push({ tag, message }),
         sendSmtpEmail: async payload => { sent.push(payload); return result; },
         sendPushooMessage: async payload => { sent.push(payload); return result; },

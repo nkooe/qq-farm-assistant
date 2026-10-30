@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch, watchEffect } from 'vue'
 import api from '@/api'
+import { useUserStore } from '@/stores/user'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import AutomationSettingsTab from '@/components/settings/AutomationSettingsTab.vue'
 import StrategySettingsTab from '@/components/settings/StrategySettingsTab.vue'
@@ -33,6 +34,7 @@ const emit = defineEmits<{
   notify: [message: string, type?: 'primary' | 'danger']
 }>()
 
+const userStore = useUserStore()
 const activeSection = ref<'strategy' | 'automation'>('strategy')
 const loading = ref(false)
 const saving = ref(false)
@@ -50,7 +52,7 @@ const bagSeedExcluded = ref<Set<number>>(new Set())
 
 function readBagSeedExcluded(accountId: string | number): Set<number> {
   try {
-    const raw = localStorage.getItem(BAG_SEED_EXCLUDED_PREFIX + String(accountId))
+    const raw = localStorage.getItem(`${BAG_SEED_EXCLUDED_PREFIX}${userStore.userId}:${accountId}`)
     if (!raw)
       return new Set()
     const parsed = JSON.parse(raw)
@@ -68,7 +70,7 @@ function persistBagSeedExcluded() {
   if (!accountId)
     return
   try {
-    const key = BAG_SEED_EXCLUDED_PREFIX + String(accountId)
+    const key = `${BAG_SEED_EXCLUDED_PREFIX}${userStore.userId}:${accountId}`
     if (bagSeedExcluded.value.size === 0)
       localStorage.removeItem(key)
     else
@@ -390,7 +392,7 @@ function dropBagSeed(seedId: number) {
 onMounted(fetchPlan)
 
 // 切换账号时同步该账号的「已跳过」记忆（与首页策略面板共用同一份 localStorage）
-watch(() => props.currentAccountId, (accountId) => {
+watch([() => props.currentAccountId, () => userStore.userId], ([accountId]) => {
   bagSeedExcluded.value = accountId ? readBagSeedExcluded(accountId) : new Set()
 }, { immediate: true })
 

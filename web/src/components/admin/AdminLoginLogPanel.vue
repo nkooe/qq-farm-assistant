@@ -77,7 +77,7 @@ defineEmits<{
     </div>
 
     <div class="rounded-2xl border border-[var(--theme-border)] bg-[var(--theme-glass)] px-4 py-3 text-sm text-gray-600 backdrop-blur-md dark:text-gray-300">
-      登录日志默认展示最近记录，适合快速排查锁定、限流和密码错误等异常。
+      显示最近登录记录。
     </div>
 
     <div class="rounded-2xl border border-[var(--theme-border)] bg-[var(--theme-glass)] px-4 py-3 text-sm shadow-sm backdrop-blur-md">

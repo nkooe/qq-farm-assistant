@@ -89,7 +89,7 @@ function balance(cost: any) {
             部分条件尚未同步，请刷新土地后核对。
           </p>
           <p class="notice">
-            {{ !connected ? '账号未连接，条件待同步。' : info.serverAllowed ? '服务端已允许此操作。' : '服务端尚未允许此操作。' }} 实际条件与费用以游戏服务端为准。
+            {{ !connected ? '账号未连接，条件待同步。' : info.serverAllowed ? '服务端已允许此操作。' : '服务端尚未允许此操作。' }}
           </p>
         </template>
       </template>

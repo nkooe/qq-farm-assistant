@@ -18,3 +18,11 @@ condition = "AND"
 paths = ['''(?:^|/)core/test/admin-auth-roles\.test\.js$''']
 regexTarget = "secret"
 regexes = ['''^Alice-Test-123$''']
+
+[[allowlists]]
+description = "Fixed credentials used only in isolated startup and revocation test fixtures"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''(?:^|/)core/test/(?:admin-startup-isolation|session-revocation)\.test\.js$''']
+regexTarget = "secret"
+regexes = ['''^(?:Fixture-Test-123|Fixture-Before-123|Fixture-After-123)$''']

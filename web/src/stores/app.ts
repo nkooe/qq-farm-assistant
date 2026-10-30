@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref, watch } from 'vue'
 import api from '@/api'
+import { useUserStore } from './user'
 
 const THEME_KEY = 'ui_theme'
 
@@ -39,7 +40,9 @@ export interface ThemeConfig {
 }
 
 export const useAppStore = defineStore('app', () => {
-  const currentTheme = ref<Theme>((localStorage.getItem(THEME_KEY) as Theme) || 'light')
+  const userStore = useUserStore()
+  const themeStorageKey = () => `${THEME_KEY}:${userStore.userId ?? 'public'}`
+  const currentTheme = ref<Theme>((localStorage.getItem(themeStorageKey()) as Theme) || 'light')
   const showThemePanel = ref(false)
   const loginPageConfig = ref<LoginPageConfig>({ ...defaultLoginPageConfig })
   let loginPageConfigPromise: Promise<void> | null = null
@@ -114,7 +117,7 @@ export const useAppStore = defineStore('app', () => {
 
     const t = themes[theme]
     currentTheme.value = theme
-    localStorage.setItem(THEME_KEY, theme)
+    localStorage.setItem(themeStorageKey(), theme)
 
     if (typeof document !== 'undefined' && document.documentElement) {
       document.documentElement.style.setProperty('--theme-bg', t.bg)
@@ -148,6 +151,11 @@ export const useAppStore = defineStore('app', () => {
   watch(currentTheme, (val) => {
     applyTheme(val)
   })
+
+  watch(() => userStore.userId, () => {
+    applyTheme((localStorage.getItem(themeStorageKey()) as Theme) || 'light')
+    if (userStore.userId) void fetchTheme()
+  }, { flush: 'sync' })
 
   applyTheme(currentTheme.value)
 

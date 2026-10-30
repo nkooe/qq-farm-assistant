@@ -199,7 +199,7 @@ function isFastMatureFertilizerMode(mode: string) {
           />
         </div>
         <p class="text-xs text-gray-500 dark:text-gray-400">
-          系统会按照设定的检测间隔定时检测化肥容器剩余量，当低于触发阈值时自动购买。保存设置后会立即检测一次。同时开启两种化肥购买时，优先购买有机化肥。
+          低于阈值自动购买，保存后立即检测。
         </p>
       </div>
 
@@ -281,7 +281,7 @@ function isFastMatureFertilizerMode(mode: string) {
           />
         </div>
         <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          设为 `0` 表示不限制等级；启用好友相关自动化后，系统会按这里的最低等级自动通过好友申请。
+          0 表示不限等级。
         </p>
       </div>
 
@@ -306,7 +306,7 @@ function isFastMatureFertilizerMode(mode: string) {
             </label>
           </div>
           <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-            施肥前会优先按土地类型过滤，仅对命中范围的地块执行施肥策略。
+            仅为所选土地施肥。
           </p>
         </div>
 

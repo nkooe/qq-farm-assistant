@@ -602,7 +602,7 @@ function formatGrowTime(seconds: any) {
                   偷菜黑名单
                 </h3>
                 <p class="text-xs text-gray-500 dark:text-gray-400">
-                  加入黑名单的蔬菜在自动偷菜时会被跳过，但不会影响自己种植
+                  仅跳过偷取，不影响种植。
                 </p>
               </div>
             </div>

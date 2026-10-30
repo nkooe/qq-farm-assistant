@@ -10,6 +10,9 @@ const initialAccounts = [
 
 async function mockApi(page: Page, accounts = initialAccounts) {
   // No request from this fixture may reach a real backend or external service.
+  await page.addInitScript(() => {
+    localStorage.setItem('ui_theme:1000', matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light')
+  })
   await page.route(url => url.pathname.startsWith('/api/'), route => route.fulfill({ json: { ok: true, data: {} } }))
   await page.route('**/api/accounts', route => route.fulfill({ json: { ok: true, data: { accounts } } }))
 }
@@ -18,18 +21,42 @@ async function expectFits(page: Page) {
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 }
 
+test('shared proxy options show only their name without an empty address', async ({ page }) => {
+  await mockApi(page, [])
+  await page.route('**/api/yyb/proxy-profiles', route => route.fulfill({ json: { ok: true, data: [
+    { id: 7, name: '广东', redacted: true },
+    { id: 8, name: '自有代理', host: '192.0.2.8', port: 1080 },
+    { id: 9, name: '仅名称代理' },
+    { id: 10, name: '脱敏优先', redacted: true, host: '192.0.2.10', port: 1080 },
+  ] } }))
+  await page.route('**/api/yyb/qr/create', route => route.fulfill({ json: { ok: true, data: { session_id: 'proxy-display', qr_url: '' } } }))
+  await page.route('**/api/yyb/qr/poll', route => route.fulfill({ json: { ok: true, data: { status: 'pending' } } }))
+  await page.goto('/test/browser/accounts.html')
+  await page.getByRole('button', { name: '添加账号', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '添加账号' })
+  await dialog.getByRole('tab', { name: '应用宝扫码' }).click()
+  await expect(dialog.locator('option[value="7"]')).toHaveText('广东')
+  await expect(dialog.locator('option[value="8"]')).toHaveText('自有代理（192.0.2.8:1080）')
+  await expect(dialog.locator('option[value="9"]')).toHaveText('仅名称代理')
+  await expect(dialog.locator('option[value="10"]')).toHaveText('脱敏优先')
+  await dialog.locator('select').first().selectOption('static')
+  await dialog.locator('select').nth(1).selectOption('7')
+  await expectFits(page)
+  await page.screenshot({ path: test.info().outputPath('shared-proxy-name.png') })
+})
+
 for (const [kind, state, label] of [
-  ['rescan', 'needs_rescan', '需要扫码更新，自动重试已暂停'],
-  ['configuration', 'blocked', '请检查登录配置，自动重试已暂停'],
+  ['rescan', 'needs_rescan', '请扫码，重试已暂停'],
+  ['configuration', 'blocked', '配置异常，重试已暂停'],
 ] as const) {
   test(`login recovery explains ${kind} without claiming retries are exhausted`, async ({ page }) => {
     await mockApi(page, [{ id: 'recovery', name: '登录恢复账号', platform: 'qq', runtimeState: 'failed', running: false, runtimeReconnect: { state, kind, attempt: 0, maxAttempts: 3, nextRetryAt: null }, runtimeLogin: { state: 'failed', kind, startedAt: Date.now(), durationMs: 2000 } }] as any)
     await page.route('**/api/accounts/recovery/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: {} } } }))
     await page.goto('/test/browser/accounts.html')
     await expect(page.getByText(label, { exact: true })).toBeVisible()
-    await page.getByRole('button', { name: /账号健康/ }).click()
-    await expect(page.getByText(kind === 'rescan' ? '登录态需要重新验证，请扫码更新' : '登录配置异常，请检查设置', { exact: true })).toBeVisible()
-    await expect(page.getByText(/自动重连已达上限/)).toHaveCount(0)
+    await page.getByRole('button', { name: /状态检查/ }).click()
+    await expect(page.getByText(kind === 'rescan' ? '登录失效，请扫码' : '登录配置异常', { exact: true })).toBeVisible()
+    await expect(page.getByText(/重连已达上限/)).toHaveCount(0)
     await expectFits(page)
   })
 }
@@ -40,18 +67,18 @@ test('busy recovery counts down without spending attempts and follows fresh acco
   await mockApi(page, [account])
   await page.route('**/api/accounts/queue/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: { login: { state: 'failed', kind: 'rescan' } } } } }))
   await page.goto('/test/browser/accounts.html')
-  const countdown = page.getByText(/取码服务忙碌，约 \d+ 秒后重试，不计入失败次数/)
+  const countdown = page.getByText(/服务繁忙，\d+ 秒后重试/)
   await expect(countdown).toBeVisible()
   const before = await countdown.textContent()
   await page.clock.runFor(2000)
   expect(await countdown.textContent()).not.toBe(before)
-  await page.getByRole('button', { name: /账号健康/ }).click()
-  await expect(page.getByText('等待取码：正在排队，尚未开始登录', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: /状态检查/ }).click()
+  await expect(page.getByText('排队取码中', { exact: true })).toBeVisible()
   account.runtimeLogin = { ...account.runtimeLogin, state: 'success', durationMs: 2100, lastSuccessAt: Date.now() }
   await page.route('**/api/accounts', route => route.fulfill({ json: { ok: true, data: { accounts: [account] } } }))
   await page.getByTestId('force-fetch').click()
-  await expect(page.getByText('最近取码成功，用时 3 秒', { exact: true })).toBeVisible()
-  await expect(page.getByText('最近取码成功：', { exact: false })).toBeVisible()
+  await expect(page.getByText('取码成功，用时 3 秒', { exact: true })).toBeVisible()
+  await expect(page.getByText('最近取码：', { exact: false })).toBeVisible()
   await expectFits(page)
   await page.screenshot({ path: test.info().outputPath('login-recovery-state.png') })
 })
@@ -94,7 +121,7 @@ test('offline dashboard QQ scan updates its bound account using the original pro
   await expect(dialog.getByLabel('QQ 连接方式')).toHaveValue('7')
   await expect(dialog.getByAltText('QQ 登录二维码')).toBeVisible()
   await expect(dialog.getByLabel('账号备注（可选）')).toHaveCount(0)
-  await expect(dialog.getByRole('status')).toContainText('已更新原账号 Code', { timeout: 10000 })
+  await expect(dialog.getByRole('status')).toContainText('已更新原账号，正在连接', { timeout: 10000 })
   expect(choices).toEqual([{ proxyMode: 'static', proxyProfileId: 7, targetAccountId: '10' }])
   expect(imported).toEqual([{ name: '', targetAccountId: '10' }])
   await expect(dialog.getByRole('button', { name: '再扫一个账号' })).toHaveCount(0)
@@ -113,11 +140,58 @@ for (const saved of [true, false]) {
     await mockApi(page, [{ id: 'qq-health', name: 'QQ 自动取码', platform: 'qq', loginType: 'manual', runtimeState: 'stopped', running: false, qqAutoCodeAvailable: saved }] as any)
     await page.route('**/api/accounts/qq-health/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: { state: 'stopped' } } } }))
     await page.goto('/test/browser/accounts.html')
-    await page.getByRole('button', { name: /账号健康/ }).click()
-    await expect(page.getByText(saved ? 'QQ 自动取码：已保存登录态，登录失效后按需重新获取 Code' : 'QQ 自动取码：尚未保存登录态，请使用 QQ 扫码更新一次', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: /状态检查/ }).click()
+    await expect(page.getByText(saved ? '登录态：已保存' : '登录态：未保存', { exact: true })).toBeVisible()
+    await expect(page.getByText('登录失效请重新扫码。', { exact: true })).toHaveCount(0)
     await expect(page.getByText('凭据续期详情仅支持内置应用宝账号', { exact: false })).toHaveCount(0)
     await expectFits(page)
     await page.screenshot({ path: test.info().outputPath(`qq-native-health-${saved}.png`) })
+  })
+}
+
+for (const retainLoginHistory of [true, false]) {
+  test(`QQ connection recovery hides past failures even when health is stale: ${retainLoginHistory}`, async ({ page }) => {
+    const failedLogin = { source: 'qq', state: 'failed', kind: 'rescan', durationMs: 3800 }
+    const failedPlan = { state: 'needs_rescan', attempt: 0, maxAttempts: 3, nextRetryAt: null }
+    let account: any = { id: 'qq-recovered', name: '恢复账号', platform: 'qq', runtimeState: 'failed', connected: false, running: false, qqAutoCodeAvailable: true, runtimeError: '旧登录错误', runtimeLogin: failedLogin, runtimeReconnect: failedPlan }
+    await mockApi(page, [account])
+    await page.route('**/api/accounts', route => route.fulfill({ json: { ok: true, data: { accounts: [account] } } }))
+    await page.route('**/api/accounts/qq-recovered/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: { state: 'failed', error: '旧健康错误', login: failedLogin, reconnect: failedPlan } } } }))
+    await page.goto('/test/browser/accounts.html')
+    await page.getByRole('button', { name: /状态检查/ }).click()
+    expect(await page.locator('html').evaluate(el => el.classList.contains('dark'))).toBe(test.info().project.use.colorScheme === 'dark')
+    await expect(page.getByText('登录失效，请扫码', { exact: true })).toBeVisible()
+    await expect(page.getByText('请扫码，重试已暂停', { exact: true })).toBeVisible()
+    await expect(page.getByText('登录态：已保存', { exact: true })).toBeVisible()
+
+    account = { ...account, runtimeState: 'online', connected: true, running: true, runtimeError: '', runtimeReconnect: null }
+    if (!retainLoginHistory) {
+      delete account.runtimeLogin
+      delete account.runtimeReconnect
+    }
+    await page.getByTestId('force-fetch').click()
+    await expect(page.getByRole('button', { name: /状态检查 · 在线/ })).toBeVisible()
+    await expect(page.getByText('登录失效，请扫码', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('请扫码，重试已暂停', { exact: true })).toHaveCount(0)
+    await expect(page.getByText(/旧登录错误|旧健康错误/)).toHaveCount(0)
+    await page.getByRole('button', { name: '刷新', exact: true }).click()
+    await expect(page.getByRole('button', { name: /状态检查 · 在线/ })).toBeVisible()
+    await expect(page.getByText(/登录失效|重试已暂停|旧健康错误/)).toHaveCount(0)
+    await expect(page.getByText('自动取码：已启用', { exact: true })).toHaveCount(0)
+    await expectFits(page)
+    await page.screenshot({ path: test.info().outputPath(`qq-recovered-${retainLoginHistory}.png`) })
+
+    account = { ...account, runtimeState: 'reconnecting', connected: false, runtimeLogin: { state: 'requesting' }, runtimeReconnect: { state: 'scheduled', attempt: 1, maxAttempts: 3, nextRetryAt: Date.now() + 30000 } }
+    await page.getByTestId('force-fetch').click()
+    await expect(page.getByRole('button', { name: /状态检查 · 等待重连/ })).toBeVisible()
+    await expect(page.getByText('正在取码', { exact: true })).toBeVisible()
+    await expect(page.locator('.h-2.w-2.bg-green-500')).toHaveCount(0)
+
+    account = { ...account, runtimeState: 'failed', running: false, runtimeError: '', runtimeLogin: failedLogin, runtimeReconnect: failedPlan }
+    await page.getByTestId('force-fetch').click()
+    await expect(page.getByRole('button', { name: /状态检查 · 连接失败/ })).toBeVisible()
+    await expect(page.getByText('登录失效，请扫码', { exact: true })).toBeVisible()
+    await expect(page.getByText('请扫码，重试已暂停', { exact: true })).toBeVisible()
   })
 }
 
@@ -219,7 +293,7 @@ test('QQ scan imports its real returned Code once and displays a copyable result
   await dialog.getByRole('tab', { name: 'QQ 扫码登录' }).click()
   await expect(dialog.getByAltText('QQ 登录二维码')).toBeVisible()
   await expect(dialog.getByRole('status')).toContainText('请用手机 QQ 扫码')
-  await expect(dialog.getByRole('status')).toContainText('账号已添加并请求启动', { timeout: 10000 })
+  await expect(dialog.getByRole('status')).toContainText('账号已添加，正在连接', { timeout: 10000 })
   expect(imported).toHaveLength(1)
   expect(imported[0]).toEqual({ name: '' })
   await expect(dialog.getByRole('button', { name: '复制', exact: true })).toBeVisible()
@@ -254,7 +328,7 @@ test('QQ proxy selection recreates the scan and same-account import reports an u
   await dialog.getByRole('tab', { name: 'QQ 扫码登录' }).click()
   await expect(dialog.getByRole('status')).toHaveText('请扫码')
   await dialog.getByLabel('QQ 连接方式').selectOption('7')
-  await expect(dialog.getByRole('status')).toContainText('已更新原账号 Code')
+  await expect(dialog.getByRole('status')).toContainText('已更新原账号，正在连接')
   expect(choices).toEqual([{ proxyMode: 'direct', proxyProfileId: null }, { proxyMode: 'static', proxyProfileId: 7 }])
   await expect(dialog.locator('code')).toHaveText('fixture_FRESH_CODE_12345678')
   await expectFits(page)
@@ -274,7 +348,7 @@ test('QQ proxy inventory failure pauses scan creation until retry', async ({ pag
   const dialog = page.getByRole('dialog', { name: '添加账号' })
   await dialog.getByRole('tab', { name: 'QQ 扫码登录' }).click()
   await expect(dialog.getByRole('alert')).toHaveText('代理服务暂时不可用')
-  await expect(dialog.getByRole('button', { name: '重试读取代理配置' })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: '重试加载' })).toBeVisible()
   expect(creates).toBe(0)
 })
 
@@ -439,8 +513,8 @@ test('reconnecting accounts show their retry plan, stay out of cleanup and can c
     return route.fulfill({ json: { ok: true } })
   })
   await page.goto('/test/browser/accounts.html')
-  await expect(page.getByText('账号健康 · 等待自动重连')).toBeVisible()
-  await expect(page.getByText(/第 2\/3 次重连，约 \d+ 秒后执行/)).toBeVisible()
+  await expect(page.getByText('状态检查 · 等待重连')).toBeVisible()
+  await expect(page.getByText(/重连 2\/3，\d+ 秒后重试/)).toBeVisible()
   await page.getByRole('button', { name: /清理\s*\(2\)/ }).click()
   const dialog = page.getByRole('dialog', { name: '一键清理已停止账号' })
   await expect(dialog).not.toContainText('等待重连账号')

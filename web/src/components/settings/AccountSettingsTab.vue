@@ -234,7 +234,7 @@ function refreshStateLabel(job: RefreshWxCodesJob | null, loading: boolean, warn
       <p v-if="refreshWxCodesPollWarning" class="mt-3 flex items-start gap-2 text-sm text-amber-800 dark:text-amber-300" role="status">
         <span class="i-carbon-warning-alt mt-0.5 shrink-0" aria-hidden="true" />
         <span>
-          {{ refreshWxCodesPollWarning }}<template v-if="refreshWxCodesPollWarning.includes('登录状态')">。重新登录后回到设置页，将继续查询同一任务。</template><template v-else-if="refreshWxCodesPollWarning.includes('提交结果未确认')">。系统会使用同一请求号重试，不会重复发起刷新。</template><template v-else>。任务继续由服务端处理，页面会自动重试查询进度。</template>
+          {{ refreshWxCodesPollWarning }}
         </span>
       </p>
     </section>
@@ -299,7 +299,7 @@ function refreshStateLabel(job: RefreshWxCodesJob | null, loading: boolean, warn
           </div>
           <div class="flex items-center justify-end gap-2 sm:flex-col sm:items-end">
             <span class="flex items-center gap-1 text-xs text-gray-500 sm:hidden">
-              <div class="h-2 w-2 rounded-full" :class="acc.running ? 'bg-green-500' : 'bg-gray-300'" />
+              <div class="h-2 w-2 rounded-full" :class="acc.connected ? 'bg-green-500' : 'bg-gray-300'" />
               {{ runtimeLabel(acc) }}
             </span>
             <BaseButton
@@ -322,7 +322,7 @@ function refreshStateLabel(job: RefreshWxCodesJob | null, loading: boolean, warn
         <div class="mt-3 flex items-center justify-between border-t border-gray-100 pt-3 sm:mt-4 dark:border-gray-700 sm:pt-4">
           <div class="hidden items-center gap-2 text-sm text-gray-500 sm:flex">
             <span class="flex items-center gap-1">
-              <div class="h-2 w-2 rounded-full" :class="acc.running ? 'bg-green-500' : 'bg-gray-300'" />
+              <div class="h-2 w-2 rounded-full" :class="acc.connected ? 'bg-green-500' : 'bg-gray-300'" />
               {{ runtimeLabel(acc) }}
             </span>
           </div>

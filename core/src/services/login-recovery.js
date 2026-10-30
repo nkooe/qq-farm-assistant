@@ -18,7 +18,7 @@ function classifyLoginError(error) {
 }
 
 function loginIdentity(account) {
-  return JSON.stringify([account.id, account.username, account.platform, account.loginType,
+  return JSON.stringify([account.id, account.userId, account.platform, account.loginType,
     account.uin, account.qq, account.wxid, account.yybOpenid, account.qqLoginProfile,
     account.proxyMode, account.proxyProfileId, account.provider, account.thirdparty, account.code]);
 }

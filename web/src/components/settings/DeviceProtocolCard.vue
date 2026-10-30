@@ -51,7 +51,7 @@ const selectedPreset = defineModel<string | number>('selectedPreset', { required
           label="启用自定义设备协议"
         />
         <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-          启用后会使用这里配置的设备参数发起登录。修改后建议重新登录相关账号。
+          重新登录后生效。
         </p>
       </div>
 
@@ -124,7 +124,7 @@ const selectedPreset = defineModel<string | number>('selectedPreset', { required
       </div>
 
       <p class="text-xs text-gray-500 dark:text-gray-400">
-        这组配置按当前用户保存，不区分单个账号。仅在登录兼容性或风控需要时启用即可。
+        当前用户的账号共用。
       </p>
 
       <div class="flex justify-end border-t pt-3 dark:border-gray-700">

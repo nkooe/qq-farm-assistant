@@ -1,23 +1,16 @@
-// Adapted from liyangpengs/qq-farm-bot 80488ec (ISC); see docs/upstream-sync-20261022.md.
-"use strict";
-Object.defineProperty(exports, "__esModule", { value: true });
 const fs = require('node:fs');
 const path = require('node:path');
-const { randomUUID } = require('node:crypto');
 const { readJsonFileStrict, writeTextFileAtomic, storageError } = require('../../services/json-db');
-const FORMAT_VERSION = 1;
+const { parseUserId } = require('../user-id');
+const FORMAT_VERSION = 3;
 const FORMAT_FILE = '.format.json';
+
 function assertObject(value, file) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-        throw storageError('读取', file, new Error('Expected a JSON object'));
-    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw storageError('读取', file, new Error('Expected a JSON object'));
     return value;
 }
 function accountFilename(id) {
-    if (!id || id !== id.trim())
-        throw new Error('Invalid account ID');
-    // Numeric IDs stay readable. Hex encoding avoids traversal, Windows reserved
-    // names, and case-insensitive filename collisions for other legacy IDs.
+    if (typeof id !== 'string' || !id || id !== id.trim()) throw new Error('Invalid account ID');
     const name = /^\d+$/.test(id) ? id : `id-${Buffer.from(id, 'utf8').toString('hex')}`;
     return `${name}.json`;
 }
@@ -25,179 +18,71 @@ function accountIdFromFilename(filename) {
     const name = filename.slice(0, -5);
     const id = /^\d+$/.test(name) ? name
         : /^id-(?:[0-9a-f]{2})+$/.test(name) ? Buffer.from(name.slice(3), 'hex').toString('utf8') : '';
-    if (accountFilename(id) !== filename)
-        throw new Error('Invalid account filename');
+    if (accountFilename(id) !== filename) throw new Error('Invalid account filename');
     return id;
 }
-/** Only account settings use this store; spending ledgers and resource holds do not. */
 function createConfigStorage(storeFile) {
     const accountDir = path.join(path.dirname(storeFile), 'account-configs');
     const accountJson = new Map();
-    let split = false;
-    let globalDocument = {};
-    let globalJson = null;
-    function writeDocument(file, value) {
-        try {
-            const json = JSON.stringify(value, null, 2);
-            writeTextFileAtomic(file, json);
-            return json;
-        }
-        catch (error) {
-            throw storageError('保存', file, error);
-        }
+    let globalJson;
+    function writeDocument(file, document) {
+        try { const json = JSON.stringify(document, null, 2); writeTextFileAtomic(file, json); return json; }
+        catch (error) { throw storageError('保存', file, error); }
     }
-    function readSplit() {
-        const formatFile = path.join(accountDir, FORMAT_FILE);
-        const format = readJsonFileStrict(formatFile);
-        if (format?.version !== FORMAT_VERSION)
-            throw storageError('读取', formatFile, new Error('Unsupported config format'));
-        const configs = Object.create(null);
-        const serialized = new Map();
-        for (const entry of fs.readdirSync(accountDir, { withFileTypes: true })) {
-            if (entry.name === FORMAT_FILE || !entry.name.endsWith('.json'))
-                continue;
-            const file = path.join(accountDir, entry.name);
-            let id;
-            try {
-                id = accountIdFromFilename(entry.name);
-            }
-            catch {
-                // Copies such as "1 - 副本.json" can never be an account document.
-                // Skipping them keeps one stray file from stopping every account.
-                console.warn('[系统] 跳过无法识别的账号配置文件:', file);
-                continue;
-            }
-            if (!entry.isFile())
-                throw storageError('读取', file, new Error('Expected a regular file'));
-            configs[id] = assertObject(readJsonFileStrict(file), file);
-            serialized.set(id, JSON.stringify(configs[id], null, 2));
-        }
-        accountJson.clear();
-        for (const [id, json] of serialized)
-            accountJson.set(id, json);
-        split = true;
-        return configs;
-    }
-    function saveGlobal(data) {
-        const { accountConfigs: _accounts, accountConfigStorageVersion: _version, ...document } = data;
-        if (split)
-            document.accountConfigStorageVersion = FORMAT_VERSION;
-        let json;
+    function load() {
         try {
-            json = JSON.stringify(document, null, 2);
-        }
-        catch (error) {
-            throw storageError('保存', storeFile, error);
-        }
-        if (json !== globalJson) {
-            try {
-                writeTextFileAtomic(storeFile, json);
+            if (!fs.existsSync(storeFile)) {
+                if (fs.existsSync(accountDir) || process.env.FARM_ACCOUNT_ID) throw new Error('Incomplete config storage; initialize new test data');
+                fs.mkdirSync(accountDir, { recursive: true });
+                writeDocument(path.join(accountDir, FORMAT_FILE), { version: FORMAT_VERSION });
+                writeDocument(storeFile, { accountConfigStorageVersion: FORMAT_VERSION });
             }
-            catch (error) {
-                throw storageError('保存', storeFile, error);
+            const data = assertObject(readJsonFileStrict(storeFile), storeFile);
+            if (data.accountConfigStorageVersion !== FORMAT_VERSION || ['accountConfigs', 'captureConfig', 'ui', 'offlineReminder', 'globalWxConfig', 'deviceProtocol', 'adminPasswordHash'].some(field => Object.hasOwn(data, field))) {
+                throw new Error('Unsupported config format; initialize new test data');
             }
-        }
-        globalDocument = document;
-        globalJson = json;
-    }
-    function publishSplit(configs, backup) {
-        const stage = `${accountDir}.migrating-${randomUUID()}`;
-        try {
-            for (const [id, config] of Object.entries(configs))
-                assertObject(config, path.join(stage, accountFilename(id)));
-            // Failed attempts leave the original source intact. A staged directory
-            // is never loaded; only its final atomic rename publishes the format.
-            if (backup)
-                fs.copyFileSync(storeFile, `${storeFile}.${randomUUID()}.bak`, fs.constants.COPYFILE_EXCL);
-            fs.mkdirSync(stage, { recursive: true });
-            for (const [id, config] of Object.entries(configs)) {
-                const file = path.join(stage, accountFilename(id));
-                assertObject(config, file);
-                const json = writeDocument(file, config);
-                if (JSON.stringify(readJsonFileStrict(file), null, 2) !== json)
-                    throw new Error('Migration verification failed');
+            for (const reminder of Object.values(data.userOfflineReminders || {})) {
+                if (reminder && Object.hasOwn(reminder, 'reloginUrlMode')) throw new Error('Unsupported notification format');
             }
-            writeDocument(path.join(stage, FORMAT_FILE), { version: FORMAT_VERSION });
-            try {
-                fs.renameSync(stage, accountDir);
-            }
-            catch (error) {
-                // Another startup may have finished migration first. Never replace
-                // that directory with an older staged copy.
-                if (!fs.existsSync(accountDir))
-                    throw error;
-            }
-            return readSplit();
-        }
-        catch (error) {
-            throw storageError('迁移', storeFile, error);
-        }
-    }
-    function load(options = {}) {
-        try {
-            const data = assertObject(readJsonFileStrict(storeFile, () => ({})), storeFile);
-            globalDocument = data;
-            globalJson = JSON.stringify(data, null, 2);
-            accountJson.clear();
-            split = false;
-            const version = data.accountConfigStorageVersion;
-            if (version !== undefined && version !== FORMAT_VERSION)
-                throw new Error('Unsupported config format');
-            const legacy = data.accountConfigs === undefined ? {} : assertObject(data.accountConfigs, storeFile);
-            let configs = legacy;
-            if (fs.existsSync(accountDir)) {
-                configs = readSplit();
-                // Leftover aggregate settings (failed cleanup, or edits made by an
-                // older version) are about to be dropped; keep a copy first.
-                if (options.migrate !== false && Object.keys(legacy).length) {
-                    fs.copyFileSync(storeFile, `${storeFile}.${randomUUID()}.bak`, fs.constants.COPYFILE_EXCL);
+            for (const field of ['userOfflineReminders', 'userDeviceProtocols', 'userDefaultAccountPlans', 'announcementReadRecords', 'userUis', 'userWxConfigs']) {
+                if (data[field] !== undefined) {
+                    assertObject(data[field], storeFile);
+                    Object.keys(data[field]).forEach(parseUserId);
                 }
             }
-            else if (version !== undefined)
-                throw new Error('Missing account-configs directory');
-            else if (options.migrate !== false && Object.keys(legacy).length)
-                configs = publishSplit(legacy, true);
-            if (split && options.migrate !== false)
-                saveGlobal(data);
+            const formatFile = path.join(accountDir, FORMAT_FILE);
+            if (readJsonFileStrict(formatFile)?.version !== FORMAT_VERSION) throw new Error('Unsupported account config format');
+            const configs = Object.create(null);
+            accountJson.clear();
+            for (const entry of fs.readdirSync(accountDir, { withFileTypes: true })) {
+                if (entry.name === FORMAT_FILE) continue;
+                if (!entry.isFile() || !entry.name.endsWith('.json')) throw new Error(`Unexpected account document: ${entry.name}`);
+                const id = accountIdFromFilename(entry.name);
+                const file = path.join(accountDir, entry.name);
+                configs[id] = assertObject(readJsonFileStrict(file), file);
+                accountJson.set(id, JSON.stringify(configs[id], null, 2));
+            }
+            globalJson = JSON.stringify(data, null, 2);
             return { ...data, accountConfigs: configs };
-        }
-        catch (error) {
-            throw storageError('读取', storeFile, error);
-        }
+        } catch (error) { throw storageError('读取', storeFile, error); }
+    }
+    function saveGlobal(data) {
+        const { accountConfigs: _accounts, ...document } = data;
+        document.accountConfigStorageVersion = FORMAT_VERSION;
+        const json = JSON.stringify(document, null, 2);
+        if (json !== globalJson) globalJson = writeDocument(storeFile, document);
     }
     function saveAccount(id, config) {
-        let file = storeFile;
-        try {
-            file = path.join(accountDir, accountFilename(id));
-            assertObject(config, file);
-            const json = JSON.stringify(config, null, 2);
-            if (!split) {
-                publishSplit({ [id]: config }, false);
-            }
-            if (globalDocument.accountConfigStorageVersion !== FORMAT_VERSION)
-                saveGlobal(globalDocument);
-            if (accountJson.get(id) !== json) {
-                writeTextFileAtomic(file, json);
-                accountJson.set(id, json);
-            }
-        }
-        catch (error) {
-            throw storageError('保存', file, error);
-        }
+        const file = path.join(accountDir, accountFilename(id));
+        assertObject(config, file);
+        const json = JSON.stringify(config, null, 2);
+        if (accountJson.get(id) !== json) accountJson.set(id, writeDocument(file, config));
     }
     function removeAccount(id) {
-        if (!split)
-            return;
         const file = path.join(accountDir, accountFilename(id));
-        try {
-            fs.unlinkSync(file);
-        }
-        catch (error) {
-            if (error.code !== 'ENOENT')
-                throw storageError('保存', file, error);
-        }
+        if (fs.existsSync(file)) fs.unlinkSync(file);
         accountJson.delete(id);
     }
     return { load, saveGlobal, saveAccount, removeAccount };
 }
-module.exports = { createConfigStorage };
+module.exports = { createConfigStorage, FORMAT_VERSION };

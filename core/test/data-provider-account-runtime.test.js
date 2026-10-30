@@ -15,16 +15,19 @@ function harness(initialAccounts, options = {}) {
     },
   };
   const provider = createDataProvider({
+    getAccountAccessRejection: options.getAccountAccessRejection || (() => null),
     workers,
     globalLogs: [],
     accountLogs: [],
     store,
-    getAccounts: () => ({ accounts }),
+    getAccounts: () => ({ accounts: accounts.map(account => ({ ...account })) }),
     startWorker: account => calls.push(['start', account.id]),
     stopWorker: id => calls.push(['stop', id]),
     restartWorker: async (account, restartOptions) => calls.push(['restart', account.id, restartOptions]),
     refreshYybCodeIfNeeded: options.refreshYybCodeIfNeeded,
     refreshAccountCode: options.refreshAccountCode,
+    ...(options.startWorker ? { startWorker: options.startWorker } : {}),
+    scheduleAutoCodeRefresh: () => {},
   });
   return { accounts, calls, provider };
 }
@@ -106,4 +109,16 @@ test('manual YYB refresh cannot undo a user stop or restore a deleted account', 
   finish({ ok: true, code: 'late' });
   assert.equal((await pending).ok, false); assert.equal(h.accounts[0].code, 'old');
   assert.equal(h.calls.some(call => call[0] === 'restart'), false);
+});
+
+test('user resume rereads stop, deletion and credential changes after awaiting another account', async () => {
+  let finish; const calls = [];
+  const h = harness([1, 2, 3, 4].map(id => ({ id: String(id), userId: 1001, autoStart: true, code: `old-${id}` })), {
+    startWorker: account => { calls.push({ ...account }); if (account.id === '1') return new Promise(resolve => { finish = resolve; }); },
+  });
+  const resume = h.provider.resumeUser(1001); await new Promise(resolve => setImmediate(resolve));
+  h.accounts[1].autoStart = false; h.accounts.splice(2, 1); h.accounts[2].code = 'fresh-4';
+  finish(); await resume;
+  assert.deepEqual(calls.map(account => account.id), ['1', '4']);
+  assert.equal(calls[1].code, 'fresh-4');
 });

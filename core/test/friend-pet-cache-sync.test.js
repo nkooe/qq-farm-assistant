@@ -23,18 +23,18 @@ test('pet cache isolates accounts, corrects old guard/no-dog results and expires
     cache.flushAll(); assert.deepEqual(disk.get('account:a').entries, {});
 });
 
-test('same-day legacy guards migrate; old-day entries and malformed pet data remain unknown', () => {
+test('legacy guards are not imported; old-day entries and malformed pet data remain unknown', () => {
     const clock = new Date(2026, 9, 19, 12).getTime(), writes = [];
     const cache = createFriendPetCache({ now: () => clock, file: id => `new:${id}`,
         read: file => file === 'new:old' ? { version: 1, date: dateKey(clock - 86400000), entries: { 9: { dogId: 90021, checkedAt: clock } } }
             : file === 'new:bad' ? { version: 1, date: dateKey(clock), entries: { 9: { dogId: -2, checkedAt: clock }, 10: { dogId: 90021 } } }
                 : file.startsWith('new:') ? null : { updatedAt: clock, dogInfo: { 9: { dogId: 90021 } } },
         write: (file, value) => writes.push({ file, value }) });
-    assert.equal(cache.getState(9, 'legacy'), 'protect');
+    assert.equal(cache.getState(9, 'legacy'), 'unknown');
     assert.equal(cache.getState(9, 'old'), 'unknown');
     assert.equal(cache.getState(9, 'bad'), 'unknown');
     assert.equal(cache.getState(10, 'bad'), 'unknown');
-    cache.flushAll(); assert.equal(writes.find(w => w.file === 'new:legacy').value.entries[9].dogId, 90021);
+    cache.flushAll(); assert.deepEqual(writes.find(w => w.file === 'new:legacy').value.entries, {});
 });
 
 function harness(overrides = {}) {

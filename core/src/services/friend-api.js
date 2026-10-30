@@ -535,89 +535,15 @@ async function fetchQqFriendsByKnownGids() {
   return dedupeFriendsByGid(allFriends);
 }
 
-/** Fetch QQ friends via legacy methods: SyncAll first, then GetAll as fallback. */
-async function fetchQqFriendsByLegacyMethod() {
-  const errors = [];
-
-  // Try SyncAll
-  try {
-    const SyncAllReq = types.SyncAllRequest || types.SyncAllFriendsRequest;
-    const SyncAllRep = types.SyncAllReply || types.SyncAllFriendsReply;
-    if (!SyncAllReq || !SyncAllRep) throw new Error('SyncAll 接口类型未加载');
-
-    const payload = SyncAllReq.encode(SyncAllReq.create({ open_ids: [] })).finish();
-    const { body } = await sendMsgAsync(
-      'gamepb.friendpb.FriendService',
-      'SyncAll',
-      payload
-    );
-    return extractReplyFriends(SyncAllRep.decode(body));
-  } catch (err) {
-    errors.push(`SyncAll: ${err.message}`);
-  }
-
-  // Fallback: GetAll
-  try {
-    if (!types.GetAllFriendsRequest || !types.GetAllFriendsReply) {
-      throw new Error('GetAll 接口类型未加载');
-    }
-    const payload = types.GetAllFriendsRequest.encode(
-      types.GetAllFriendsRequest.create({})
-    ).finish();
-    const { body } = await sendMsgAsync(
-      'gamepb.friendpb.FriendService',
-      'GetAll',
-      payload
-    );
-    return extractReplyFriends(types.GetAllFriendsReply.decode(body));
-  } catch (err) {
-    errors.push(`GetAll: ${err.message}`);
-  }
-
-  throw new Error(errors.join(' | '));
-}
-
-/**
- * Get all friends. For QQ platform, try GetGameFriends first (with known GIDs),
- * then fall back to legacy methods. For WeChat, use GetAll directly.
- */
 async function getAllFriendsInternal(forceRefresh = false) {
   const isQQ = CONFIG.platform === 'qq';
 
   if (isQQ) {
     await syncKnownFriendGidsFromRecentVisitorsOnce();
 
-    // Try new API first
-    const knownFriends = await fetchQqFriendsByKnownGids();
-    if (knownFriends.length > 0) {
-      syncKnownFriendGidsFromFriends(knownFriends);
-      return buildFriendReply(knownFriends);
-    }
-
-    // Fallback to legacy methods
-    try {
-      const fallbackFriends = dedupeFriendsByGid(await fetchQqFriendsByLegacyMethod());
-      if (fallbackFriends.length > 0) {
-        syncKnownFriendGidsFromFriends(fallbackFriends);
-      } else if (getEffectiveKnownQqFriendGids().length === 0) {
-        logWarn('好友',
-          'QQ 好友列表为空；若近期接口已切到 GetGameFriends，请先在好友页维护已知好友 GID 列表',
-          {
-            module: 'friend',
-            event: '好友列表接口',
-            result: 'empty',
-          }
-        );
-      }
-      return buildFriendReply(fallbackFriends);
-    } catch (err) {
-      if (getEffectiveKnownQqFriendGids().length === 0) {
-        throw new Error(
-          `QQ 好友列表获取失败，请先在好友页维护已知好友 GID 列表。${err.message}`
-        );
-      }
-      throw err;
-    }
+    const friends = await fetchQqFriendsByKnownGids();
+    syncKnownFriendGidsFromFriends(friends);
+    return buildFriendReply(friends);
   }
 
   // WeChat platform: direct GetAll

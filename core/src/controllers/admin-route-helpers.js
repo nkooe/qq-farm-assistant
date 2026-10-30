@@ -1,3 +1,4 @@
+const { ADMIN_USER_ID, assertUserId, isUserIdentity } = require('../models/user-id');
 function toBooleanFlag(value) {
   return value === true || value === 'true' || value === 1 || value === '1';
 }
@@ -18,20 +19,9 @@ function createAdminRouteHelpers({ userStore }) {
     return true;
   }
 
-  function getAdminUserMutationError(currentUser, targetUsername) {
-    const normalizedTarget = String(targetUsername || '').trim();
-    if (!currentUser || !normalizedTarget) return null;
-    if (String(currentUser.username || '').trim() === normalizedTarget) return null;
-    try {
-      const users = userStore.getAllUsers();
-      const targetUser = Array.isArray(users)
-        ? users.find(
-            user => String(user.username || '').trim() === normalizedTarget,
-          )
-        : null;
-      if (targetUser && targetUser.role === 'admin')
-        return '不能修改或删除其他管理员账号';
-    } catch {}
+  function getAdminUserMutationError(currentUser, targetUserId) {
+    assertUserId(targetUserId);
+    if (!isUserIdentity(currentUser) || currentUser.id !== ADMIN_USER_ID) return '需要管理员权限';
     return null;
   }
 
@@ -57,7 +47,7 @@ function createAdminRouteHelpers({ userStore }) {
   }
 
   function requireAdminRole(req, res, next) {
-    if (!req.currentUser || req.currentUser.role !== 'admin') {
+    if (!isUserIdentity(req.currentUser) || req.currentUser.id !== ADMIN_USER_ID) {
       return res.status(403).json({
         ok: false,
         error: '需要管理员权限',

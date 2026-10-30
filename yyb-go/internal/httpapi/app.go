@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -43,6 +44,7 @@ type App struct {
 	qr        *qr.Client
 
 	mu              sync.Mutex
+	userDataMu      sync.RWMutex
 	qrSessions      map[string]*qr.Session
 	refreshLocks    sync.Map
 	keepaliveCancel context.CancelFunc
@@ -90,7 +92,6 @@ func NewApp(cfg Config) (*App, error) {
 	poolCfg.SessionTTL = cfg.SessionTTL
 	poolCfg.ShortlinkTimeout = cfg.RequestTimeout
 	poolCfg.TCPProxy = cfg.TCPProxy
-	poolCfg.TCPProxyFallbackDirect = false
 	pool := protocol.NewPool(poolCfg, db)
 	go sessionCleanupLoop()
 	app := &App{
@@ -100,6 +101,10 @@ func NewApp(cfg Config) (*App, error) {
 		pool:       pool,
 		qr:         qr.NewClient(cfg.RequestTimeout),
 		qrSessions: map[string]*qr.Session{},
+	}
+	if err := app.cleanupQR(nil); err != nil {
+		db.Close()
+		return nil, err
 	}
 	app.startKeepalive()
 	return app, nil
@@ -153,6 +158,7 @@ func (a *App) Handler() http.Handler {
 	router.Any("/proxy-profiles", gin.WrapF(a.handleProxyProfiles))
 	router.Any("/proxy-profiles/test", gin.WrapF(a.handleProxyProfileTest))
 	router.Any("/internal/proxy-url", gin.WrapF(a.handleInternalProxyURL))
+	router.Any("/internal/users", gin.WrapF(a.handlePurgeUser))
 	router.Any("/wxapp/getCode", gin.WrapF(a.handleGetCode))
 	router.Any("/wxapp/getPhoneNumber", gin.WrapF(a.handleGetPhoneNumber))
 	router.Any("/wxapp/operateWxData", gin.WrapF(a.handleOperateWXData))
@@ -160,7 +166,24 @@ func (a *App) Handler() http.Handler {
 		writeError(c.Writer, http.StatusNotFound, "not found")
 	})
 
-	return authMiddleware(router)
+	return authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/users" {
+			a.userDataMu.RLock()
+			defer a.userDataMu.RUnlock()
+		}
+		if strings.HasPrefix(r.URL.Path, "/accounts") || strings.HasPrefix(r.URL.Path, "/qr") || strings.HasPrefix(r.URL.Path, "/proxy-profiles") || strings.HasPrefix(r.URL.Path, "/wxapp") || strings.HasPrefix(r.URL.Path, "/internal/") {
+			role, userID := proxyCaller(r)
+			if userID == 0 || (role != "admin" && role != "user") {
+				writeError(w, http.StatusForbidden, "valid user identity is required")
+				return
+			}
+			if err := a.db.CheckActiveUser(r.Context(), userID); err != nil {
+				writeError(w, http.StatusForbidden, "user is unavailable")
+				return
+			}
+		}
+		router.ServeHTTP(w, r)
+	}))
 }
 
 func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -172,7 +195,8 @@ func (a *App) handleIndex(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	pageContent, err := readFileOrFallback(filepath.Join(a.resources.Templates, "index.html"), fallbackIndexHTML)
+	pageData, err := os.ReadFile(filepath.Join(a.resources.Templates, "index.html"))
+	pageContent := string(pageData)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load page")
 		return
@@ -195,7 +219,7 @@ func (a *App) handleScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	serveFileOrText(w, r, filepath.Join(a.resources.Templates, "scan.html"), fallbackScanHTML)
+	http.ServeFile(w, r, filepath.Join(a.resources.Templates, "scan.html"))
 }
 
 func (a *App) handleDocs(w http.ResponseWriter, r *http.Request) {
@@ -215,7 +239,7 @@ func (a *App) handleOpenAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeRawJSON(w, http.StatusOK, openAPISpec)
+	writeRawJSON(w, http.StatusOK, newOpenAPISpec())
 }
 
 func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
@@ -227,7 +251,10 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	a.pruneQR()
+	if err := a.pruneQR(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove expired QR")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.RequestTimeout+35*time.Second)
 	defer cancel()
 	var body struct {
@@ -238,26 +265,26 @@ func (a *App) handleQRRoot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
-	proxyMode, tcpProxy, profileID, err := a.resolveRequestedProxy(ctx, body.ProxyMode, body.ProxyProfileID)
+	role, userID := proxyCaller(r)
+	proxyMode, tcpProxy, profileID, err := a.resolveRequestedProxy(ctx, body.ProxyMode, body.ProxyProfileID, role, userID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	img, err := a.qr.GetQRCodeImageWithProxy(ctx, proxyMode, tcpProxy, profileID)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err.Error())
+		writeError(w, http.StatusBadGateway, proxyRequestError(role, tcpProxy, err))
 		return
 	}
+	img.Session.OwnerRole = role
+	img.Session.OwnerUserID = userID
 	a.mu.Lock()
 	a.qrSessions[img.Session.ID] = img.Session
-	keep := make(map[string]bool, len(a.qrSessions))
-	for sid := range a.qrSessions {
-		keep[sid] = true
-	}
 	a.mu.Unlock()
-	path := a.resources.qrPath(img.Session.ID)
-	_ = os.WriteFile(path, img.ImageBytes, 0o644)
-	a.cleanupQR(keep)
+	if err := os.WriteFile(a.resources.qrPath(img.Session.ID), img.ImageBytes, 0600); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save QR image")
+		return
+	}
 	out := map[string]any{
 		"session_id":       img.Session.ID,
 		"status":           img.Session.Status,
@@ -291,6 +318,10 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "qr session not found")
 			return
 		}
+		if !a.qrSessionAllowed(a.getQRSession(sessionID), r) {
+			writeError(w, http.StatusForbidden, "二维码会话不属于当前用户")
+			return
+		}
 		w.Header().Set("Content-Type", "image/jpeg")
 		http.ServeFile(w, r, path)
 	case "poll":
@@ -303,13 +334,21 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "qr session not found")
 			return
 		}
+		if !a.qrSessionAllowed(sess, r) {
+			writeError(w, http.StatusForbidden, "二维码会话不属于当前用户")
+			return
+		}
 		result, err := a.qr.PollQRCode(r.Context(), sess)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err.Error())
+			role, _ := proxyCaller(r)
+			writeError(w, http.StatusBadGateway, proxyRequestError(role, sess.TCPProxy, err))
 			return
 		}
 		if terminalQR(result.Status) {
-			a.dropQRSession(sessionID)
+			if err := a.dropQRSession(sessionID); err != nil {
+				writeError(w, http.StatusInternalServerError, "failed to remove QR")
+				return
+			}
 		}
 		writeJSON(w, http.StatusOK, result)
 	case "confirm":
@@ -322,9 +361,14 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "qr session not found")
 			return
 		}
+		if !a.qrSessionAllowed(sess, r) {
+			writeError(w, http.StatusForbidden, "二维码会话不属于当前用户")
+			return
+		}
 		result, err := a.qr.GetLoginBuffer(r.Context(), sess)
 		if err != nil {
-			writeError(w, http.StatusConflict, "buffer not ready: "+err.Error())
+			role, _ := proxyCaller(r)
+			writeError(w, http.StatusConflict, proxyRequestError(role, sess.TCPProxy, err))
 			return
 		}
 		var userInfo map[string]any
@@ -335,19 +379,23 @@ func (a *App) handleQR(w http.ResponseWriter, r *http.Request) {
 		if ui, err := loginBuffers.FetchUserInfo(r.Context(), result.Credentials); err == nil {
 			userInfo = ui
 		}
-		acc, err := a.storeFromScan(r.Context(), result.LoginBuffer, result.Credentials, userInfo, sess.TCPProxy)
+		acc, err := a.storeFromScan(r.Context(), result.LoginBuffer, result.Credentials, userInfo, sess.TCPProxy, sess.OwnerUserID, sess.OwnerRole)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		if sess.ProxyMode != "" {
-			if _, err = a.db.SetAccountProxySetting(r.Context(), acc.ID, sess.ProxyMode, sess.ProxyProfileID); err != nil {
+			role, userID := proxyCaller(r)
+			if _, err = a.db.SetAccountProxySetting(r.Context(), acc.ID, sess.ProxyMode, sess.ProxyProfileID, role, userID); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			_ = a.db.InvalidateAllSessions(r.Context(), acc.ID)
 		}
-		a.dropQRSession(sessionID)
+		if err := a.dropQRSession(sessionID); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to remove QR")
+			return
+		}
 		writeJSON(w, http.StatusOK, acc.Public())
 	default:
 		writeError(w, http.StatusNotFound, "qr session not found")
@@ -368,6 +416,10 @@ func (a *App) handleAccountsRoot(w http.ResponseWriter, r *http.Request) {
 		}
 		out := make([]store.AccountPublic, 0, len(accounts))
 		for _, acc := range accounts {
+			role, userID := proxyCaller(r)
+			if role != "admin" && acc.OwnerUserID != userID {
+				continue
+			}
 			out = append(out, acc.Public())
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -545,7 +597,8 @@ func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload b
 			// Get a fresh code every time
 			result, err := a.pool.GetCode(r.Context(), acc.LoginBuffer, "wx5306c5978fdb76e4", acc.ID, proxy)
 			if err != nil {
-				writeError(w, http.StatusBadGateway, "getCode failed: "+err.Error())
+				role, _ := proxyCaller(r)
+				writeError(w, http.StatusBadGateway, proxyRequestError(role, proxy, err))
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"openid": acc.OpenID, "code": result["code"], "result": result})
@@ -589,7 +642,13 @@ func (a *App) callWXApp(w http.ResponseWriter, r *http.Request, requirePayload b
 		case errors.As(err, &expired):
 			writeError(w, http.StatusConflict, "account login_buffer expired (refresh failed); re-scan required")
 		default:
-			writeError(w, http.StatusBadGateway, "call failed: "+err.Error())
+			role, _ := proxyCaller(r)
+			proxy, proxyErr := a.accountTCPProxy(r.Context(), acc.ID)
+			if proxyErr != nil {
+				writeError(w, http.StatusBadGateway, "账号代理配置异常")
+				return
+			}
+			writeError(w, http.StatusBadGateway, proxyRequestError(role, proxy, err))
 		}
 		return
 	}
@@ -619,13 +678,18 @@ func (a *App) resolveAccountRef(w http.ResponseWriter, r *http.Request, ref stri
 		writeError(w, http.StatusBadRequest, "ref is required")
 		return nil, false
 	}
-	acc, err := a.db.ResolveAccount(r.Context(), ref)
+	role, userID := proxyCaller(r)
+	acc, err := a.db.ResolveAccount(r.Context(), ref, role, userID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "account not found: "+ref)
 		} else {
 			writeError(w, http.StatusInternalServerError, err.Error())
 		}
+		return nil, false
+	}
+	if userID == 0 || (role != "admin" && (role != "user" || acc.OwnerUserID != userID)) {
+		writeError(w, http.StatusForbidden, "account is unavailable to current user")
 		return nil, false
 	}
 	return acc, true
@@ -639,6 +703,10 @@ func (a *App) refreshAll(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(accounts))
 	for _, acc := range accounts {
+		role, userID := proxyCaller(r)
+		if role != "admin" && acc.OwnerUserID != userID {
+			continue
+		}
 		out = append(out, refreshOut(acc, a.refreshLiveness(r.Context(), acc)))
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -652,6 +720,10 @@ func (a *App) resyncAll(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]store.AccountPublic, 0, len(accounts))
 	for _, acc := range accounts {
+		role, userID := proxyCaller(r)
+		if role != "admin" && acc.OwnerUserID != userID {
+			continue
+		}
 		updated, err := a.resyncProfile(r.Context(), acc)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
@@ -677,12 +749,12 @@ func (a *App) serveAvatar(w http.ResponseWriter, r *http.Request, acc *store.Wec
 	writeError(w, http.StatusNotFound, "no avatar")
 }
 
-func (a *App) storeFromScan(ctx context.Context, loginBuffer string, creds protocol.LoginBufferCredentials, userInfo map[string]any, tcpProxy string) (*store.WechatAccount, error) {
+func (a *App) storeFromScan(ctx context.Context, loginBuffer string, creds protocol.LoginBufferCredentials, userInfo map[string]any, tcpProxy string, ownerUserID int64, ownerRole string) (*store.WechatAccount, error) {
 	openid := creds.OpenID
 	nick := pickNickname(userInfo, creds.Nickname)
-	avatar := a.resolveAvatar(ctx, openid, userInfo, tcpProxy)
+	avatar := a.resolveAvatar(ctx, ownerUserID, openid, userInfo, tcpProxy)
 	status := "alive"
-	acc, err := a.db.UpsertAccount(ctx, openid, loginBuffer, stringPtrMaybe(nick), stringPtrMaybe(nick), stringPtrMaybe(avatar), userInfo, creds.ToMap(), &status)
+	acc, err := a.db.UpsertAccount(ctx, openid, loginBuffer, ownerUserID, ownerRole, stringPtrMaybe(nick), stringPtrMaybe(nick), stringPtrMaybe(avatar), userInfo, creds.ToMap(), &status)
 	if err == nil {
 		_ = a.db.RecordRefresh(ctx, acc.ID, "", false)
 	}
@@ -737,7 +809,7 @@ func (a *App) refreshLivenessResult(ctx context.Context, acc *store.WechatAccoun
 		return "retry", err
 	}
 	_ = a.db.RecordRefresh(ctx, acc.ID, "", false)
-	if avatar := a.resolveAvatar(ctx, acc.OpenID, acc.UserInfo, proxy); avatar != "" {
+	if avatar := a.resolveAvatar(ctx, acc.OwnerUserID, acc.OpenID, acc.UserInfo, proxy); avatar != "" {
 		_ = a.db.SetAccountProfile(ctx, acc.ID, acc.Nickname, &avatar, acc.UserInfo)
 	}
 	return "alive", nil
@@ -749,7 +821,7 @@ func (a *App) resyncProfile(ctx context.Context, acc *store.WechatAccount) (*sto
 	if err != nil {
 		return nil, err
 	}
-	avatar := a.resolveAvatar(ctx, acc.OpenID, acc.UserInfo, proxy)
+	avatar := a.resolveAvatar(ctx, acc.OwnerUserID, acc.OpenID, acc.UserInfo, proxy)
 	if avatar == "" {
 		avatar = deref(acc.Avatar)
 	}
@@ -847,12 +919,12 @@ func pickAvatarURL(userInfo map[string]any) string {
 	return ""
 }
 
-func (a *App) resolveAvatar(ctx context.Context, openid string, userInfo map[string]any, tcpProxy string) string {
+func (a *App) resolveAvatar(ctx context.Context, userID int64, openid string, userInfo map[string]any, tcpProxy string) string {
 	u := pickAvatarURL(userInfo)
 	if u == "" {
 		return ""
 	}
-	dest := a.resources.avatarPath(openid)
+	dest := a.resources.avatarPath(userID, openid)
 	if downloadAvatar(ctx, u, dest, a.cfg.AvatarTimeout, tcpProxy) {
 		return dest
 	}
@@ -902,38 +974,56 @@ func (a *App) getQRSession(id string) *qr.Session {
 	return a.qrSessions[id]
 }
 
-func (a *App) dropQRSession(id string) {
+func (a *App) qrSessionAllowed(sess *qr.Session, r *http.Request) bool {
+	if sess == nil {
+		return false
+	}
+	role, userID := proxyCaller(r)
+	if role == "admin" {
+		return true
+	}
+	return sess.OwnerRole != "admin" && sess.OwnerUserID >= 1000 && sess.OwnerUserID == userID
+}
+
+func (a *App) dropQRSession(id string) error {
 	a.mu.Lock()
+	defer a.mu.Unlock()
+	if err := os.Remove(a.resources.qrPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	delete(a.qrSessions, id)
-	a.mu.Unlock()
-	_ = os.Remove(a.resources.qrPath(id))
+	return nil
 }
 
-func (a *App) pruneQR() {
+func (a *App) pruneQR() error {
 	a.mu.Lock()
-	var drop []string
-	for sid, sess := range a.qrSessions {
-		if sess.Age() > a.cfg.QRSessionTTL {
-			drop = append(drop, sid)
+	defer a.mu.Unlock()
+	for id, sess := range a.qrSessions {
+		if sess.Age() <= a.cfg.QRSessionTTL {
+			continue
 		}
+		if err := os.Remove(a.resources.qrPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		delete(a.qrSessions, id)
 	}
-	for _, sid := range drop {
-		delete(a.qrSessions, sid)
-	}
-	a.mu.Unlock()
-	for _, sid := range drop {
-		_ = os.Remove(a.resources.qrPath(sid))
-	}
+	return nil
 }
 
-func (a *App) cleanupQR(keep map[string]bool) {
-	files, _ := filepath.Glob(filepath.Join(a.resources.QR, "*.jpg"))
-	for _, f := range files {
-		sid := strings.TrimSuffix(filepath.Base(f), ".jpg")
-		if !keep[sid] {
-			_ = os.Remove(f)
+func (a *App) cleanupQR(keep map[string]bool) error {
+	files, err := filepath.Glob(filepath.Join(a.resources.QR, "*.jpg"))
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		id := strings.TrimSuffix(filepath.Base(file), ".jpg")
+		if !keep[id] {
+			if err := os.Remove(file); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
 }
 
 func terminalQR(status string) bool {
@@ -976,23 +1066,6 @@ func requestLogger(next http.Handler) http.Handler {
 	})
 }
 
-func readFileOrFallback(filepath, fallback string) (string, error) {
-	data, err := os.ReadFile(filepath)
-	if err != nil {
-		return fallback, nil
-	}
-	return string(data), nil
-}
-
-func serveFileOrText(w http.ResponseWriter, r *http.Request, path, fallback string) {
-	if _, err := os.Stat(path); err == nil {
-		http.ServeFile(w, r, path)
-		return
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = w.Write([]byte(fallback))
-}
-
 func stringFromAny(v any) string {
 	if s, ok := v.(string); ok {
 		return s
@@ -1031,4 +1104,64 @@ func sortedKeys[M ~map[string]V, V any](m M) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func (a *App) handlePurgeUser(w http.ResponseWriter, r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	role, _ := proxyCaller(r)
+	if err != nil || !net.ParseIP(host).IsLoopback() || ApiToken == "" || r.Header.Get("Authorization") != "Bearer "+ApiToken || role != "admin" {
+		writeError(w, http.StatusForbidden, "local administrator authentication required")
+		return
+	}
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var body struct {
+		UserID int64 `json:"userId"`
+	}
+	if err := decodeOptionalJSON(r, &body); err != nil || body.UserID <= 1000 {
+		writeError(w, http.StatusBadRequest, "userID is required")
+		return
+	}
+	a.userDataMu.Lock()
+	defer a.userDataMu.Unlock()
+	accounts, err := a.db.ListAccounts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	accountIDs := []int64{}
+	// Files are removed while account rows still exist, so a failed cleanup is retryable.
+	for _, account := range accounts {
+		if account.OwnerUserID != body.UserID {
+			continue
+		}
+		accountIDs = append(accountIDs, account.ID)
+		if err := os.Remove(a.resources.avatarPath(account.OwnerUserID, account.OpenID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			writeError(w, http.StatusInternalServerError, "failed to remove user avatar")
+			return
+		}
+	}
+	a.mu.Lock()
+	for id, session := range a.qrSessions {
+		if session.OwnerUserID == body.UserID {
+			if err := os.Remove(a.resources.qrPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				a.mu.Unlock()
+				writeError(w, http.StatusInternalServerError, "failed to remove user QR")
+				return
+			}
+			delete(a.qrSessions, id)
+		}
+	}
+	a.mu.Unlock()
+	if _, err := a.db.PurgeUser(r.Context(), body.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to remove user data")
+		return
+	}
+	a.pool.ForgetAccounts(accountIDs)
+	for _, id := range accountIDs {
+		a.refreshLocks.Delete(id)
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"deleted": true})
 }

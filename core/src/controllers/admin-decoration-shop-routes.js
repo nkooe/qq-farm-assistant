@@ -54,26 +54,6 @@ function buildDecorationItemFromGoods(goods, userGoldBean) {
   };
 }
 
-// 回退：服务器没返回装扮时，退回旧的静态列表，避免页面空白
-const FALLBACK_DECORATION_ITEM_IDS = [2130, 2131];
-
-function buildFallbackDecorationItem(itemId, userGoldBean) {
-  const itemConfig = getItemById(itemId);
-  if (!itemConfig) return null;
-  const price = Number(itemConfig.price) || 0;
-  return {
-    id: itemId,
-    itemId,
-    itemCount: 1,
-    price,
-    name: itemConfig.name || `装扮${itemId}`,
-    image: getSeedImageBySeedId(itemId),
-    desc: itemConfig.desc || "",
-    effectDesc: itemConfig.effectDesc || "",
-    canBuy: userGoldBean >= price,
-  };
-}
-
 function registerAdminDecorationShopRoutes({
   app,
   provider,
@@ -102,25 +82,9 @@ function registerAdminDecorationShopRoutes({
 
       const userGoldBean = status?.status?.goldBean || 0;
 
-      let decorations = [];
-      try {
-        const shopReply = await provider.getShopInfo(accountId, DECORATION_SHOP_ID);
-        const goodsList = (shopReply && shopReply.goods_list) || [];
-        decorations = goodsList
-          .map((g) => buildDecorationItemFromGoods(g, userGoldBean))
-          .filter(Boolean);
-      } catch (error) {
-        adminLogger.warn("装扮商城动态获取失败，回退静态列表", {
-          error: error.message,
-        });
-      }
-
-      // 服务器无数据时回退，保证页面不空白
-      if (decorations.length === 0) {
-        decorations = FALLBACK_DECORATION_ITEM_IDS.map((itemId) =>
-          buildFallbackDecorationItem(itemId, userGoldBean),
-        ).filter(Boolean);
-      }
+      const shopReply = await provider.getShopInfo(accountId, DECORATION_SHOP_ID);
+      const decorations = shopReply.goods_list
+        .map(goods => buildDecorationItemFromGoods(goods, userGoldBean)).filter(Boolean);
 
       res.json({ ok: true, data: decorations, userGoldBean });
     } catch (error) {

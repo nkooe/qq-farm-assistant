@@ -1,9 +1,8 @@
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const path = require('node:path');
 const { getDataFile } = require('../config/runtime-paths');
 const { readJsonFile, writeJsonFileAtomic } = require('./json-db');
-const { toNum, logWarn } = require('../utils/utils');
+const { toNum } = require('../utils/utils');
 
 const PROTECT_DOG_ID = 90021;
 function dateKey(time = Date.now()) {
@@ -20,8 +19,7 @@ function createFriendPetCache({ now = Date.now, read = readJsonFile, write = wri
         if (!state) return;
         clearTimeout(state.timer);
         state.timer = null;
-        try { write(file(accountId), { version: 1, date: state.date, entries: state.entries }); }
-        catch (err) { logWarn('好友', `保存宠物缓存失败: ${err.message}`); }
+        write(file(accountId), { version: 1, date: state.date, entries: state.entries });
     }
     function schedule(accountId, state) {
         if (state.timer) return; // Bounded debounce: sustained visits still persist every two seconds.
@@ -41,17 +39,8 @@ function createFriendPetCache({ now = Date.now, read = readJsonFile, write = wri
                         && Number.isFinite(entry.checkedAt) && entry.checkedAt > 0 && dateKey(entry.checkedAt) === today)
                         state.entries[gid] = { dogId: entry.dogId, checkedAt: entry.checkedAt };
                 }
-            } else if (!saved && key) {
-                // Legacy files contain guard dogs only; import only records actually checked today.
-                const safeName = key.replace(/[^\w-]/g, '_');
-                const old = read(getDataFile(path.join('friend_dog_info', `${safeName}.json`)), null);
-                if (old?.updatedAt && dateKey(old.updatedAt) === today) {
-                    for (const [gid, entry] of Object.entries(old.dogInfo || {})) {
-                        if (Number(gid) > 0 && Number(entry?.dogId) === PROTECT_DOG_ID)
-                            state.entries[gid] = { dogId: PROTECT_DOG_ID, checkedAt: old.updatedAt };
-                    }
-                    schedule(key, state);
-                }
+            } else if (saved && saved.version !== 1) {
+                throw new Error('宠物缓存格式无效');
             }
             accounts.set(key, state);
         }

@@ -36,6 +36,7 @@ const showRenewalModal = defineModel<boolean>('showRenewalModal', { required: tr
 const showResetVerifyModal = defineModel<boolean>('showResetVerifyModal', { required: true })
 const showResetPasswordModal = defineModel<boolean>('showResetPasswordModal', { required: true })
 const renewalUsername = defineModel<string>('renewalUsername', { required: true })
+const renewalPassword = defineModel<string>('renewalPassword', { required: true })
 const renewalCardCode = defineModel<string>('renewalCardCode', { required: true })
 const resetUsername = defineModel<string>('resetUsername', { required: true })
 const resetCardCode = defineModel<string>('resetCardCode', { required: true })
@@ -86,9 +87,10 @@ const resetPasswordTouched = defineModel<boolean>('resetPasswordTouched', { requ
           </div>
           <form class="reset-modal-body" @submit.prevent="emit('submitRenewal')">
             <p class="reset-modal-tip">
-              输入用户名和续费卡密，确认后会直接为该账号续费。
+              填写账号与续费卡密。
             </p>
             <BaseInput v-model="renewalUsername" label="用户名" placeholder="请输入用户名" />
+            <BaseInput v-model="renewalPassword" label="账号密码" type="password" autocomplete="current-password" placeholder="请输入账号密码" />
             <BaseInput v-model="renewalCardCode" label="续费卡密" placeholder="请输入续费卡密" />
             <div v-if="renewalError" class="reset-modal-error">
               {{ renewalError }}
@@ -120,7 +122,7 @@ const resetPasswordTouched = defineModel<boolean>('resetPasswordTouched', { requ
           </div>
           <form class="reset-modal-body" @submit.prevent="emit('verifyResetPassword')">
             <p class="reset-modal-tip">
-              输入用户名和注册时使用的卡密，通过验证后即可设置新密码。
+              使用注册卡密找回；无卡密请联系管理员。
             </p>
             <BaseInput v-model="resetUsername" label="用户名" placeholder="请输入用户名" />
             <BaseInput v-model="resetCardCode" label="卡密" placeholder="请输入注册时使用的卡密" />

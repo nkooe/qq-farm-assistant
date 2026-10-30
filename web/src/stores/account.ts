@@ -1,7 +1,8 @@
-import { useStorage } from '@vueuse/core'
+import { StorageSerializers, useStorage } from '@vueuse/core'
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import api from '@/api'
+import { useUserStore } from '@/stores/user'
 
 export interface Account {
   id: string
@@ -14,7 +15,7 @@ export interface Account {
   openId?: string
   avatar?: string
   avatarUrl?: string
-  username?: string
+  userId: number
   platform?: string
   loginType?: string
   proxyMode?: 'direct' | 'static'
@@ -93,6 +94,8 @@ export function getPlatformClass(p?: string) {
 export const useAccountStore = defineStore('account', () => {
   const accounts = ref<Account[]>([])
   const currentAccountId = useStorage('current_account_id', '')
+  const accountOwner = useStorage<number | null>('current_account_owner', null, undefined, { serializer: StorageSerializers.object })
+  const userStore = useUserStore()
   const loading = ref(false)
   const logs = ref<AccountLog[]>([])
   const accountsError = ref('')
@@ -100,7 +103,23 @@ export const useAccountStore = defineStore('account', () => {
   let accountsGeneration = 0
   let accountsAbort: AbortController | null = null
 
+  watch([() => userStore.token, () => userStore.userId], ([, userId], previous) => {
+    if (accountOwner.value !== userId || previous.length > 0) {
+      accountsGeneration++
+      accountsAbort?.abort()
+      accountsAbort = null
+      accountsRequest = null
+      accounts.value = []
+      logs.value = []
+      loading.value = false
+      accountsError.value = ''
+      currentAccountId.value = ''
+      accountOwner.value = null
+    }
+  }, { immediate: true, flush: 'sync' })
+
   function applyAccounts(nextAccounts: Account[]) {
+    accountOwner.value = userStore.userId
     accounts.value = nextAccounts
 
     if (accounts.value.length === 0) {

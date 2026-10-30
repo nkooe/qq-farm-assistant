@@ -292,7 +292,7 @@ function classifyHarvestedLandsByMap(landIds, landMap) {
 async function resolveRemovableHarvestedLands(harvestedLandIds, harvestResult) {
   const landIds = Array.isArray(harvestedLandIds) ? harvestedLandIds.filter(Boolean) : [];
   if (landIds.length === 0) {
-    return { removable: [], growing: [], fallbackRemoved: 0 };
+    return { removable: [], growing: [], unknown: [] };
   }
 
   // 先用收获结果中的数据构建土地映射
@@ -302,36 +302,22 @@ async function resolveRemovableHarvestedLands(harvestedLandIds, harvestResult) {
   const removable = [...classified.removable];
   const growing = [...classified.growing];
   let unknown = [...classified.unknown];
-  let fallbackRemoved = 0;
 
   // 对于未知状态的地块，重新拉取全农场数据
   if (unknown.length > 0) {
-    try {
-      const landsReply = await getAllLands();
-      const freshLandMap = buildLandMap(landsReply && landsReply.lands);
-      const reclassified = classifyHarvestedLandsByMap(unknown, freshLandMap);
-      removable.push(...reclassified.removable);
-      growing.push(...reclassified.growing);
-      unknown = reclassified.unknown;
-    } catch (err) {
-      if (!isTransientNetworkError(err)) {
-        logWarn('农场', `收后状态补拉失败: ${err.message}`, {
-          module: 'farm', event: '收获后状态补拉', result: 'error'
-        });
-      }
-    }
+    const landsReply = await getAllLands();
+    const freshLandMap = buildLandMap(landsReply.lands);
+    const reclassified = classifyHarvestedLandsByMap(unknown, freshLandMap);
+    removable.push(...reclassified.removable);
+    growing.push(...reclassified.growing);
+    unknown = reclassified.unknown;
   }
-
-  // 依然未知的地块归入可铲除
-  if (unknown.length > 0) {
-    removable.push(...unknown);
-    fallbackRemoved = unknown.length;
-  }
+  if (unknown.length > 0) throw new Error(`收获后地块状态未确认，停止铲除: ${unknown.join(',')}`);
 
   return {
     removable: [...new Set(removable)],
     growing: [...new Set(growing)],
-    fallbackRemoved
+    unknown
   };
 }
 

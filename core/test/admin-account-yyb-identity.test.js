@@ -18,7 +18,7 @@ function harness() {
     addOrUpdateAccount: account => {
       calls.push(['save', account]);
       if (account.id) Object.assign(accounts.find(a => a.id === account.id), account);
-      else accounts.push({ ...account, id: String(accounts.length + 1) });
+      else accounts.push({ autoStart: true, ...account, id: String(accounts.length + 1) });
       return { accounts };
     },
   });
@@ -74,7 +74,7 @@ test('same YYB identity cannot be added twice', () => {
 test('cached QQ clients cannot bypass trusted session import by posting a Code', () => {
   const h = harness();
   const payload = { platform: 'qq', loginType: 'manual', name: 'QQ scan', code: 'fixture_QQ_CODE_12345678', qqScanSessionId: 'scan-a' };
-  assert.equal(h.save({ ...payload }).statusCode, 409);
+  assert.equal(h.save({ ...payload }).statusCode, 400);
   assert.equal(h.accounts.length, 1);
   assert.equal(h.calls.length, 0);
 });
@@ -83,7 +83,7 @@ test('cached QQ imports leave other panel users untouched', () => {
   const h = harness();
   h.accounts.push({ id: '2', platform: 'qq', username: 'someone-else', code: 'fixture_OTHER_CODE_12345678' });
   const payload = { platform: 'qq', code: 'fixture_OTHER_CODE_12345678', qqScanSessionId: 'scan-b' };
-  assert.equal(h.save({ ...payload }).statusCode, 409);
+  assert.equal(h.save({ ...payload }).statusCode, 400);
   assert.equal(h.accounts.length, 2);
   assert.equal(h.accounts[1].username, 'someone-else');
 });
@@ -92,10 +92,13 @@ test('account save hides native profile references and rejects browser-provided 
   const h = harness();
   h.accounts[0].qqLoginProfile = 'private-server-profile';
   const response = h.save({ id: '1', name: 'Renamed', qqLoginProfile: 'injected-profile' });
-  assert.equal(response.body.ok, true);
+  assert.equal(response.statusCode, 400);
+  assert.equal(h.accounts[0].name, 'A');
   assert.equal(h.accounts[0].qqLoginProfile, 'private-server-profile');
-  assert.equal(response.body.data.accounts[0].qqAutoCodeAvailable, true);
-  assert.equal('qqLoginProfile' in response.body.data.accounts[0], false);
+  const valid = h.save({ id: '1', name: 'Renamed' });
+  assert.equal(valid.body.ok, true);
+  assert.equal(valid.body.data.accounts[0].qqAutoCodeAvailable, true);
+  assert.equal('qqLoginProfile' in valid.body.data.accounts[0], false);
   assert.equal(h.read().body.data.accounts[0].qqAutoCodeAvailable, true);
   assert.equal('qqLoginProfile' in h.read().body.data.accounts[0], false);
 });

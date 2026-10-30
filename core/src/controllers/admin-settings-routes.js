@@ -12,10 +12,7 @@ function requireAccountAccess(req, res, { getAccountIdFromRequest, canAccessAcco
 }
 
 function getOfflineReminderConfig(store, currentUser, body) {
-  const saved =
-    store.getOfflineReminder && currentUser
-      ? store.getOfflineReminder(currentUser.username)
-      : {};
+  const saved = store.getOfflineReminder(currentUser.id);
   return { ...(saved || {}), ...(body || {}) };
 }
 
@@ -69,95 +66,16 @@ async function sendOfflineReminderTest(config) {
 }
 
 function buildSettingsPayload(store, accountId, currentUser) {
-  const accountConfig = accountId && typeof store.getConfigSnapshot === "function"
-    ? store.getConfigSnapshot(accountId)
-    : {};
-  const offlineReminderDefault = {
-    enabled: true,
-    smtpHost: "",
-    smtpPort: 465,
-    smtpUser: "",
-    smtpPass: "",
-    senderName: "",
-    recipientEmail: "",
-    emailContent: "",
-  };
-
+  const defaults = store.getDefaultAccountConfig();
+  const accountConfig = accountId ? store.getConfigSnapshot(accountId) : defaults;
   return {
-    intervals: accountId ? store.getIntervals(accountId) : {},
-    plantingStrategy: accountId ? store.getPlantingStrategy(accountId) : null,
-    preferredSeedId: accountId ? store.getPreferredSeed(accountId) : null,
-    prioritize2x2Crops:
-      accountId && typeof store.getPrioritize2x2Crops === "function"
-        ? store.getPrioritize2x2Crops(accountId)
-        : true,
-    friendQuietHours: accountId ? store.getFriendQuietHours(accountId) : null,
-    automation: accountId ? store.getAutomation(accountId) : {},
-    autoCodeRefresh:
-      accountId && typeof store.getAutoCodeRefresh === "function"
-        ? store.getAutoCodeRefresh(accountId)
-        : { enabled: false, intervalMinutes: 60 },
-    stealDelaySeconds:
-      accountId && typeof store.getStealDelaySeconds === "function"
-        ? store.getStealDelaySeconds(accountId)
-        : 0,
-    plantOrderRandom:
-      accountId && typeof store.getPlantOrderRandom === "function"
-        ? store.getPlantOrderRandom(accountId)
-        : false,
-    plantDelaySeconds:
-      accountId && typeof store.getPlantDelaySeconds === "function"
-        ? store.getPlantDelaySeconds(accountId)
-        : 0,
-    fertilizerBuyOrganicCount:
-      accountId && typeof store.getFertilizerBuyOrganicCount === "function"
-        ? store.getFertilizerBuyOrganicCount(accountId)
-        : 0,
-    fertilizerBuyOrganicThresholdHours:
-      accountId &&
-      typeof store.getFertilizerBuyOrganicThresholdHours === "function"
-        ? store.getFertilizerBuyOrganicThresholdHours(accountId)
-        : 10,
-    fertilizerBuyNormalCount:
-      accountId && typeof store.getFertilizerBuyNormalCount === "function"
-        ? store.getFertilizerBuyNormalCount(accountId)
-        : 0,
-    fertilizerBuyNormalThresholdHours:
-      accountId && typeof store.getFertilizerBuyNormalThresholdHours === "function"
-        ? store.getFertilizerBuyNormalThresholdHours(accountId)
-        : 10,
-    fertilizerBuyCheckIntervalMinutes:
-      accountId &&
-      typeof store.getFertilizerBuyCheckIntervalMinutes === "function"
-        ? store.getFertilizerBuyCheckIntervalMinutes(accountId)
-        : 30,
-    mysteryAutoBuyCurrencies:
-      accountId && typeof store.getMysteryAutoBuyCurrencies === "function"
-        ? store.getMysteryAutoBuyCurrencies(accountId)
-        : [],
-    goldenBugKeepCount: Number(accountConfig.goldenBugKeepCount) || 0,
-    goldenBugRoundLimit: Number(accountConfig.goldenBugRoundLimit) || 24,
-    autoAcceptFriendMinLevel:
-      accountId && typeof store.getAutoAcceptFriendMinLevel === "function"
-        ? store.getAutoAcceptFriendMinLevel(accountId)
-        : 0,
-    bagSeedPriority:
-      accountId && typeof store.getBagSeedPriority === "function"
-        ? store.getBagSeedPriority(accountId)
-        : [],
-    bagSeedFallbackStrategy:
-      accountId && typeof store.getBagSeedFallbackStrategy === "function"
-        ? store.getBagSeedFallbackStrategy(accountId)
-        : "level",
-    bagPriorityLandTypes:
-      accountId && typeof store.getBagPriorityLandTypes === "function"
-        ? store.getBagPriorityLandTypes(accountId)
-        : ["purple", "gold", "black", "red", "normal"],
-    ui: store.getUI(),
-    offlineReminder:
-      store.getOfflineReminder && currentUser
-        ? store.getOfflineReminder(currentUser.username)
-        : offlineReminderDefault,
+    ...accountConfig,
+    autoAcceptFriendMinLevel: accountId ? store.getAutoAcceptFriendMinLevel(accountId) : defaults.autoAcceptFriendMinLevel,
+    bagSeedPriority: accountId ? store.getBagSeedPriority(accountId) : defaults.bagSeedPriority,
+    bagSeedFallbackStrategy: accountId ? store.getBagSeedFallbackStrategy(accountId) : defaults.bagSeedFallbackStrategy,
+    bagPriorityLandTypes: accountId ? store.getBagPriorityLandTypes(accountId) : defaults.bagPriorityLandTypes,
+    ui: store.getUI(currentUser.id),
+    offlineReminder: store.getOfflineReminder(currentUser.id),
   };
 }
 
@@ -176,7 +94,7 @@ function registerAdminSettingsRoutes({
       if (!currentUser) {
         return res.status(401).json({ ok: false, error: "未登录" });
       }
-      const data = store.getUserDefaultAccountPlan(currentUser.username);
+      const data = store.getUserDefaultAccountPlan(currentUser.id);
       res.json({ ok: true, data });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
@@ -191,7 +109,7 @@ function registerAdminSettingsRoutes({
       }
       const body = req.body && typeof req.body === "object" ? req.body : {};
       const data = store.setUserDefaultAccountPlan(
-        currentUser.username,
+        currentUser.id,
         body.config || {},
         { enabled: body.enabled !== false },
       );
@@ -210,10 +128,10 @@ function registerAdminSettingsRoutes({
 
     try {
       const currentUser = req.currentUser;
-      const currentPlan = store.getUserDefaultAccountPlan(currentUser.username);
+      const currentPlan = store.getUserDefaultAccountPlan(currentUser.id);
       const config = store.getConfigSnapshot(accountId);
       const data = store.setUserDefaultAccountPlan(
-        currentUser.username,
+        currentUser.id,
         config,
         { enabled: currentPlan.enabled !== false },
       );
@@ -233,14 +151,10 @@ function registerAdminSettingsRoutes({
     try {
       const currentUser = req.currentUser;
       const data = store.applyUserDefaultAccountPlan(
-        currentUser.username,
+        currentUser.id,
         accountId,
       );
-      if (provider && typeof provider.saveSettings === "function") {
-        await provider.saveSettings(accountId, data);
-      } else if (provider && typeof provider.broadcastConfig === "function") {
-        provider.broadcastConfig(accountId);
-      }
+      await provider.saveSettings(accountId, data);
       res.json({ ok: true, data });
     } catch (error) {
       const status = error.message === "尚未保存默认方案" ? 400 : 500;
@@ -254,9 +168,9 @@ function registerAdminSettingsRoutes({
       if (!currentUser) {
         return res.status(401).json({ ok: false, error: "未登录" });
       }
-      const currentPlan = store.getUserDefaultAccountPlan(currentUser.username);
+      const currentPlan = store.getUserDefaultAccountPlan(currentUser.id);
       const data = store.setUserDefaultAccountPlan(
-        currentUser.username,
+        currentUser.id,
         store.getDefaultAccountConfig(),
         { enabled: currentPlan.enabled !== false },
       );
@@ -284,7 +198,7 @@ function registerAdminSettingsRoutes({
   app.post("/api/settings/theme", async (req, res) => {
     try {
       const theme = String((req.body || {}).theme || "");
-      const data = await provider.setUITheme(theme);
+      const data = await provider.setUITheme(theme, req.currentUser.id);
       res.json({ ok: true, data: data || {} });
     } catch (error) {
       res.status(500).json({ ok: false, error: error.message });
@@ -335,12 +249,10 @@ function registerAdminSettingsRoutes({
         return;
       }
 
-      const data = store.setOfflineReminder
-        ? store.setOfflineReminder(body, currentUser.username)
-        : {};
+      const data = store.setOfflineReminder(body, currentUser.id);
       if (Number(body.offlineDeleteSec || 0) > 0) {
         logger.warn("更新下线提醒离线删除设置", {
-          user: currentUser.username,
+          user: currentUser.id,
           offlineDeleteSec: Number(body.offlineDeleteSec || 0),
           channel: String(body.channel || ""),
           confirmation: "ENABLE_OFFLINE_DELETE",
@@ -397,9 +309,7 @@ function registerAdminSettingsRoutes({
 
   app.get("/api/settings/default", (req, res) => {
     try {
-      const data = store.getDefaultAccountConfig
-        ? store.getDefaultAccountConfig()
-        : null;
+      const data = store.getDefaultAccountConfig();
       if (!data) {
         return res.status(500).json({ ok: false, error: "无法获取默认配置" });
       }

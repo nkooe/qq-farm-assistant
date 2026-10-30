@@ -21,6 +21,7 @@ const router = useRouter()
 const route = useRoute()
 const userStore = useUserStore()
 const username = ref('')
+const password = ref('')
 const cardCode = ref('')
 const loading = ref(false)
 const checkingCard = ref(false)
@@ -35,21 +36,24 @@ const isLoggedIn = computed(() => userStore.isLoggedIn)
 const canEditUsername = computed(() => !isLoggedIn.value)
 const normalizedUsername = computed(() => username.value.trim())
 const normalizedCardCode = computed(() => cardCode.value.trim())
+const requiredFieldCount = computed(() => isLoggedIn.value ? 2 : 3)
 const filledFieldCount = computed(() => {
   let count = 0
   if (normalizedUsername.value)
     count++
   if (normalizedCardCode.value)
     count++
+  if (!isLoggedIn.value && password.value)
+    count++
   return count
 })
-const submitDisabled = computed(() => loading.value || checkingCard.value || filledFieldCount.value < 2)
+const submitDisabled = computed(() => loading.value || checkingCard.value || filledFieldCount.value < requiredFieldCount.value)
 const submitReadinessLabel = computed(() => {
   if (loading.value)
     return '提交中'
   if (checkingCard.value)
     return '核验中'
-  if (filledFieldCount.value === 2)
+  if (filledFieldCount.value === requiredFieldCount.value)
     return '可提交'
   return '待补充'
 })
@@ -57,10 +61,10 @@ const cardUsageSummary = computed(() => {
   if (!normalizedCardCode.value)
     return '等待输入卡密'
   if (cardInfo.value?.type === 'quota')
-    return `已识别为额度卡，预计增加 ${getCardQuotaValue(cardInfo.value)} 个账号额度`
+    return `额度 +${getCardQuotaValue(cardInfo.value)}`
   if (cardInfo.value?.type === 'time')
-    return `已识别为时间卡，预计增加 ${formatTimeDuration(cardInfo.value)} 时长`
-  return normalizedCardCode.value.length >= 8 ? '卡密长度已满足常规输入习惯，建议先查询再提交' : '卡密看起来偏短，建议再次核对'
+    return `时长 +${formatTimeDuration(cardInfo.value)}`
+  return normalizedCardCode.value.length >= 8 ? '可先查询卡密' : '请核对卡密'
 })
 const pageSummary = computed(() => {
   if (success.value) {
@@ -69,11 +73,11 @@ const pageSummary = computed(() => {
       : `续费结果已返回，页面将在约 ${redirectSeconds} 秒后跳回登录页。`
   }
   if (error.value)
-    return '请先核对用户名、卡密是否填写正确，再重新提交一次。'
+    return '请先核对用户名、账号密码和卡密，再重新提交。'
   if (cardInfo.value) {
     return cardInfo.value.type === 'quota'
-      ? '当前卡密可用于增加账号额度，提交后会立即刷新该用户可添加账号上限。'
-      : '当前卡密可用于延长账号时长，提交后会立即更新有效期。'
+      ? '增加账号额度。'
+      : '延长有效期。'
   }
   return '时间卡会延长有效期，额度卡会增加可添加账号数量。'
 })
@@ -158,6 +162,11 @@ async function submitRenewal() {
     error.value = '请输入用户名'
     return
   }
+
+  if (!isLoggedIn.value && !password.value) {
+    error.value = '请输入账号密码'
+    return
+  }
   if (!normalizedCardCode.value) {
     error.value = '请输入卡密'
     return
@@ -183,6 +192,7 @@ async function submitRenewal() {
       ? await userStore.renew(normalizedCardCode.value)
       : (await api.post('/api/public/renew', {
           username: normalizedUsername.value,
+          password: password.value,
           cardCode: normalizedCardCode.value,
         })).data
 
@@ -192,6 +202,7 @@ async function submitRenewal() {
     }
 
     const cardType = data.data?.cardType || cardInfo.value?.type
+    password.value = ''
     const card = data.data?.card
     success.value = cardType === 'quota'
       ? `续费成功，账号额度已增加 ${cardInfo.value ? getCardQuotaValue(cardInfo.value) : data.data?.days ?? ''}${cardInfo.value ? ' 个' : ''}。`
@@ -228,7 +239,7 @@ async function submitRenewal() {
             续费中心
           </h1>
           <p class="text-sm text-gray-500 dark:text-gray-400">
-            输入用户名和卡密，完成账号续费。
+            验证账号身份并输入卡密，完成续费。
           </p>
         </div>
       </div>
@@ -278,7 +289,7 @@ async function submitRenewal() {
             已填写字段
           </div>
           <div class="mt-1 font-semibold">
-            {{ filledFieldCount }} / 2
+            {{ filledFieldCount }} / {{ requiredFieldCount }}
           </div>
         </div>
         <div class="rounded-2xl bg-gray-50 px-4 py-3 text-sm text-gray-700 dark:bg-gray-900/40 dark:text-gray-200">
@@ -293,7 +304,7 @@ async function submitRenewal() {
 
       <div class="grid mb-6 gap-3 sm:grid-cols-2">
         <div class="rounded-2xl bg-gray-50 px-4 py-3 text-sm text-gray-600 dark:bg-gray-900/40 dark:text-gray-300">
-          {{ isLoggedIn ? '当前已登录，将直接为当前账号续费并同步刷新本地账号信息。' : '时间卡会延长账号有效期；额度卡会增加可添加账号数量。若返回失败，优先核对用户名是否与当前登录名一致。' }}
+          {{ isLoggedIn ? '为当前账号续费。' : '时间卡延长有效期，额度卡增加账号数。' }}
         </div>
         <div
           class="rounded-2xl px-4 py-3 text-sm"
@@ -309,6 +320,14 @@ async function submitRenewal() {
           label="用户名"
           placeholder="请输入用户名"
           :disabled="!canEditUsername"
+        />
+        <BaseInput
+          v-if="!isLoggedIn"
+          v-model="password"
+          label="账号密码"
+          type="password"
+          autocomplete="current-password"
+          placeholder="请输入账号密码"
         />
         <div class="space-y-3">
           <div class="flex flex-col gap-3 sm:flex-row sm:items-end">

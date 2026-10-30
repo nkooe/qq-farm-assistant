@@ -1,9 +1,15 @@
+const { isUserIdentity } = require('../models/user-id');
 const crypto = require('node:crypto');
 const { getUserAccessRejection } = require('../models/access-policy');
 
-function createAdminSessionManager({ logger, getIo }) {
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_USER_SESSIONS = 10;
+
+function createAdminSessionManager({ logger, getIo, getUser, now = Date.now }) {
+  if (typeof getUser !== 'function') throw new Error('Session manager requires an authoritative user lookup');
   const adminTokens = new Set();
   const adminSessions = new Map();
+  const sessionExpirations = new Map();
 
   function generateAdminToken() {
     return crypto.randomBytes(24).toString('hex');
@@ -16,33 +22,40 @@ function createAdminSessionManager({ logger, getIo }) {
     });
   }
 
-  function logAdminSessionRejected(reason, username) {
+  function logAdminSessionRejected(reason, userId) {
     logger.warn('admin session rejected', {
       reason,
-      username,
+      userId,
     });
   }
 
-  function logAdminSessionEvent(event, reason, username) {
+  function logAdminSessionEvent(event, reason, userId) {
     logger.info(event, {
       reason,
-      username,
+      userId,
     });
   }
 
   function createAdminSession(user) {
-    if (!user || !['admin', 'user'].includes(user.role)) {
+    if (!isUserIdentity(user)) {
       throw new Error('无效的用户角色');
     }
+    for (const [token, expiresAt] of sessionExpirations) {
+      if (expiresAt <= now()) invalidateAdminSessionAndDisconnect(token);
+    }
+    const ownTokens = [...adminSessions].filter(([, session]) => session.id === user.id).map(([token]) => token);
+    while (ownTokens.length >= MAX_USER_SESSIONS) invalidateAdminSessionAndDisconnect(ownTokens.shift());
     const token = generateAdminToken();
     adminTokens.add(token);
     adminSessions.set(token, user);
+    sessionExpirations.set(token, now() + SESSION_TTL_MS);
     return token;
   }
 
   function invalidateAdminSession(token) {
     adminTokens.delete(token);
     adminSessions.delete(token);
+    sessionExpirations.delete(token);
   }
 
   function disconnectAdminTokenSockets(token) {
@@ -84,10 +97,10 @@ function createAdminSessionManager({ logger, getIo }) {
     if (!token || !adminTokens.has(token))
       return sendUnauthorized(res);
     req.adminToken = token;
-    req.currentUser = adminSessions.get(token);
+    req.currentUser = getSession(token);
     const rejection = getAdminSessionRejection(req.currentUser);
     if (rejection) {
-      logAdminSessionRejected(rejection.reason, req.currentUser?.username);
+      logAdminSessionRejected(rejection.reason, adminSessions.get(token)?.id);
       invalidateAdminSessionAndDisconnect(token);
       return res.status(403).json({
         ok: false,
@@ -101,37 +114,43 @@ function createAdminSessionManager({ logger, getIo }) {
   function cleanupInvalidAdminSessions() {
     const expiredSessions = [];
     for (const [token, session] of adminSessions.entries()) {
-      const rejection = getAdminSessionRejection(session);
+      const rejection = getAdminSessionRejection(getSession(token));
       if (!rejection) continue;
       logAdminSessionEvent(
         'admin session cleanup queued',
         rejection.reason,
-        session?.username,
+        session?.id,
       );
       expiredSessions.push({
         token,
-        username: session?.username,
+        userId: session?.id,
         reason: rejection.reason,
       });
     }
-    for (const { token, username, reason } of expiredSessions) {
+    for (const { token, userId, reason } of expiredSessions) {
       invalidateAdminSessionAndDisconnect(token);
-      logAdminSessionEvent('admin session force logout', reason, username);
+      logAdminSessionEvent('admin session force logout', reason, userId);
     }
   }
 
   function hasToken(token) {
-    return adminTokens.has(token);
+    return !!getSession(token);
   }
 
   function getSession(token) {
-    return adminSessions.get(token) || null;
+    const session = adminSessions.get(token);
+    if (session && sessionExpirations.get(token) <= now()) {
+      invalidateAdminSessionAndDisconnect(token);
+      return null;
+    }
+    return session ? getUser(session.id) : null;
   }
 
   return {
     cleanupInvalidAdminSessions,
     createAdminSession,
     getSession,
+    getAdminSessionRejection,
     hasToken,
     invalidateAdminSessionAndDisconnect,
     invalidateAdminSessions,
@@ -142,4 +161,6 @@ function createAdminSessionManager({ logger, getIo }) {
 
 module.exports = {
   createAdminSessionManager,
+  SESSION_TTL_MS,
+  MAX_USER_SESSIONS,
 };

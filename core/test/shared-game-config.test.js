@@ -60,7 +60,7 @@ test('公共表重载后，已经绑定函数的真实仓库门面及策略列�
   const api = require('../src/services/farm-api');
   const mainNetwork = require('../src/utils/network');
   t.mock.method(api, 'getSeedShopId', async () => 2);
-  t.mock.method(api, 'getShopInfo', async () => ({ goods_list: [] }));
+  t.mock.method(api, 'getShopInfo', async () => ({ goods_list: [{ id: 987, item_id: marker, unlocked: true }] }));
   t.mock.method(mainNetwork, 'getUserState', () => ({ level: 200 }));
   const plantingId = require.resolve('../src/services/planting-service');
   delete require.cache[plantingId];

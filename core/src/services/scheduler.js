@@ -190,7 +190,7 @@ function createScheduler(namespace = 'default') {
 
     const runner = async () => {
       const current = timers.get(key);
-      if (!current) return;
+      if (current !== record) return;
       if (preventOverlap && current.running) return;
       current.running = true;
       current.lastRunAt = Date.now();
@@ -206,7 +206,7 @@ function createScheduler(namespace = 'default') {
         });
       } finally {
         const after = timers.get(key);
-        if (after) {
+        if (after === record) {
           after.running = false;
           after.nextRunAt = Date.now() + intervalMs;
         }

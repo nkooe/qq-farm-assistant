@@ -38,7 +38,7 @@ func parseTCPProxy(value string) (*tcpProxy, error) {
 	return &tcpProxy{Scheme: u.Scheme, Host: u.Hostname(), Port: u.Port(), User: u.User}, nil
 }
 
-func dialTCP(ctx context.Context, host string, port int, timeout time.Duration, proxyValue string, fallbackDirect bool) (net.Conn, error) {
+func dialTCP(ctx context.Context, host string, port int, timeout time.Duration, proxyValue string) (net.Conn, error) {
 	proxy, err := parseTCPProxy(proxyValue)
 	if err != nil {
 		return nil, err
@@ -46,14 +46,7 @@ func dialTCP(ctx context.Context, host string, port int, timeout time.Duration, 
 	if proxy == nil {
 		return dialDirect(ctx, host, port, timeout)
 	}
-	conn, err := dialViaProxy(ctx, proxy, host, port, timeout)
-	if err == nil {
-		return conn, nil
-	}
-	if !fallbackDirect {
-		return nil, err
-	}
-	return dialDirect(ctx, host, port, timeout)
+	return dialViaProxy(ctx, proxy, host, port, timeout)
 }
 
 func dialDirect(ctx context.Context, host string, port int, timeout time.Duration) (net.Conn, error) {
@@ -215,7 +208,7 @@ func httpConnect(conn net.Conn, userInfo *url.Userinfo, targetHost string, targe
 }
 
 func TestTCPProxy(ctx context.Context, proxyValue, targetHost string, targetPort int, timeout time.Duration) error {
-	conn, err := dialTCP(ctx, targetHost, targetPort, timeout, proxyValue, false)
+	conn, err := dialTCP(ctx, targetHost, targetPort, timeout, proxyValue)
 	if err != nil {
 		return err
 	}

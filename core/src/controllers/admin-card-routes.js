@@ -50,7 +50,7 @@ function registerAdminCardRoutes({
           durationOptions,
         );
         adminLogger.warn("批量创建卡密", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           description: String(description || "").trim(),
           count: cards.length,
           type: cardType,
@@ -70,7 +70,7 @@ function registerAdminCardRoutes({
 
       const card = userStore.createCard(description, days, cardType, durationOptions);
       adminLogger.info("创建卡密", {
-        admin: req.currentUser?.username || "",
+        admin: req.currentUser?.id || "",
         description: String(description || "").trim(),
         type: cardType,
         days: Number(days),
@@ -102,7 +102,7 @@ function registerAdminCardRoutes({
 
         const result = userStore.deleteCardsBatch(codes);
         adminLogger.warn("批量删除卡密", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           deleteCount: codes.length,
           confirmation: "DELETE_CARDS_BATCH",
         });
@@ -127,7 +127,7 @@ function registerAdminCardRoutes({
         }
 
         adminLogger.warn("更新卡密状态", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           code,
           enabled: card?.enabled !== false,
           confirmation: "UPDATE_CARD_STATUS",
@@ -153,7 +153,7 @@ function registerAdminCardRoutes({
         }
 
         adminLogger.warn("删除卡密", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           code,
           confirmation: "DELETE_CARD",
         });
@@ -188,7 +188,8 @@ function registerAdminCardRoutes({
           return;
         }
 
-        const { enabled } = req.body;
+        const { enabled } = req.body || {};
+        if (typeof enabled !== 'boolean') return res.status(400).json({ ok: false, error: '卡密领取开关必须为布尔值' });
         const availableTimeCards = userStore.getAvailableTimeCardCount();
         if (enabled && availableTimeCards <= 0) {
           return res.status(400).json({
@@ -200,7 +201,7 @@ function registerAdminCardRoutes({
 
         const status = userStore.setCardClaimStatus(enabled);
         adminLogger.warn("更新卡密领取功能状态", {
-          admin: req.currentUser?.username || "",
+          admin: req.currentUser?.id || "",
           enabled: !!status.enabled,
           availableTimeCards,
           confirmation: "UPDATE_CARD_CLAIM_STATUS",
@@ -219,9 +220,8 @@ function registerAdminCardRoutes({
   app.post("/api/card-claim/claim", (req, res) => {
     try {
       const userAgent = req.headers["user-agent"] || "";
-      const username = req.body?.username || null;
       userStore.clearExpiredClaimRecords();
-      const claim = userStore.claimCardByUA(userAgent, username);
+      const claim = userStore.claimCard(userAgent, req.socket.remoteAddress);
       if (!claim.ok) {
         const payload = { ok: false, error: claim.error };
         if (claim.remainingMs) payload.remainingMs = claim.remainingMs;

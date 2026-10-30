@@ -127,7 +127,7 @@ function onCurrencyToggle(id: number, checked: boolean) {
       </div>
 
       <p class="text-xs text-gray-400">
-        开启后，每当出现神秘商人且货币类型命中上方勾选项时，会自动买下整个商品（一次买光）。
+        匹配所选货币时自动买光。
       </p>
     </div>
 

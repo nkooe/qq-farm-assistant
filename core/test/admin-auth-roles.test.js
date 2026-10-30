@@ -14,6 +14,7 @@ const { createAdminSessionManager } = require('../src/controllers/admin-session-
 const { createAdminRouteHelpers } = require('../src/controllers/admin-route-helpers');
 const { createAdminAccountAccess } = require('../src/controllers/admin-account-access');
 const { registerAdminAuthRoutes } = require('../src/controllers/admin-auth-routes');
+const { registerAdminPublicInfoRoutes } = require('../src/controllers/admin-public-info-routes');
 const { registerAdminCurrentUserRoutes } = require('../src/controllers/admin-current-user-routes');
 const { registerAdminAccountRoutes } = require('../src/controllers/admin-account-routes');
 const { registerAdminCardRoutes } = require('../src/controllers/admin-card-routes');
@@ -22,12 +23,16 @@ const { registerAdminSystemRoutes } = require('../src/controllers/admin-system-r
 const { getAccessPolicy, setAccessPolicy, getUserAccessRejection } = require('../src/models/access-policy');
 const logger = { info() {}, warn() {}, error() {} };
 const accounts = [
-  { id: '1', username: 'alice', name: 'Alice farm' },
-  { id: '2', username: 'bob', name: 'Bob farm' },
+  { id: '1', userId: 1001, name: 'Alice farm' },
+  { id: '2', userId: 1002, name: 'Bob farm' },
 ];
-const provider = { getAccounts: () => ({ accounts }) };
+const schedulerCalls = [];
+const provider = {
+  getAccounts: () => ({ accounts }),
+  getSchedulerStatus: async id => { schedulerCalls.push(id); return { runtime: ['bob-private-task'], accountId: id }; },
+};
 const store = require('../src/models/store');
-const sessions = createAdminSessionManager({ logger });
+const sessions = createAdminSessionManager({ logger, getUser: userStore.getUser });
 const helpers = createAdminRouteHelpers({ userStore });
 const access = createAdminAccountAccess({ store, getProvider: () => provider });
 let server;
@@ -38,6 +43,7 @@ test.before(async () => {
   app.use(express.json());
   registerAdminAuthRoutes({ app, logger, userStore, ...sessions });
   app.use('/api', sessions.requireAdminToken);
+  registerAdminPublicInfoRoutes({ app, provider, userStore, ...access, ...helpers });
   registerAdminCurrentUserRoutes({ app, store, userStore, ...sessions, ...helpers });
   registerAdminAccountRoutes({ app, provider, userStore, ...access, ...helpers });
   registerAdminCardRoutes({ app, userStore, adminLogger: logger, ...sessions, ...helpers });
@@ -58,10 +64,10 @@ test.after(async () => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-async function request(route, { token, body } = {}) {
+async function request(route, { token, body, headers = {} } = {}) {
   return fetch(`${baseUrl}${route}`, {
     method: body === undefined ? 'GET' : 'POST',
-    headers: { 'content-type': 'application/json', ...(token ? { 'x-admin-token': token } : {}) },
+    headers: { 'content-type': 'application/json', ...(token ? { 'x-admin-token': token } : {}), ...headers },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(5000),
   });
@@ -90,6 +96,15 @@ test('initial administrator uses the same login and ordinary account APIs with a
   assert.ok(listed.every(u => !('password' in u)));
 });
 
+test('removed administrator WeChat configuration routes are not registered', async () => {
+  const { token } = await login('admin', 'admin');
+  for (const body of [undefined, { confirmed: true, enabled: true }]) {
+    const response = await request('/api/admin/wx-config', { token, body });
+    assert.equal(response.status, 404);
+    await response.text();
+  }
+});
+
 test('first registered user stays ordinary and cannot call administrator APIs', async () => {
   const card = userStore.createCard('Registration test', 1, 'time');
   const register = await request('/api/register', {
@@ -105,6 +120,50 @@ test('first registered user stays ordinary and cannot call administrator APIs', 
   assert.equal(cards.status, 403);
   const users = await request('/api/admin/users', { token: user.token });
   assert.equal(users.status, 403);
+  const config = await request('/api/user/wxlogin-config', { token: user.token });
+  assert.equal(config.status, 200);
+});
+
+test('local clients and forged forwarding headers never receive passwordless administrator sessions', async () => {
+  for (const ip of ['127.0.0.1', '10.0.0.8', '172.16.0.8', '192.168.1.8', '::1']) {
+    const headers = { 'cf-connecting-ip': ip, 'x-real-ip': ip, 'x-forwarded-for': ip };
+    const anonymous = await request('/api/auto-login', { body: {}, headers });
+    assert.equal(anonymous.status, 401);
+    assert.equal((await anonymous.json()).data?.token, undefined);
+    const { token } = await login('alice', 'Alice-Test-123');
+    const ordinary = await request('/api/auto-login', { token, body: {}, headers });
+    assert.equal(ordinary.status, 404);
+    await ordinary.text();
+  }
+});
+
+test('login rate limiting and audit use the socket peer instead of untrusted forwarding headers', async t => {
+  const peers = [];
+  t.mock.method(userStore, 'validateUser', (_name, _password, peer) => { peers.push(peer); return null; });
+  t.mock.method(userStore, 'addLoginLog', (_event, _name, _reason, peer) => { peers.push(peer); });
+  const res = await request('/api/login', { body: { username: 'alice', password: 'wrong' }, headers: {
+    'cf-connecting-ip': '10.0.0.8', 'x-real-ip': '192.168.1.8', 'x-forwarded-for': '127.0.0.1',
+  } });
+  assert.equal(res.status, 401);
+  assert.deepEqual(peers, ['127.0.0.1', '127.0.0.1']);
+});
+
+test('global and account scheduler details are administrator-only and unsupported providers fail explicitly', async t => {
+  const { token: alice } = await login('alice', 'Alice-Test-123');
+  for (const accountId of ['', '1', '2']) {
+    const res = await request('/api/scheduler', { token: alice, headers: { 'x-account-id': accountId } });
+    assert.equal(res.status, 403);
+    assert.equal(JSON.stringify(await res.json()).includes('bob-private-task'), false);
+  }
+  assert.deepEqual(schedulerCalls, []);
+  const { token: admin } = await login('admin', 'admin');
+  const res = await request('/api/scheduler', { token: admin });
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).data.runtime, ['bob-private-task']);
+  t.mock.method(provider, 'getSchedulerStatus', async () => { throw new Error('scheduler unavailable'); });
+  const failed = await request('/api/scheduler', { token: admin });
+  assert.equal(failed.status, 500);
+  assert.deepEqual(await failed.json(), { ok: false, error: 'scheduler unavailable' });
 });
 
 test('authentication requires a stored user with an explicitly supported role', () => {
@@ -114,8 +173,8 @@ test('authentication requires a stored user with an explicitly supported role', 
   const admin = data.users.find(u => u.username === 'admin');
   data.users.push({ ...admin, username: 'legacy_owner', role: 'super_admin' });
   fs.writeFileSync(file, JSON.stringify(data));
-  assert.equal(userStore.validateUser('legacy_owner', 'admin', 'test-legacy').error, 'invalid_credentials');
-  assert.ok(userStore.getAllUsers().some(u => u.username === 'legacy_owner'));
+  try { assert.throws(() => userStore.validateUser('legacy_owner', 'admin', 'test-legacy'), /用户记录无效/); }
+  finally { data.users.pop(); fs.writeFileSync(file, JSON.stringify(data)); }
 });
 
 test('removed privileged routes have no handlers even for a normal administrator', async () => {
@@ -157,10 +216,10 @@ test('invalidated roles lose HTTP sessions and connected sockets', () => {
   let disconnected = 0;
   const socket = { data: {}, disconnect: () => { disconnected++; } };
   const manager = createAdminSessionManager({
-    logger,
+    logger, getUser: () => user,
     getIo: () => ({ sockets: { sockets: new Map([['socket', socket]]) } }),
   });
-  const user = { username: 'legacy', role: 'user' };
+  const user = { id: 1003, username: 'legacy', role: 'user' };
   const token = manager.createAdminSession(user);
   socket.data.adminToken = token;
   user.role = 'super_admin';
@@ -172,12 +231,14 @@ test('invalidated roles lose HTTP sessions and connected sockets', () => {
 });
 
 test('session cleanup preserves admins and revokes expired, disabled and unsupported users', () => {
-  const manager = createAdminSessionManager({ logger });
-  const adminToken = manager.createAdminSession({ username: 'admin', role: 'admin', card: { enabled: false, expiresAt: 1 } });
-  const expiredToken = manager.createAdminSession({ username: 'expired', role: 'user', card: { enabled: true, expiresAt: 1 } });
-  const bannedToken = manager.createAdminSession({ username: 'banned', role: 'user', card: { enabled: false } });
-  const legacy = { username: 'legacy', role: 'user' };
-  const legacyToken = manager.createAdminSession(legacy);
+  const records = new Map();
+  const manager = createAdminSessionManager({ logger, getUser: name => records.get(name) });
+  const createSession = user => { records.set(user.id, user); return manager.createAdminSession(user); };
+  const adminToken = createSession({ id: 1000, username: 'admin', role: 'admin', card: { enabled: false, expiresAt: 1 } });
+  const expiredToken = createSession({ id: 1004, username: 'expired', role: 'user', card: { enabled: true, expiresAt: 1 } });
+  const bannedToken = createSession({ id: 1005, username: 'banned', role: 'user', card: { enabled: false } });
+  const legacy = { id: 1003, username: 'legacy', role: 'user' };
+  const legacyToken = createSession(legacy);
   legacy.role = 'super_admin';
   manager.cleanupInvalidAdminSessions();
   assert.equal(manager.hasToken(adminToken), true);
@@ -204,7 +265,7 @@ test('card verification defaults to enabled and only admins can change it after 
 test('disabled verification permits free registration, retains quotas and bans, and re-enabling revokes unactivated sessions', async (t) => {
   t.after(() => {
     setAccessPolicy({ cardVerificationEnabled: true });
-    userStore.updateUser('alice', { enabled: true, expiresAt: Date.now() + 86400000 });
+    userStore.updateUser(1001, { enabled: true, expiresAt: Date.now() + 86400000 });
   });
   const { token: admin } = await login('admin', 'admin');
   const spareCard = userStore.createCard('Keep unused', 3);
@@ -219,25 +280,25 @@ test('disabled verification permits free registration, retains quotas and bans, 
   assert.equal(userStore.getAllCards().find(c => c.code === spareCard.code).usedBy, null);
   const { token: freeToken } = await login('free_user', 'Test-Password-123');
   assert.equal((await request('/api/user/me', { token: freeToken })).status, 200);
-  userStore.updateUser('alice', { expiresAt: 1 });
+  userStore.updateUser(1001, { expiresAt: 1 });
   assert.equal((await login('alice', 'Alice-Test-123')).cardVerificationEnabled, false);
-  assert.equal(userStore.clearExpiredUsers().ok, false);
-  userStore.updateUser('alice', { enabled: false });
+  assert.throws(() => userStore.getExpiredUserIds(), /卡密验证已关闭/);
+  userStore.updateUser(1001, { enabled: false });
   const banned = await request('/api/login', { body: { username: 'alice', password: 'Alice-Test-123' } });
   assert.equal(banned.status, 403);
   assert.equal((await banned.json()).errorType, 'banned');
   // Toggling a ban on an unactivated user must not manufacture a permanent entitlement.
-  userStore.updateUser('free_user', { enabled: false });
-  userStore.updateUser('free_user', { enabled: true });
+  userStore.updateUser(userStore.getUserByUsername('free_user').id, { enabled: false });
+  userStore.updateUser(userStore.getUserByUsername('free_user').id, { enabled: true });
   const enabled = await request('/api/admin/access-policy', { token: admin, body: { cardVerificationEnabled: true, confirmed: true } });
   assert.equal(enabled.status, 200);
   assert.equal(sessions.hasToken(freeToken), false);
   const rejected = await request('/api/login', { body: { username: 'free_user', password: 'Test-Password-123' } });
   assert.equal(rejected.status, 403);
   assert.equal((await rejected.json()).errorType, 'card_required');
-  assert.equal(getUserAccessRejection({ role: 'user', card: { enabled: true } }).reason, 'card_required');
-  assert.equal(getUserAccessRejection({ role: 'user', card: { enabled: true, isPermanent: true } }), null);
-  const renewed = await request('/api/public/renew', { body: { username: 'free_user', cardCode: spareCard.code } });
+  assert.equal(getUserAccessRejection({ id: 1001, role: 'user', card: { enabled: true } }).reason, 'card_required');
+  assert.equal(getUserAccessRejection({ id: 1001, role: 'user', card: { enabled: true, isPermanent: true } }), null);
+  const renewed = await request('/api/public/renew', { body: { username: 'free_user', password: 'Test-Password-123', cardCode: spareCard.code } });
   assert.equal(renewed.status, 200);
   assert.equal((await login('free_user', 'Test-Password-123')).role, 'user');
   assert.equal((await request('/api/admin/cards', { token: admin })).status, 200);
@@ -246,7 +307,8 @@ test('disabled verification permits free registration, retains quotas and bans, 
 test('damaged access policy fails closed and saved policy is read after module reload', () => {
   const file = path.join(dataDir, 'access-policy.json');
   fs.writeFileSync(file, '{invalid');
-  assert.equal(getAccessPolicy().cardVerificationEnabled, true);
+  assert.throws(() => getAccessPolicy(), /读取|JSON/);
+  fs.writeFileSync(file, JSON.stringify({ cardVerificationEnabled: true }));
   setAccessPolicy({ cardVerificationEnabled: false });
   delete require.cache[require.resolve('../src/models/access-policy')];
   assert.equal(require('../src/models/access-policy').getAccessPolicy().cardVerificationEnabled, false);
@@ -267,20 +329,20 @@ test('announcements default off, require admin configuration and track reads by 
   const read = await request('/api/announcement', { token: alice });
   assert.equal((await read.json()).data.shouldShow, true);
   await request('/api/announcement/read', { token: alice, body: { updatedAt: first.updatedAt } });
-  assert.equal(store.shouldShowAnnouncement('alice'), false);
+  assert.equal(store.shouldShowAnnouncement(1001), false);
   const samePublish = await request('/api/admin/announcement', { token: admin, body });
   assert.equal((await samePublish.json()).data.updatedAt, first.updatedAt);
   const update = await request('/api/admin/announcement', { token: admin, body: { ...body, content: '新版内容' } });
   const second = (await update.json()).data;
   assert.ok(second.updatedAt > first.updatedAt);
   await request('/api/announcement/read', { token: alice, body: { updatedAt: first.updatedAt } });
-  assert.equal(store.shouldShowAnnouncement('alice'), true);
+  assert.equal(store.shouldShowAnnouncement(1001), true);
   await request('/api/admin/announcement', { token: admin, body: { ...body, enabled: false } });
-  assert.equal(store.shouldShowAnnouncement('alice'), false);
+  assert.equal(store.shouldShowAnnouncement(1001), false);
   assert.equal(store.getAnnouncement().content, body.content);
   await request('/api/admin/announcement', { token: admin, body: { ...body, showOnce: false } });
-  store.markAnnouncementRead('alice');
-  assert.equal(store.shouldShowAnnouncement('alice'), true);
+  store.markAnnouncementRead(1001);
+  assert.equal(store.shouldShowAnnouncement(1001), true);
   delete require.cache[require.resolve('../src/models/store')];
   const reloadedStore = require('../src/models/store');
   assert.equal(reloadedStore.getAnnouncement().enabled, true);
