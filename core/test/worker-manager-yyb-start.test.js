@@ -13,6 +13,7 @@ test.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
 const { createWorkerManager } = require('../src/runtime/worker-manager');
 const { createDataProvider } = require('../src/runtime/data-provider');
 const { createScheduler } = require('../src/services/scheduler');
+const { createLoginRecovery } = require('../src/services/login-recovery');
 const store = require('../src/models/store');
 
 function harness(t, reconnect = {}, overrides = {}) {
@@ -222,6 +223,32 @@ for (const order of ['manual-first', 'startup-first']) {
     assert.equal(h.workers[account.id].process.messages[0].config.code, 'shared-fresh');
   });
 }
+
+test('repeating an accepted YYB start preserves the in-flight credential request', async t => {
+  const loginRecovery = createLoginRecovery();
+  const h = harness(t, {}, { loginRecovery });
+  const account = { id: 'repeat-start', userId: 1000, autoStart: true, platform: 'wx', loginType: 'yyb', yybOpenid: 'repeat', code: 'old' };
+  h.accounts.push(account);
+  const provider = createDataProvider({
+    getAccountAccessRejection: () => null,
+    workers: h.workers, globalLogs: [], accountLogs: [],
+    getAccounts: () => ({ accounts: h.accounts.map(item => ({ ...item })) }),
+    store: { addOrUpdateAccount: patch => Object.assign(account, patch) },
+    getWorkerRuntime: h.manager.getWorkerRuntime,
+    startWorker: h.manager.startWorker, restartWorker: h.manager.restartWorker,
+    cancelCodeRefresh: id => loginRecovery.cancel(id),
+    scheduleAutoCodeRefresh() {}, addAccountLog() {},
+  });
+  assert.equal(provider.startAccount(account.id), true);
+  assert.equal(h.manager.getWorkerRuntime(account.id).state, 'starting');
+  assert.equal(provider.startAccount(account.id), true);
+  assert.equal(loginRecovery.getState(account.id).state, 'requesting');
+  h.requests.get('repeat')();
+  await setImmediate();
+  assert.equal(h.created.length, 1);
+  h.created[0].emit('message', { type: 'status_sync', data: { connection: { connected: true } } });
+  assert.equal(h.manager.getWorkerRuntime(account.id).state, 'online');
+});
 
 for (const change of ['stop', 'deleted', 'proxy', 'code']) {
   test(`worker restart cannot resurrect a changed account after ${change}`, async t => {

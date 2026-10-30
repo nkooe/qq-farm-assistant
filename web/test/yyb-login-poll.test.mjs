@@ -252,6 +252,7 @@ for (const scenario of [
     if (scenario.existingB)
       accounts.push({ id: '2', name: 'B remark', yybOpenid: 'wx-b', provider: scenario.thirdparty ? 'thirdparty' : 'builtin', code: 'old-b' })
     const started = []
+    const checked = []
     const h = harness(async (path, body) => {
       if (path.endsWith('/confirm'))
         return { data: { data: { openid: scenario.openid, nickname: 'B nickname' } } }
@@ -269,9 +270,13 @@ for (const scenario of [
     }, {
       importAccount: true,
       props: { editData: original },
-      get: async path => path.endsWith('/runtime')
-        ? { data: { ok: true, data: { state: 'online', connected: true } } }
-        : { data: { data: { accounts } } },
+      get: async (path) => {
+        if (path.endsWith('/runtime')) {
+          checked.push(path)
+          return { data: { ok: true, data: { state: 'online', connected: true } } }
+        }
+        return { data: { data: { accounts } } }
+      },
     })
     h.login.yybAccountName.value = original.name
     await h.login.importYybAccount('confirmed-session', 0)
@@ -283,7 +288,9 @@ for (const scenario of [
     assert.equal(h.login.yybSuccess.value.status, 'online')
     assert.equal(accounts.find(a => a.id === scenario.targetId).code, 'fresh-code')
     assert.equal(accounts.find(a => a.id === scenario.targetId).openId, undefined)
-    assert.deepEqual(started, [`/api/accounts/${scenario.targetId}/start`])
+    assert.equal(accounts.find(a => a.id === scenario.targetId).autoStart, true)
+    assert.deepEqual(started, [])
+    assert.deepEqual(checked, [`/api/accounts/${scenario.targetId}/runtime`])
     assert.equal(h.login.yybSuccess.value.name, scenario.openid === 'wx-a' ? 'A remark' : scenario.existingB && !scenario.thirdparty ? 'B remark' : 'B nickname')
   })
 }

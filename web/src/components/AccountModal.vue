@@ -21,6 +21,7 @@ const CODE_QUERY_RE = /[?&]code=([^&]+)/i
 
 type AccountTab = 'manual' | 'yyb' | 'qq'
 type YybLoginStage = 'idle' | 'creating' | 'pending' | 'scanned' | 'unknown' | 'authorized' | 'importing' | 'starting' | 'success' | 'expired' | 'error'
+type YybStartStatus = 'saved' | 'starting' | 'online' | 'failed' | 'reconnecting' | 'unconfirmed'
 
 interface YybAccountResult {
   openid: string
@@ -46,7 +47,7 @@ const yybStage = ref<YybLoginStage>('idle')
 const yybQrImage = ref('')
 const yybError = ref('')
 const yybPollErrCode = ref<number | null>(null)
-const yybSuccess = ref<{ accountId: string, name: string, isUpdate: boolean, status: 'saved' | 'starting' | 'online' | 'failed' } | null>(null)
+const yybSuccess = ref<{ accountId: string, name: string, isUpdate: boolean, status: YybStartStatus } | null>(null)
 const yybStartError = ref('')
 const yybProxyProfiles = ref<YybProxyProfile[]>([])
 const yybProxyMode = ref<'direct' | 'static'>('direct')
@@ -90,6 +91,26 @@ const yybStatusText = computed(() => {
 
 const yybBusy = computed(() => ['creating', 'authorized', 'importing', 'starting'].includes(yybStage.value))
 const yybProxyLocked = computed(() => ['authorized', 'importing', 'starting'].includes(yybStage.value))
+const yybResultTitle = computed(() => {
+  const action = yybSuccess.value?.isUpdate ? '更新' : '添加'
+  const labels: Record<YybStartStatus, string> = {
+    saved: `${action}成功，等待启动`,
+    starting: `${action}成功，正在启动`,
+    online: `${action}成功，已上线`,
+    failed: `${action}成功，启动失败`,
+    reconnecting: `${action}成功，等待重连`,
+    unconfirmed: `${action}成功，状态待确认`,
+  }
+  return labels[yybSuccess.value?.status || 'saved']
+})
+const yybResultStyle = computed(() => {
+  switch (yybSuccess.value?.status) {
+    case 'online': return { background: 'rgba(22, 163, 74, 0.12)', color: '#16a34a' }
+    case 'failed': return { background: 'rgba(220, 38, 38, 0.12)', color: '#dc2626' }
+    case 'starting': return { background: 'rgba(37, 99, 235, 0.12)', color: '#2563eb' }
+    default: return { background: 'rgba(217, 119, 6, 0.12)', color: '#d97706' }
+  }
+})
 
 function getRequestError(error: any, fallback: string) {
   return String(error?.response?.data?.error || error?.response?.data?.message || error?.message || fallback)
@@ -199,7 +220,7 @@ function waitYybRetry(signal: AbortSignal, delay: number) {
   })
 }
 
-async function startSavedYybAccount(version = yybPollVersion) {
+async function startSavedYybAccount(version = yybPollVersion, requestStart = true) {
   const saved = yybSuccess.value
   if (!saved || saved.status === 'starting')
     return
@@ -209,10 +230,33 @@ async function startSavedYybAccount(version = yybPollVersion) {
   saved.status = 'starting'
   yybStage.value = 'starting'
   yybStartError.value = ''
+  const finish = (status: YybStartStatus, error = '') => {
+    saved.status = status
+    yybStage.value = status === 'online' ? 'success' : 'error'
+    yybStartError.value = error
+    emit('refresh', saved.accountId)
+  }
   try {
-    const response = await api.post(`/api/accounts/${encodeURIComponent(saved.accountId)}/start`, {}, { timeout: 15000, signal: controller.signal })
-    if (response.data?.ok !== true)
-      throw new Error(response.data?.error || '启动请求失败')
+    if (requestStart) {
+      try {
+        const response = await api.post(`/api/accounts/${encodeURIComponent(saved.accountId)}/start`, {}, { timeout: 15000, signal: controller.signal })
+        if (controller.signal.aborted || version !== yybPollVersion)
+          return
+        if (response.data?.ok !== true) {
+          finish('failed', response.data?.error || '启动请求失败')
+          return
+        }
+      }
+      catch (error: any) {
+        if (controller.signal.aborted || version !== yybPollVersion)
+          return
+        if (error?.response || !error?.request) {
+          finish('failed', getRequestError(error, '启动请求失败'))
+          return
+        }
+        // A lost response does not cancel an accepted background startup.
+      }
+    }
     const deadline = Date.now() + 90000
     while (true) {
       if (controller.signal.aborted || version !== yybPollVersion || !props.show)
@@ -225,15 +269,17 @@ async function startSavedYybAccount(version = yybPollVersion) {
           throw new Error(data?.error || '无法读取启动状态')
         const runtime = data.data || {}
         if (runtime.connected === true) {
-          saved.status = 'online'
-          yybStage.value = 'success'
-          emit('refresh', saved.accountId)
+          finish('online')
           return
         }
-        if (['failed', 'stopped'].includes(runtime.state))
-          throw new Error(runtime.error || '账号未能启动，请重试启动')
-        if (runtime.state === 'reconnecting')
-          throw new Error(`${runtime.error || '启动暂未成功'}；已安排自动重连，可在账号管理查看进度`)
+        if (['failed', 'stopped'].includes(runtime.state)) {
+          finish('failed', runtime.error || (runtime.state === 'stopped' ? '启动已停止' : '启动失败'))
+          return
+        }
+        if (runtime.state === 'reconnecting') {
+          finish('reconnecting', runtime.error)
+          return
+        }
       }
       catch (error: any) {
         if (error?.code === 'ERR_CANCELED' || controller.signal.aborted)
@@ -243,18 +289,17 @@ async function startSavedYybAccount(version = yybPollVersion) {
         if (error?.response || !error?.request)
           throw error
       }
-      if (Date.now() >= deadline)
-        throw new Error('连接超时，账号已保存，可重试启动')
+      if (Date.now() >= deadline) {
+        finish('unconfirmed', '连接超时，请在账号列表查看')
+        return
+      }
       await waitYybRetry(controller.signal, 2000)
     }
   }
   catch (error: any) {
     if (controller.signal.aborted || version !== yybPollVersion)
       return
-    saved.status = 'failed'
-    yybStage.value = 'error'
-    yybStartError.value = getRequestError(error, '账号已保存，启动失败，请重试启动')
-    emit('refresh', saved.accountId)
+    finish('unconfirmed', getRequestError(error, '启动状态查询失败'))
   }
 }
 
@@ -308,6 +353,7 @@ async function importYybAccount(sessionId: string, version: number) {
     loginType: 'yyb',
     provider: 'builtin',
     yybOpenid: openid,
+    autoStart: true,
   })
   if (!saveResponse.data?.ok)
     throw new Error(saveResponse.data?.error || '保存应用宝账号失败')
@@ -334,7 +380,8 @@ async function importYybAccount(sessionId: string, version: number) {
   }
   yybQrImage.value = ''
   emit('refresh', accountId)
-  await startSavedYybAccount(version)
+  // Saving with autoStart already starts or restarts this account on the server.
+  await startSavedYybAccount(version, false)
 }
 
 async function pollYybLogin(sessionId: string, version: number) {
@@ -603,12 +650,12 @@ onBeforeUnmount(() => {
         <div v-if="activeTab === 'yyb'" class="space-y-4">
           <template v-if="yybSuccess">
             <div class="flex flex-col items-center gap-3 py-4">
-              <div class="h-16 w-16 flex items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30">
-                <span class="i-carbon-checkmark-filled text-4xl text-green-600 dark:text-green-400" />
+              <div class="h-16 w-16 flex items-center justify-center rounded-full" :style="yybResultStyle" aria-hidden="true">
+                <span class="text-4xl" :class="yybSuccess.status === 'online' ? 'i-carbon-checkmark-filled' : yybSuccess.status === 'starting' ? 'i-svg-spinners-ring-resize animate-spin' : 'i-carbon-warning-alt-filled'" />
               </div>
               <div class="text-center">
-                <div class="text-base font-semibold" :style="{ color: 'var(--theme-text)' }">
-                  {{ yybSuccess.isUpdate ? '应用宝账号已更新' : '应用宝账号已添加' }}
+                <div role="status" aria-live="polite" class="text-base font-semibold" :style="{ color: 'var(--theme-text)' }">
+                  {{ yybResultTitle }}
                 </div>
                 <div class="mt-1 break-all text-sm opacity-70" :style="{ color: 'var(--theme-text)' }">
                   {{ yybSuccess.name }}
@@ -616,20 +663,13 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <div class="flex items-start gap-2 border border-green-200 rounded-lg bg-green-50 px-3 py-3 text-sm text-green-800 leading-6 dark:border-green-800 dark:bg-green-900/20 dark:text-green-200">
-              <span class="i-carbon-renew mt-1 flex-none" />
-              <span aria-live="polite">
-                {{ yybSuccess.status === 'online' ? '游戏已上线' : yybSuccess.status === 'starting' ? '账号已保存，正在连接…' : '账号已保存，可重试启动' }}
-              </span>
-            </div>
-
-            <div v-if="yybStartError" role="alert" class="rounded-lg bg-red-50 p-3 text-sm text-red-700 dark:bg-red-900/20 dark:text-red-300">
-              {{ yybStartError }}
+            <div v-if="yybStartError" role="alert" class="rounded-lg p-3 text-sm" :style="yybResultStyle">
+              原因：{{ yybStartError }}
             </div>
 
             <div class="flex flex-wrap justify-end gap-2 pt-1">
-              <BaseButton v-if="yybSuccess.status !== 'online'" variant="primary" :loading="yybSuccess.status === 'starting'" @click="startSavedYybAccount()">
-                {{ yybSuccess.status === 'starting' ? '正在连接游戏' : '重试启动' }}
+              <BaseButton v-if="yybSuccess.status !== 'online'" variant="primary" :loading="yybSuccess.status === 'starting'" @click="startSavedYybAccount(yybPollVersion, yybSuccess.status !== 'unconfirmed')">
+                {{ yybSuccess.status === 'starting' ? '正在连接游戏' : yybSuccess.status === 'unconfirmed' ? '刷新状态' : yybSuccess.status === 'reconnecting' ? '立即重试' : '重试启动' }}
               </BaseButton>
               <BaseButton :variant="yybSuccess.status === 'online' ? 'primary' : 'outline'" @click="close">
                 {{ yybSuccess.status === 'online' ? '完成' : yybSuccess.status === 'starting' ? '关闭（后台继续启动）' : '关闭' }}

@@ -452,12 +452,16 @@ function createDataProvider(deps) {
             const account = findAccount(id || ref);
             if (!account) return false;
             assertAccountAccess(account);
-            refreshControllers.get(id)?.abort();
-            deps.cancelCodeRefresh?.(id);
-            account.autoStart = true;
-            store.addOrUpdateAccount({ id: account.id, autoStart: true });
-            scheduleAutoCodeRefresh?.(id);
             const runtime = typeof getWorkerRuntime === 'function' ? getWorkerRuntime(account.id) : null;
+            // Repeated starts must share an active startup, including its Code request.
+            // startWorker still checks credential identity before reusing the task.
+            if (!(account.autoStart === true && ['starting', 'online'].includes(runtime?.state))) {
+                refreshControllers.get(id)?.abort();
+                deps.cancelCodeRefresh?.(id);
+                account.autoStart = true;
+                store.addOrUpdateAccount({ id: account.id, autoStart: true });
+                scheduleAutoCodeRefresh?.(id);
+            }
             if (workers[account.id] && !workers[account.id]?.status?.connection?.connected && runtime?.state !== 'starting') {
                 Promise.resolve(restartWorker(account, options)).catch(error => deps.addAccountLog('start_failed', error.message, id, account.name));
             } else {

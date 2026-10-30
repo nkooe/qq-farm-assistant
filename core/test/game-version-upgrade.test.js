@@ -28,13 +28,13 @@ test('public version reports the agreed application number with a valid package 
     const packages = ['../../package.json', '../package.json', '../../web/package.json'].map(file => require(file));
     for (const pkg of packages) {
         assert.match(pkg.version, /^\d+\.\d+\.\d+$/);
-        assert.equal(pkg.appVersion, '1.15.02.015');
+        assert.equal(pkg.appVersion, '1.15.02.016');
     }
     const routes = new Map();
     require('../src/controllers/admin-public-info-routes').registerAdminPublicInfoRoutes({ app: { get: (url, handler) => routes.set(url, handler) } });
     let result;
     routes.get('/api/ping')({}, { json(value) { result = value; } });
-    assert.equal(result.data.version, '1.15.02.015');
+    assert.equal(result.data.version, '1.15.02.016');
 });
 
 test('legacy farming configuration includes the new crops, items and mutations', () => {
