@@ -50,7 +50,7 @@ const reconnectLabel = computed(() => {
   if (plan.state === 'needs_rescan')
     return '请扫码，重试已暂停'
   if (plan.state === 'blocked')
-    return '配置异常，重试已暂停'
+    return plan.kind === 'kicked' ? '已被踢下线，请手动启动' : '配置异常，重试已暂停'
   return plan.state === 'waiting_credentials' ? '等待登录恢复' : `重连已达上限（${plan.attempt}/${plan.maxAttempts}）`
 })
 const credentialLabel = computed(() => {

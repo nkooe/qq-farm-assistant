@@ -19,20 +19,20 @@ function harness(options = {}) {
     const bag = [{ id: 1042, count: 1 }, { id: 1041, count: 200 }, { id: 1001, count: 100000 }, { id: 40525, uid: 900, count: 20 }];
     const shop = { level: 1, sales_item_id: 1042, boost_cups_per_use: 40, drink_cups: { 2: 10 }, slots: [], pending_rewards: [{ id: 1041, count: 12 }] };
     const work = { hire_subscribe_qq_jump_url: 'private-signature', hire_subscribe_template_id: 'private-template' };
-    const fields = { 55: 'milk_tea_get_shop', 56: 'milk_tea_get_hire_list', 58: 'milk_tea_get_workshop', 60: 'milk_tea_boost', 62: 'milk_tea_craft', 57: 'milk_tea_hire', 1: 'shop_buy', 75: 'growth_fund_unlock', 76: 'growth_fund_claim', 63: 'milk_tea_get_work_page' };
+    const fields = { 53: 'milk_tea_create_shop', 55: 'milk_tea_get_shop', 56: 'milk_tea_get_hire_list', 58: 'milk_tea_get_workshop', 60: 'milk_tea_boost', 62: 'milk_tea_craft', 57: 'milk_tea_hire', 1: 'shop_buy', 75: 'growth_fund_unlock', 76: 'growth_fund_claim', 63: 'milk_tea_get_work_page' };
     Object.assign(fields, { 59: 'milk_tea_claim_cashier', 64: 'milk_tea_claim_wages', 54: 'milk_tea_rename_shop', 61: 'milk_tea_upgrade', 68: 'milk_tea_set_hire_disable', 65: 'milk_tea_interact' });
     const mock = (name, exports) => { const id = require.resolve(`../src/modern/${name}`); require.cache[id] = { id, filename: id, loaded: true, exports }; };
     mock('utils/proto', { types });
-    mock('utils/utils', { toNum: v => Number(v) || 0, getServerTimeSec: () => now });
+    mock('utils/utils', { toNum: v => Number(v) || 0, getServerTimeSec: () => now, toTimeSec: require('../src/utils/utils').toTimeSec });
     mock('config/gameConfig', { getItemById: id => ({ name: `物品${id}` }), getItemImageById: () => '' });
     mock('services/pay', { getDiamondBalance: async () => 767 });
-    mock('services/warehouse', { getBag: async () => ({ items: bag }), getBagItems: b => b.items, isItemLocked: v => !!v.locked });
+    mock('services/warehouse', { getBag: async () => ({ items: bag }), getBagItems: b => b.items, isItemLocked: v => !!v.locked, serializeInventory: task => task() });
     mock('utils/network', { sendMsgAsync: async (_service, method, body) => {
         if (method === 'GetGroup') {
             reads.push('group');
             options.onRead?.('group');
             if (failRefresh && writes) throw new Error('offline');
-            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { activity_id: '2026110102' }, shop: { goods: [goods] } }, { head: { activity_id: '2026110103' }, growth_fund: fund }] } }) };
+            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { ...milk.head, activity_id: '2026110102' }, shop: { goods: [goods] } }, { head: { ...milk.head, activity_id: '2026110103' }, growth_fund: fund }] } }) };
         }
         const req = types.MilkTeaOperateRequest.toObject(types.MilkTeaOperateRequest.decode(body), { longs: String });
         const cmd = Number(req.operate_type);
@@ -44,13 +44,15 @@ function harness(options = {}) {
         else if (cmd === 63) result = work;
         else {
             calls.push(req); writes++;
-            if (cmd === 60) { bag[0].count--; result = { cups: 40, token_gain: 183, coin_gain: 111375 }; }
+            if (cmd === 53) { milk.milk_tea.summary.shop_open_at = now; result = { opening_gift: [{ id: 1042, count: 1 }] }; }
+            else if (cmd === 60) { bag[0].count -= req.milk_tea_boost.count; result = { cups: 40, token_gain: 183, coin_gain: 111375 }; }
             else if (cmd === 59) { shop.pending_rewards = []; result = { awards: [{ id: 1041, count: 12 }] }; }
             else if (cmd === 64) { for (const slip of work.slips || []) slip.wage_status = 2; result = { awards: [{ id: 1041, count: 4 }] }; }
             else if (cmd === 75) { fund.unlocked = true; result = {}; }
             else if (cmd === 76) { fund.tiers[0].state = 3; result = { claimed_tier_ids: [1], awards: [{ id: 1002, count: 288 }] }; }
             else if (cmd === 57) result = { results: [{ success: false, error_code: 1, error_msg: '员工状态已变化' }] };
-            else if (cmd === 62) result = { crafted_cups: { 2: 20 }, drink_cups: { 2: 30 }, used_fruits: [bag[3]] };
+            else if (cmd === 62) { result = { crafted_cups: { 2: 20 }, drink_cups: { 2: 30 }, used_fruits: [{ ...bag[3] }] }; bag[3].count = 0; }
+            else if (cmd === 1) { goods.purchased_count += Number(req.shop_buy.count); bag[2].count -= Number(req.shop_buy.count) * 10000; result = { awards: [{ id: 20525, count: req.shop_buy.count }] }; }
             else result = { awards: [{ id: 20525, count: 1 }] };
             if (options.loseReply === cmd) { options.loseReply = null; throw new Error('lost reply'); }
         }
@@ -60,33 +62,37 @@ function harness(options = {}) {
     return { service: require(id), calls, reads, bag, shop, fund, goods, work, summary: milk.milk_tea.summary, setTime: v => now = v, failRefresh: () => failRefresh = true };
 }
 
-test('background cycle collects only available rewards, wages and unlocked fund without spending resources', async () => {
+test('background cycle manages crafting, boosts, fund unlock and exchange without switches', async () => {
     const h = harness();
     h.work.slips = [{ wage_status: 1 }, { wage_status: 0 }];
-    h.fund.unlocked = true;
     const result = await h.service.runMilkTeaAutomation(() => true);
-    assert.deepEqual(result.completed, ['营业收益', '工作工资', '已解锁基金奖励']);
-    assert.deepEqual(h.calls.map(v => Number(v.operate_type)), [59, 64, 76]);
-    assert.deepEqual(h.reads, ['group', 55, 63]);
-    assert.equal(h.bag[0].count, 1);
+    assert.deepEqual(result.completed, ['营业收益', '工作工资', '制作奶茶', '爆单加速', '基金解锁', '基金奖励', '商店兑换']);
+    assert.equal(result.status, 'error'); // Fixture explicitly rejects hiring.
+    assert.deepEqual(h.calls.map(v => Number(v.operate_type)), [59, 64, 62, 57, 60, 75, 76, 1]);
+    assert.equal(h.bag[0].count, 0);
+    assert.equal(h.bag[3].count, 0);
+    assert.equal(h.calls.find(value => Number(value.operate_type) === 1).shop_buy.count, '10');
     assert.deepEqual((await h.service.runMilkTeaAutomation(() => true)).completed, []);
-    assert.equal(h.calls.length, 3);
+    assert.equal(h.calls.filter(value => [59, 64, 62, 60, 75, 76, 1].includes(Number(value.operate_type))).length, 7);
 });
-test('background cycle skips inactive or unopened shops and never unlocks a locked fund', async () => {
+
+test('background cycle opens unopened shops and restricts settlement to allowed operations', async () => {
     const h = harness();
     h.summary.shop_open_at = 0;
-    assert.equal((await h.service.runMilkTeaAutomation(() => true)).status, 'unopened');
-    assert.deepEqual(h.reads, ['group']);
-    h.summary.shop_open_at = 1792030000;
+    await h.service.runMilkTeaAutomation(() => true);
+    assert.equal(h.calls[0].operate_type, '53');
+    assert.equal(h.calls[0].milk_tea_create_shop.shop_name, '奶茶小铺');
+    const count = h.calls.length;
     h.setTime(1794844799);
     assert.equal((await h.service.runMilkTeaAutomation(() => true)).status, 'inactive');
-    assert.equal(h.calls.length, 0);
-    h.setTime(1794672000); // Settlement still permits collection.
+    assert.equal(h.calls.length, count);
+    h.setTime(1794672000);
+    h.shop.pending_rewards = [{ id: 1041, count: 1 }];
     await h.service.runMilkTeaAutomation(() => true);
-    assert.deepEqual(h.calls.map(v => Number(v.operate_type)), [59]);
-    assert.equal(h.fund.unlocked, false);
+    assert.deepEqual(h.calls.slice(count).map(v => Number(v.operate_type)), [59]);
 });
-test('disconnect or disable during reads stops the next write and queued manual claims cannot duplicate collection', async () => {
+
+test('disconnect during reads stops writes and queued manual claims cannot duplicate collection', async () => {
     let allowed = true;
     const h = harness({ onRead: cmd => { if (cmd === 55) allowed = false; } });
     await assert.rejects(h.service.runMilkTeaAutomation(() => allowed), /已暂停/);
@@ -94,19 +100,19 @@ test('disconnect or disable during reads stops the next write and queued manual 
     const other = harness();
     const result = await Promise.allSettled([other.service.runMilkTeaAutomation(() => true), other.service.operateMilkTeaActivity('claim')]);
     assert.deepEqual(result.map(v => v.status), ['fulfilled', 'rejected']);
-    assert.equal(other.calls.length, 1);
+    assert.equal(other.calls.filter(value => Number(value.operate_type) === 59).length, 1);
 });
-test('lost reward reply is not replayed; a new cycle reads server state and preserves partial results', async () => {
+
+test('lost wage reply is not replayed while independent automatic tasks continue', async () => {
     const h = harness({ loseReply: 64 });
     h.work.slips = [{ wage_status: 1 }];
-    await assert.rejects(h.service.runMilkTeaAutomation(() => true), error => {
-        assert.deepEqual(error.completed, ['营业收益']);
-        return /lost reply/.test(error.message);
-    });
-    const reads = h.reads.length;
+    const result = await h.service.runMilkTeaAutomation(() => true);
+    assert.equal(result.status, 'error');
+    assert.ok(result.completed.includes('营业收益'));
+    assert.ok(!result.completed.includes('工作工资'));
+    assert.ok(result.completed.includes('制作奶茶'));
     assert.deepEqual((await h.service.runMilkTeaAutomation(() => true)).completed, []);
-    assert.deepEqual(h.reads.slice(reads), ['group', 55, 63]);
-    assert.deepEqual(h.calls.map(v => Number(v.operate_type)), [59, 64]);
+    assert.equal(h.calls.filter(value => Number(value.operate_type) === 64).length, 1);
 });
 
 test('boost spends the checked horn once and returns actual awards, retaining success after refresh failure', async () => {
@@ -183,18 +189,15 @@ test('hire automatically chooses a freshly vacant unlocked slot and rejects a fu
     assert.equal(h.calls.at(-1).milk_tea_hire.hires[0].slot_index, 0);
 });
 
-test('settings validate the current shop and preserve boolean hire mode in the wire request', async () => {
+test('hire mode is managed automatically and renaming still validates the current shop', async () => {
     const h = harness();
-    await assert.rejects(h.service.operateMilkTeaActivity('hireSetting', { disabled: 'false' }), /无效/);
-    for (const disabled of [true, false]) {
-        await h.service.operateMilkTeaActivity('hireSetting', { disabled });
-        assert.equal(h.calls.at(-1).milk_tea_set_hire_disable.hire_disabled, disabled);
-    }
+    for (const disabled of ['false', true, false])
+        await assert.rejects(h.service.operateMilkTeaActivity('hireSetting', { disabled }), /自动经营管理/);
     h.summary.rename_cd_until_at = 1792033000;
     await assert.rejects(h.service.operateMilkTeaActivity('rename', { name: '奶茶补给站' }), /修改店名时间/);
     h.summary.shop_open_at = 0;
     await assert.rejects(h.service.operateMilkTeaActivity('boost', { count: 1 }), /先开业/);
-    assert.equal(h.calls.length, 2);
+    assert.equal(h.calls.length, 0);
 });
 
 test('upgrade uses fresh eligibility and rejects stale levels before sending a request', async () => {

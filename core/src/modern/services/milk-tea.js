@@ -6,6 +6,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 const milk_tea_20261015_json_1 = __importDefault(require("../activity-data/milk-tea-20261015.json"));
 const milk_tea_work_1 = require("./milk-tea-work");
+const { runAutomaticMilkTea } = require('./milk-tea-auto');
 const { types } = require('../utils/proto');
 const { sendMsgAsync } = require('../utils/network');
 const { getServerTimeSec, toNum } = require('../utils/utils');
@@ -76,10 +77,12 @@ async function rpc(action, params = {}) {
     return decoded[field];
 }
 async function inventory(diamonds = false) {
-    const bag = warehouse.getBagItems(await warehouse.getBag());
+    const bag = warehouse.getBagItems(await warehouse.getBag({ fresh: true }));
     const balances = {};
-    for (const entry of bag)
-        balances[String(entry.id)] = (balances[String(entry.id)] || 0) + toNum(entry.count);
+    for (const entry of bag) {
+        if (!warehouse.isItemLocked(entry))
+            balances[String(entry.id)] = (balances[String(entry.id)] || 0) + toNum(entry.count);
+    }
     if (diamonds)
         balances['1004'] = await getDiamondBalance();
     return { bag, balances };
@@ -208,6 +211,8 @@ async function getMilkTeaActivity(page = 'shop', input = {}) {
 async function perform(action, input) {
     if (!Object.hasOwn(operations, action) || readActions.has(action))
         fail('未知的活动操作');
+    if (action === 'hireSetting')
+        fail('打工设置由自动经营管理');
     const page = ['exchange'].includes(action) ? 'exchange' : ['unlock', 'fundClaim'].includes(action) ? 'fund'
         : ['hire'].includes(action) ? 'hireList' : action === 'craft' ? 'workshop' : ['wages', 'interact'].includes(action) ? 'work' : ['rename', 'hireSetting'].includes(action) ? 'settings' : action === 'upgrade' ? 'upgrade' : 'shop';
     const state = await getMilkTeaActivity(page, input);
@@ -308,11 +313,6 @@ async function perform(action, input) {
             fail('工作事项数据不完整，请刷新后重试');
         params = { target_gid: String(shift.employer.gid), interaction_type: kind };
     }
-    else if (action === 'hireSetting') {
-        if (typeof input.disabled !== 'boolean')
-            fail('雇佣设置无效');
-        params = { hire_disabled: input.disabled };
-    }
     const reply = await rpc(action, params);
     if (action === 'create') require('../../services/milk-tea-automation').automation.wake();
     const field = operations[action][1];
@@ -334,50 +334,16 @@ async function perform(action, input) {
     }
 }
 function operateMilkTeaActivity(action, input = {}) {
-    const result = tail.then(() => perform(action, input));
+    const result = tail.then(() => action === 'craft' ? warehouse.serializeInventory(() => perform(action, input)) : perform(action, input));
     tail = result.catch(() => { });
     return result;
 }
 // Share the manual operation queue. Every mutation checks the current worker
 // generation and eligibility immediately before sending; never replay a write.
 function runMilkTeaAutomation(allowed) {
-    const completed = [];
-    const result = tail.then(async () => {
-        const check = () => { if (!allowed()) throw new Error('奶茶自动领取已暂停'); };
-        check();
-        const entries = await group();
-        check();
-        const entry = entries.find(v => String(v.head?.activity_id) === MILK);
-        const head = entry?.head;
-        const summary = entry?.milk_tea?.summary;
-        if (!head || !summary) throw new Error('奶茶活动进度未返回');
-        const now = getServerTimeSec();
-        if (now < toNum(head.begin_time) || now >= toNum(head.end_time))
-            return { status: 'inactive', message: '活动尚未开放或已经结束', completed };
-        if (!toNum(summary.shop_open_at))
-            return { status: 'unopened', message: '请先手动开业，之后自动领取收益', completed };
-        const claim = async (action, label) => {
-            check();
-            // Expiration can occur while earlier reads wait in the request queue.
-            if (getServerTimeSec() >= toNum(head.end_time)) throw new Error('活动已经结束');
-            await rpc(action);
-            completed.push(label);
-        };
-        const shop = (await rpc('shop')).shop;
-        check();
-        if (!shop) throw new Error('店铺进度未返回');
-        if ((shop?.pending_rewards || []).some(v => toNum(v.count) > 0)) await claim('claim', '营业收益');
-        check();
-        const work = await rpc('work');
-        check();
-        if ((work.slips || []).some(v => toNum(v.wage_status) === 1)) await claim('wages', '工作工资');
-        const fund = entries.find(v => String(v.head?.activity_id) === FUND)?.growth_fund;
-        if (fund?.unlocked && (fund.tiers || []).some(v => toNum(v.state) === 2)) await claim('fundClaim', '已解锁基金奖励');
-        return { status: 'idle', message: completed.length ? `已领取${completed.join('、')}` : '暂无可领取收益，每5分钟检查一次', completed };
-    }).catch(error => {
-        error.completed = completed;
-        throw error;
-    });
+    const result = tail.then(() => runAutomaticMilkTea({ group, rpc, inventory,
+        serializeInventory: warehouse.serializeInventory, isItemLocked: warehouse.isItemLocked,
+        now: getServerTimeSec, allowed }));
     tail = result.catch(() => {});
     return result;
 }

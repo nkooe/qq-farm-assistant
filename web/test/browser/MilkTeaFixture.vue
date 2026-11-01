@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed } from 'vue'
 import { useAccountStore } from '../../src/stores/account'
 import MilkTeaAutomation from '../../src/views/activity-center/MilkTeaAutomation.vue'
 import MilkTeaPage from '../../src/views/activity-center/MilkTeaPage.vue'
@@ -10,7 +10,7 @@ const fullPage = new URLSearchParams(location.search).has('full')
 const account = useAccountStore()
 account.accounts = [{ id: '1', name: '奶茶甲', running: true }, { id: '2', name: '奶茶乙', running: true }]
 account.currentAccountId = '1'
-const snapshot = ref({ enabled: true, status: 'idle', message: '已领取营业收益', lastRunAt: 1792530000000, nextRunAt: 1792530300000 })
+const snapshot = computed(() => account.currentAccountId === '2' ? { status: 'paused', message: '等待账号连接' } : { status: 'idle', message: '已领取营业收益', lastRunAt: 1792530000000, nextRunAt: 1792530300000 })
 </script>
 
 <template>

@@ -1,4 +1,3 @@
-import type { Route } from '@playwright/test'
 import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => {
@@ -6,37 +5,29 @@ test.beforeEach(async ({ page }) => {
   await page.route(url => url.pathname.startsWith('/api/'), route => route.fulfill({ json: { ok: true, data: {} } }))
   await page.goto('/test/browser/milk-tea.html')
 })
-test('automatic collection describes its scope and persists the selected account switch', async ({ page }, testInfo) => {
-  const calls: any[] = []
-  await page.route('**/api/automation', async (route) => {
-    calls.push({ account: route.request().headers()['x-account-id'], body: route.request().postDataJSON() })
-    await route.fulfill({ json: { ok: true, data: { automation: { milk_tea: false } } } })
+
+test('automatic management shows a concise status with no switches or settings writes', async ({ page }, testInfo) => {
+  const calls: string[] = []
+  page.on('request', (request) => {
+    if (request.url().includes('/api/automation'))
+      calls.push(request.url())
   })
-  await expect(page.getByRole('checkbox', { name: /自动领取/ })).toBeChecked()
+  const panel = page.getByRole('region', { name: '奶茶自动经营' })
+  await expect(panel.getByText('全自动经营')).toBeVisible()
   await expect(page.getByRole('status')).toContainText('已领取营业收益')
-  await expect(page.getByText(/每5分钟/)).toContainText('关闭页面后继续运行')
-  await page.screenshot({ path: testInfo.outputPath('milk-tea-automation.png') })
-  await page.getByRole('checkbox').uncheck()
-  await expect(page.getByRole('checkbox')).not.toBeChecked()
-  expect(calls).toEqual([{ account: '1', body: { milk_tea: false } }])
+  await expect(panel.getByRole('checkbox')).toHaveCount(0)
+  await expect(panel.getByRole('switch')).toHaveCount(0)
+  await expect(panel.getByText(/上次/)).toBeVisible()
+  await page.screenshot({ path: testInfo.outputPath('milk-tea-full-auto.png') })
+  expect(calls).toEqual([])
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
-test('failed save rolls back and a response from a previous account cannot overwrite the current switch', async ({ page }) => {
-  await page.route('**/api/automation', route => route.fulfill({ status: 500, json: { ok: false } }))
-  // The immediate failure can restore the value before uncheck verifies it.
-  await page.getByRole('checkbox').click()
-  await expect(page.getByRole('checkbox')).toBeChecked()
-  await expect(page.getByRole('status')).toContainText('保存失败')
-  let pending: Route | undefined
-  await page.route('**/api/automation', (route) => {
-    pending = route
-  })
-  await page.getByRole('checkbox').uncheck()
-  await expect(page.getByRole('checkbox')).toBeDisabled()
+
+test('switching accounts displays only the selected account automation status', async ({ page }) => {
+  await expect(page.getByRole('status')).toContainText('已领取营业收益')
   await page.getByTestId('switch').click()
-  await expect(page.getByRole('checkbox')).toBeChecked()
-  await expect(page.getByRole('checkbox')).toBeEnabled()
-  await pending!.fulfill({ json: { ok: true, data: { automation: { milk_tea: false } } } })
-  await expect(page.getByRole('checkbox')).toBeChecked()
-  await expect(page.getByRole('status')).not.toContainText('保存失败')
+  await expect(page.getByRole('status')).toHaveText('等待账号连接')
+  await expect(page.getByRole('checkbox')).toHaveCount(0)
+  await page.getByTestId('switch').click()
+  await expect(page.getByRole('status')).toContainText('已领取营业收益')
 })

@@ -19,6 +19,20 @@ function run(dir, source, extraEnv = {}) {
   });
 }
 
+test('milk tea has no configurable switch, including saved false values', t => {
+  const { dir, storage } = fixture(t);
+  storage.load();
+  storage.saveAccount('1', { automation: { milk_tea: false, farm: false } });
+  run(dir, `
+    const assert = require('node:assert/strict');
+    const store = require('./src/models/store');
+    assert.equal(Object.hasOwn(store.getAutomation('1'), 'milk_tea'), false);
+    assert.equal(store.getAutomation('1').farm, false);
+    store.setAutomation('milk_tea', false, '1');
+    assert.equal(Object.hasOwn(store.getAutomation('1'), 'milk_tea'), false);
+  `);
+});
+
 test('fresh storage persists only the current split format and reopens without migration', t => {
   const { dir, file, storage } = fixture(t);
   storage.load(); storage.saveGlobal({ userUis: { 1000: { theme: 'light' } } });

@@ -61,6 +61,16 @@ for (const [kind, state, label] of [
   })
 }
 
+test('server kick explains its pause without claiming a scan or configuration failure', async ({ page }) => {
+  await mockApi(page, [{ id: 'kicked', name: '被踢账号', platform: 'wx', loginType: 'yyb', yybOpenid: 'fixture', runtimeState: 'failed', running: false, autoStart: false, runtimeReconnect: { state: 'blocked', kind: 'kicked', attempt: 0, maxAttempts: 0, nextRetryAt: null } }] as any)
+  await page.route('**/api/accounts/kicked/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: {} } } }))
+  await page.goto('/test/browser/accounts.html')
+  await expect(page.getByText('已被踢下线，请手动启动', { exact: true })).toBeVisible()
+  await expect(page.getByText('配置异常，重试已暂停', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('请扫码，重试已暂停', { exact: true })).toHaveCount(0)
+  await expectFits(page)
+})
+
 test('busy recovery counts down without spending attempts and follows fresh account state', async ({ page }) => {
   await page.clock.install()
   const account: any = { id: 'queue', name: '排队取码账号', platform: 'qq', runtimeState: 'reconnecting', running: false, runtimeReconnect: { state: 'scheduled', kind: 'busy', attempt: 0, maxAttempts: 3, nextRetryAt: Date.now() + 15000 }, runtimeLogin: { state: 'queued', source: 'qq', startedAt: Date.now(), lastSuccessAt: null } }

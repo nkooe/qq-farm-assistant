@@ -41,6 +41,30 @@ test('failed result envelopes do not claim a successful credential refresh', asy
   assert.equal(recovery.getState('1').lastSuccessAt, null);
 });
 
+test('a confirmed game connection clears only that account failed login history', async () => {
+  const recovery = createLoginRecovery();
+  await recovery.run({ id: '1' }, 'qq', async () => ({ ok: false, kind: 'rescan' }));
+  await recovery.run({ id: '2' }, 'yyb', async () => ({ ok: false, kind: 'rescan' }));
+  recovery.confirmConnected('1');
+  assert.equal(recovery.getState('1'), null);
+  assert.equal(recovery.getState('2').kind, 'rescan');
+});
+
+test('a confirmed game connection preserves successful and in-flight credential refreshes', async () => {
+  const recovery = createLoginRecovery();
+  await recovery.run({ id: '1' }, 'qq', async () => 'fresh');
+  const success = recovery.getState('1');
+  recovery.confirmConnected('1');
+  assert.deepEqual(recovery.getState('1'), success);
+  let finish;
+  const pending = recovery.run({ id: '2' }, 'yyb', () => new Promise(resolve => { finish = resolve; }));
+  recovery.confirmConnected('2');
+  assert.equal(recovery.getState('2').state, 'requesting');
+  finish('fresh');
+  await pending;
+  assert.equal(recovery.getState('2').state, 'success');
+});
+
 test('queue state and cancellation follow the owning operation', async () => {
   const recovery = createLoginRecovery();
   const controller = new AbortController();

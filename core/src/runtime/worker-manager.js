@@ -77,8 +77,6 @@ function createWorkerManager(deps) {
     const RECONNECT_SUCCESS_STABLE_MS = 10 * 60 * 1000;
 
     function builtinYybApi() {
-        const store = require('../models/store');
-
         const base = String(process.env.YYB_API_URL || '').trim().replace(/\/+$/, '')
             .replace(/\/wxapp\/getCode$/i, '').replace(/\/wxapp$/i, '').replace(/\/accounts$/i, '');
         return { base, key: String(process.env.YYB_API_KEY || '').trim() };
@@ -497,6 +495,7 @@ function createWorkerManager(deps) {
 
         // 监听 Worker 消息
         proc.on('message', (msg) => {
+            if (workers[account.id]?.process !== proc) return;
             try {
                 handleWorkerMessage(account.id, msg);
             } catch (error) {
@@ -507,6 +506,7 @@ function createWorkerManager(deps) {
 
         // 监听 Worker 错误
         proc.on('error', (err) => {
+            if (workers[account.id]?.process !== proc) return;
             startupResults.set(account.id, { updatedAt: Date.now(), error: err.message || '子进程启动失败' });
             log('系统', `账号 ${  account.name  } 子进程启动失败: ${
                 err && err.message ? err.message : err}`, {
@@ -518,6 +518,7 @@ function createWorkerManager(deps) {
         // 监听 Worker 退出
         proc.on('exit', (code, signal) => {
             const wrk = workers[account.id];
+            if (wrk && wrk.process !== proc) return;
             const displayName = wrk && wrk.name ? wrk.name : account.name;
 
             log('系统', `账号 ${  displayName  } 进程退出 (code=${  code
@@ -730,7 +731,7 @@ function createWorkerManager(deps) {
             }
             const cfg = resolveReconnectConfig(account);
             const kind = startupResults.get(accountId)?.kind || 'temporary';
-            if (['rescan', 'configuration', 'cancelled'].includes(kind)) {
+            if (['rescan', 'configuration', 'cancelled', 'kicked'].includes(kind)) {
                 scheduler.clear(`reconnect_attempt_${accountId}`);
                 reconnectPlans.set(accountId, { state: kind === 'rescan' ? 'needs_rescan' : 'blocked',
                     attempt: reconnectAttemptsMap.get(accountId) || 0, maxAttempts: cfg.reconnectMaxAttempts, nextRetryAt: null, reason, kind });
@@ -830,15 +831,12 @@ function createWorkerManager(deps) {
     function handleWorkerMessage(accountId, msg) {
         const wrk = workers[accountId];
         if (!wrk) return;
+        if (wrk.stopping && ['ws_error', 'account_kicked', 'ws_reconnect_failed'].includes(msg.type)) return;
 
         if (msg.type === 'status_sync') {
             if (wrk.stopping) return;
             // 状态同步
             wrk.status = normalizeStatusForPanel(msg.data, accountId, wrk.name);
-            if (typeof onStatusSync === 'function') {
-                onStatusSync(accountId, wrk.status, wrk.name);
-            }
-
             syncAccountProfile(accountId, msg.data, wrk);
 
             // 同步昵称
@@ -865,6 +863,12 @@ function createWorkerManager(deps) {
                 wrk.offlineReminderTriggered = false;
                 wrk.autoDeleteTriggered = false;
                 wrk.wsError = null;
+                const last = startupResults.get(accountId);
+                if (last?.error || last?.kind) startupResults.set(accountId, { updatedAt: Date.now(), error: '' });
+                reconnectPlans.delete(accountId);
+                scheduler.clear(`reconnect_attempt_${accountId}`);
+                clearCredentialRecoveryIfIdle();
+                loginRecovery.confirmConnected(accountId);
             } else if (!wrk.stopping) {
                 const now = Date.now();
                 if (!wrk.disconnectedSince) wrk.disconnectedSince = now;
@@ -912,6 +916,9 @@ function createWorkerManager(deps) {
                         log('错误', `删除离线账号失败: ${safeRuntimeError(err.message)}`, { accountId: String(accountId) });
                     });
                 }
+            }
+            if (typeof onStatusSync === 'function') {
+                onStatusSync(accountId, wrk.status, wrk.name);
             }
         } else if (msg.type === 'log') {
             // 日志消息
@@ -964,19 +971,22 @@ function createWorkerManager(deps) {
                     accountId, wrk.name);
             }
         } else if (msg.type === 'account_kicked') {
-            // 被踢下线：纳入离线重连调度（受 autoReconnect + maxAttempts 控制），
-            // 不再直接 stopWorker 永久停止。重连前 startWorker 会刷新 code 尝试恢复。
-            const reason = msg.reason || '未知';
+            // An explicit server kick is not a transport failure. Persist the
+            // pause so neither retry timers nor a server restart reclaim it.
+            const reason = safeRuntimeError(msg.reason || '未知');
+            stopWorker(accountId);
+            startupResults.set(accountId, { updatedAt: Date.now(), error: `已被踢下线：${reason}，请手动启动`, kind: 'kicked' });
+            reconnectPlans.set(accountId, { state: 'blocked', attempt: 0, maxAttempts: 0, nextRetryAt: null, reason, kind: 'kicked' });
+            addOrUpdateAccount({ id: accountId, autoStart: false });
             triggerOfflineReminder({
                 accountId,
                 accountName: wrk.name,
                 reason: `kickout:${  reason}`,
                 offlineMs: 0
             });
-            addAccountLog('kickout_reconnect',
-                `账号 ${  wrk.name  } 被踢下线，已加入自动重连队列`,
+            addAccountLog('kickout_paused',
+                `账号 ${wrk.name} 已被踢下线，已暂停，请手动启动`,
                 accountId, wrk.name, { reason });
-            scheduleReconnect(accountId, `kickout:${  reason}`);
         } else if (msg.type === 'ws_reconnect_failed') {
             const reason = msg.reason || '未知';
             triggerOfflineReminder({

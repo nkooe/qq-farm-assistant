@@ -504,9 +504,6 @@ function applyRuntimeConfig(config, syncStatusAfter = false) {
         const hasAutomation = !!(config && config.automation && typeof config.automation === 'object');
         if (hasAutomation) {
             const newAuto = getAutomation();
-            if (!!prevAuto.milk_tea !== !!newAuto.milk_tea)
-                milkTeaAutomation.start({ ready: () => loginReady, paused: () => friendSyncPaused });
-
             // 每日任务从关变开 → 立即执行一次
             const prevDailyEnabled = isDailyRoutineEnabled(prevAuto);
             const newDailyEnabled = isDailyRoutineEnabled(newAuto);

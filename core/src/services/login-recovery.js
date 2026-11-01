@@ -84,7 +84,14 @@ function createLoginRecovery() {
     })();
     return item.promise;
   }
-  return { run, cancel, getState: id => states.get(String(id)) || null, clear() { for (const id of tasks.keys()) cancel(id); states.clear(); } };
+  function confirmConnected(id) {
+    const key = String(id);
+    const state = states.get(key);
+    // A confirmed game connection supersedes a previous failed attempt. Do not
+    // invent a successful Code request or disturb a refresh still in progress.
+    if (state && ['failed', 'cancelled'].includes(state.state)) states.delete(key);
+  }
+  return { run, cancel, confirmConnected, getState: id => states.get(String(id)) || null, clear() { for (const id of tasks.keys()) cancel(id); states.clear(); } };
 }
 
 module.exports = { LoginRecoveryError, classifyLoginError, loginIdentity, requestDeadline, createLoginRecovery };

@@ -7,7 +7,6 @@ import MilkTeaWork from './MilkTeaWork.vue'
 const { state, page, busy } = defineProps<{ state: any, page: string, busy: boolean }>()
 const emit = defineEmits<{ navigate: [page: string], operation: [action: string, input: any], confirmation: [value: any], reload: [input: any] }>()
 const name = ref('')
-const hireDisabled = ref(false)
 const durationId = ref(1)
 const receivedAt = ref(Date.now())
 const tick = ref(Date.now())
@@ -91,7 +90,6 @@ watch(() => state, () => {
   receivedAt.value = Date.now()
   tick.value = receivedAt.value
   name.value = state?.summary.shop_name || state?.recommendedNames?.[0] || ''
-  hireDisabled.value = !!state?.summary.hire_disabled
   selectedFruitUids.value = []
 }, { immediate: true })
 // 升级 / 基金弹窗首次打开时，把下一级或可领取的档位滚到可视区域；之后的刷新保持用户自己的滚动位置
@@ -235,18 +233,6 @@ onMounted(() => {
         </button>
       </div>
       <small v-if="Number(state.summary.rename_cd_until_at) > state.serverTime">下次可改名：{{ date(state.summary.rename_cd_until_at) }}</small>
-      <h3 class="divider">
-        我的打工设置
-      </h3>
-      <div class="row toggle">
-        <span id="milk-hire-mode-label" class="toggle__label">躺平模式 · 开启后，好友无法雇佣你</span>
-        <button class="toggle__switch" type="button" role="switch" aria-labelledby="milk-hire-mode-label" :aria-checked="hireDisabled" :disabled="busy" @click="hireDisabled = !hireDisabled" />
-      </div>
-      <div class="actions actions--center">
-        <button class="primary" :disabled="busy || !state.active || hireDisabled === !!state.summary.hire_disabled" @click="request('hireSetting', { disabled: hireDisabled })">
-          保存设置
-        </button>
-      </div>
     </section>
 
     <section v-else-if="page === 'upgrade' && state.shop" class="paper paper--list">

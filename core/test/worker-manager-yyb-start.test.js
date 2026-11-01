@@ -195,6 +195,97 @@ test('new scan credentials replace a pending startup instead of sharing its stal
   assert.equal(h.created[0].messages[0].config.code, 'new-scan');
 });
 
+test('QQ scan recovery removes an old rescan failure only after a confirmed game connection', async t => {
+  const snapshots = [];
+  const h = harness(t, {}, {
+    refreshQqCode: async () => { throw Object.assign(new Error('scan required'), { kind: 'rescan' }); },
+    onStatusSync: id => snapshots.push(h.manager.getWorkerRuntime(id)),
+  });
+  const account = { id: '1', userId: 1000, autoStart: true, platform: 'qq', qqLoginProfile: 'fixture', code: 'old' };
+  h.accounts.push(account);
+  await h.manager.startWorker(account);
+  assert.equal(h.manager.getWorkerRuntime('1').login.kind, 'rescan');
+  account.code = 'new-scan';
+  assert.equal(await h.manager.startWorker(account, { skipQqRefresh: true }), true);
+  assert.equal(h.manager.getWorkerRuntime('1').login.state, 'failed');
+  h.created[0].emit('message', { type: 'status_sync', data: { connection: { connected: true } } });
+  const runtime = h.manager.getWorkerRuntime('1');
+  assert.equal(runtime.state, 'online');
+  assert.equal(runtime.login, null);
+  assert.equal(runtime.reconnect, null);
+  assert.equal(snapshots[0].login, null, 'the emitted online snapshot is already consistent');
+  h.created[0].emit('message', { type: 'status_sync', data: { connection: { connected: false } } });
+  assert.equal(h.manager.getWorkerRuntime('1').login, null, 'a later disconnect cannot reveal the old rescan failure');
+});
+
+for (const platform of ['qq', 'wx']) {
+  test(`${platform} server kick persists a pause without retrying, while other accounts remain online`, async t => {
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    const events = [];
+    const h = harness(t, { autoReconnect: true }, { addAccountLog: action => events.push(action) });
+    const account = { id: '1', userId: 1000, autoStart: true, platform, loginType: 'manual', code: 'fixture' };
+    const other = { id: '2', userId: 1001, autoStart: true, platform: 'wx', loginType: 'manual', code: 'other' };
+    h.accounts.push(account, other);
+    await h.manager.startWorker(account);
+    await h.manager.startWorker(other);
+    h.created[0].emit('message', { type: 'status_sync', data: { connection: { connected: true } } });
+    h.created[1].emit('message', { type: 'status_sync', data: { connection: { connected: true } } });
+    h.created[0].emit('message', { type: 'account_kicked', reason: 'other login' });
+    assert.equal(account.autoStart, false);
+    const runtime = h.manager.getWorkerRuntime('1');
+    assert.equal(runtime.state, 'failed');
+    assert.equal(runtime.reconnect.state, 'blocked');
+    assert.equal(runtime.reconnect.kind, 'kicked');
+    assert.equal(runtime.reconnect.nextRetryAt, null);
+    assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+    assert.equal(h.scheduler.has('credential_recovery'), false);
+    t.mock.timers.tick(3600000);
+    await setImmediate();
+    assert.equal(h.created.length, 2);
+    assert.equal(await h.manager.startWorker(account, { automatic: true }), false, 'startup restoration also respects the persisted pause');
+    assert.equal(h.manager.getWorkerRuntime('2').state, 'online');
+    assert(events.includes('kickout_paused'));
+    assert(!events.includes('kickout_reconnect'));
+    account.autoStart = true;
+    assert.equal(await h.manager.startWorker(account), true, 'explicit user startup can resume the account');
+    h.created[2].emit('message', { type: 'status_sync', data: { connection: { connected: true } } });
+    assert.equal(h.manager.getWorkerRuntime('1').reconnect, null);
+  });
+}
+
+test('late network errors from a kicked worker cannot change its paused recovery state', async t => {
+  const h = harness(t, { autoReconnect: true });
+  const account = { id: '1', userId: 1000, autoStart: true, platform: 'wx', loginType: 'manual', code: 'fixture' };
+  h.accounts.push(account);
+  await h.manager.startWorker(account);
+  const proc = h.created[0];
+  proc.postMessage = message => proc.messages.push(message);
+  proc.emit('message', { type: 'account_kicked', reason: 'unknown kick reason' });
+  proc.emit('message', { type: 'ws_error', code: 400 });
+  proc.emit('message', { type: 'ws_reconnect_failed', reason: 'closed' });
+  assert.equal(h.manager.getWorkerRuntime('1').reconnect.kind, 'kicked');
+  assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
+  proc.emit('exit', 0);
+});
+
+test('a replaced worker cannot clear the current login state or pause the replacement', async t => {
+  const h = harness(t, { autoReconnect: true });
+  const account = { id: '1', userId: 1000, autoStart: true, platform: 'wx', loginType: 'manual', code: 'fixture' };
+  h.accounts.push(account);
+  await h.manager.startWorker(account);
+  const old = h.created[0];
+  h.manager.stopWorker('1');
+  await h.manager.startWorker(account);
+  old.emit('message', { type: 'account_kicked', reason: 'stale kick' });
+  old.emit('message', { type: 'status_sync', data: { connection: { connected: true } } });
+  old.emit('error', new Error('old worker error'));
+  old.emit('exit', 1);
+  assert.equal(account.autoStart, true);
+  assert.equal(h.manager.getWorkerRuntime('1').connected, false);
+  assert.equal(h.manager.getWorkerRuntime('1').error, '');
+  assert.equal(h.manager.getWorkerRuntime('1').reconnect, null);
+});
+
 for (const order of ['manual-first', 'startup-first']) {
   test(`manual YYB refresh and automatic startup commit one shared result: ${order}`, async t => {
     const h = harness(t); let requests = 0; let finish;

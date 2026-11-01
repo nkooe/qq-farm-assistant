@@ -757,6 +757,7 @@ async function getBagSeeds() {
     return Array.from(merged.values());
 }
 module.exports = {
+    serializeInventory,
     getBag,
     getBagDetail,
     sellItems,
