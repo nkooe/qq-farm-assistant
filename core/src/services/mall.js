@@ -68,10 +68,10 @@ function checkPurchaseCancellation() {
   getAmbientRequestSignal()?.throwIfAborted();
 }
 
-async function getMallListBySlotType(slotType = 1) {
+async function getMallListBySlotType(slotType = 1, manualOpen = false) {
   if (!Number.isInteger(slotType) || slotType < 0 || slotType > 2147483647) throw new Error('商城槽位无效');
   const request = types.GetMallListBySlotTypeRequest.encode(
-    types.GetMallListBySlotTypeRequest.create({ slot_type: slotType })
+    types.GetMallListBySlotTypeRequest.create({ slot_type: slotType, is_manual_open: !!manualOpen, global_scene_id: 1 })
   ).finish();
   const { body } = await sendMsgAsync('gamepb.mallpb.MallService', 'GetMallListBySlotType', request);
   return types.GetMallListBySlotTypeResponse.decode(body);

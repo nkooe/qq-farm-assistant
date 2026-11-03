@@ -45,13 +45,13 @@ const reconnectLabel = computed(() => {
     return ''
   if (plan.state === 'scheduled') {
     const seconds = Math.max(0, Math.ceil((plan.nextRetryAt - now.value) / 1000))
-    return plan.kind === 'busy' ? `服务繁忙，${seconds} 秒后重试` : `重连 ${plan.attempt}/${plan.maxAttempts}，${seconds} 秒后重试`
+    return plan.kind === 'busy' ? `服务繁忙，${seconds} 秒后重试` : `${plan.kind === 'kicked' ? '被踢下线，' : ''}第 ${plan.attempt} 次重连，${seconds} 秒后重试`
   }
   if (plan.state === 'needs_rescan')
     return '请扫码，重试已暂停'
   if (plan.state === 'blocked')
-    return plan.kind === 'kicked' ? '已被踢下线，请手动启动' : '配置异常，重试已暂停'
-  return plan.state === 'waiting_credentials' ? '等待登录恢复' : `重连已达上限（${plan.attempt}/${plan.maxAttempts}）`
+    return '重试已暂停，请检查登录配置'
+  return ''
 })
 const credentialLabel = computed(() => {
   const credentials = health.value?.credentials

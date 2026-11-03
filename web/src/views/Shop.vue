@@ -5,8 +5,8 @@ import { useRoute } from 'vue-router'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import DecorationGoodsCard from '@/components/shop/DecorationGoodsCard.vue'
 import MallGoodsCard from '@/components/shop/MallGoodsCard.vue'
-import MysteryGoodsCard from '@/components/shop/MysteryGoodsCard.vue'
 import MysteryAutoBuyCard from '@/components/shop/MysteryAutoBuyCard.vue'
+import MysteryGoodsCard from '@/components/shop/MysteryGoodsCard.vue'
 import PetGoodsCard from '@/components/shop/PetGoodsCard.vue'
 import PurchaseQuantityModal from '@/components/shop/PurchaseQuantityModal.vue'
 import SeedGoodsCard from '@/components/shop/SeedGoodsCard.vue'
@@ -339,7 +339,10 @@ onMounted(() => {
 
 <template>
   <section class="shop-page space-y-4">
-    <div class="rounded-lg glass-card p-4">
+    <div class="glass-card rounded-lg p-4">
+      <RouterLink to="/game-mall" class="inline-flex rounded-lg bg-emerald-600 px-4 py-2 text-sm text-white">
+        全部游戏商品
+      </RouterLink>
       <div class="mb-4 flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
         <ShopAccountHeader
           :account-name="currentAccount?.name"
@@ -359,20 +362,20 @@ onMounted(() => {
         />
       </div>
 
-      <div v-if="!currentAccountId" class="rounded-lg glass-subtle p-8 text-center text-sm text-gray-500">
+      <div v-if="!currentAccountId" class="glass-subtle rounded-lg p-8 text-center text-sm text-gray-500">
         请先选择账号，再查看商城。
       </div>
 
-      <div v-else-if="isAnyLoading && activeIsEmpty" class="rounded-lg glass-subtle p-8 text-center text-sm text-gray-500">
+      <div v-else-if="isAnyLoading && activeIsEmpty" class="glass-subtle rounded-lg p-8 text-center text-sm text-gray-500">
         正在加载当前分区商品...
       </div>
 
-      <div v-else-if="activeError && activeIsEmpty" class="rounded-lg glass-error p-8 text-center text-sm">
+      <div v-else-if="activeError && activeIsEmpty" class="glass-error rounded-lg p-8 text-center text-sm">
         {{ activeError }}
       </div>
 
       <div v-else-if="tab === 'seed'" class="space-y-4">
-        <div v-if="error" class="rounded-xl glass-error px-4 py-3 text-sm">
+        <div v-if="error" class="glass-error rounded-xl px-4 py-3 text-sm">
           {{ error }}
         </div>
         <ShopEmptyState v-if="!sortedSeeds.length" :message="activeEmptyMessage" />
@@ -391,7 +394,7 @@ onMounted(() => {
       </div>
 
       <div v-else-if="tab === 'pet'" class="space-y-4">
-        <div v-if="petError" class="rounded-xl glass-error px-4 py-3 text-sm">
+        <div v-if="petError" class="glass-error rounded-xl px-4 py-3 text-sm">
           {{ petError }}
         </div>
         <ShopEmptyState v-if="!pets.length" :message="activeEmptyMessage" />
@@ -410,7 +413,7 @@ onMounted(() => {
       </div>
 
       <div v-else-if="tab === 'decoration'" class="space-y-4">
-        <div v-if="decorationError" class="rounded-xl glass-error px-4 py-3 text-sm">
+        <div v-if="decorationError" class="glass-error rounded-xl px-4 py-3 text-sm">
           {{ decorationError }}
         </div>
         <ShopEmptyState v-if="!decorations.length" :message="activeEmptyMessage" />
@@ -428,7 +431,7 @@ onMounted(() => {
       </div>
 
       <div v-else-if="tab === 'mall'" class="space-y-4">
-        <div v-if="mallError" class="rounded-xl glass-error px-4 py-3 text-sm">
+        <div v-if="mallError" class="glass-error rounded-xl px-4 py-3 text-sm">
           {{ mallError }}
         </div>
         <ShopEmptyState v-if="!mallGoods.length" :message="activeEmptyMessage" />
@@ -447,7 +450,7 @@ onMounted(() => {
 
       <div v-else class="space-y-4">
         <MysteryAutoBuyCard :account-id="currentAccountId" />
-        <div v-if="mysteryError" class="rounded-xl glass-error px-4 py-3 text-sm">
+        <div v-if="mysteryError" class="glass-error rounded-xl px-4 py-3 text-sm">
           {{ mysteryError }}
         </div>
         <ShopEmptyState v-if="!mysteryOffer?.active" :message="activeEmptyMessage" />

@@ -68,66 +68,11 @@ function createWorkerManager(deps) {
             reconnect: reconnect ? { ...reconnect, reason: safeRuntimeError(reconnect.reason) } : null };
     }
 
-    // 应用宝离线重连的独立计数（不受 startWorker 成功清零影响，否则 maxAttempts 会失效导致无限重连）
+    // 每个账号独立退避；创建 Worker 不等于已经连接游戏。
     const reconnectAttemptsMap = new Map();
-    // 【2026-08-12 修复】重连成功后"稳定在线时长"：账号在线超过该时长未再断线，则清零重连计数。
-    // 原逻辑计数永不清零 → 断线 3 次（无论重连是否成功）后 currentAttempt>=maxAttempts → 永久放弃重连，
-    // 频繁被踢/网络不稳的账号表现为"老是没重连"。改为成功后稳定 10 分钟再清零：
-    // 既保留"防止无限重连"（10 分钟内反复断线仍累积计数受 maxAttempts 约束），又不会 3 次就永久放弃。
+    const RECONNECT_DELAYS_MS = [60000, 5 * 60000, 10 * 60000];
     const RECONNECT_SUCCESS_STABLE_MS = 10 * 60 * 1000;
-
-    function builtinYybApi() {
-        const base = String(process.env.YYB_API_URL || '').trim().replace(/\/+$/, '')
-            .replace(/\/wxapp\/getCode$/i, '').replace(/\/wxapp$/i, '').replace(/\/accounts$/i, '');
-        return { base, key: String(process.env.YYB_API_KEY || '').trim() };
-    }
-
-    function clearCredentialRecoveryIfIdle() {
-        if (![...reconnectPlans.values()].some(plan => plan.state === 'waiting_credentials')) {
-            scheduler.clear('credential_recovery');
-        }
-    }
-
-    async function checkCredentialRecovery() {
-        const store = require('../models/store');
-        for (const [accountId, plan] of reconnectPlans) {
-            if (plan.state !== 'waiting_credentials') continue;
-            const eligible = () => {
-                const account = store.getAccounts().accounts.find(item => item.id === accountId);
-                return account && !getAccountAccessRejection(account) && account.autoStart !== false && account.provider !== 'thirdparty'
-                    && account.loginType === 'yyb' && account.yybOpenid
-                    && resolveReconnectConfig(account).autoReconnect && resolveReconnectConfig(account).reconnectDelayMin > 0 ? account : null;
-            };
-            let account = eligible();
-            if (!account) {
-                plan.state = 'exhausted';
-                continue;
-            }
-            const api = builtinYybApi();
-            if (!api.base || !api.key) continue;
-            try {
-                const response = await fetch(`${api.base}/accounts/health?ref=${encodeURIComponent(account.yybOpenid)}`, {
-                    headers: { Authorization: `Bearer ${api.key}`, ...require('../services/user-identity').trustedUserHeaders(account.userId) }, signal: AbortSignal.timeout(4000),
-                });
-                const result = await response.json();
-                const health = result?.code === 0 && result.data && typeof result.data === 'object'
-                    && !Array.isArray(result.data) ? result.data : null;
-                // A late health response must never undo a stop, deletion or manual start.
-                account = eligible();
-                if (reconnectPlans.get(accountId) !== plan || !account) continue;
-                if (!response.ok || !health || health.needs_rescan || health.refresh?.last_error
-                    || !(health.refresh?.last_success_at > Math.floor(plan.waitingSince / 1000))
-                    || !(health.expires_at > Date.now() / 1000)) continue;
-                reconnectPlans.delete(accountId);
-                reconnectAttemptsMap.delete(accountId);
-                log('系统', `账号 ${account.name} 后台凭据已恢复，重新发起自动启动`, { accountId });
-                await startWorker(account, { automatic: true });
-            } catch {
-                // Health reads do not refresh credentials or consume the game retry budget.
-            }
-        }
-        clearCredentialRecoveryIfIdle();
-    }
+    const CONNECT_TIMEOUT_MS = 90000;
 
     /** 是否支持 Thread 模式（非 pkg 打包 + Worker 可用） */
     const threadMode = runtimeMode === 'thread' && !processRef.pkg && typeof WorkerThread === 'function';
@@ -363,7 +308,6 @@ function createWorkerManager(deps) {
         // 手动启动接管已有重试计划，避免刷新期间定时器再次消耗重连次数。
         scheduler.clear(`reconnect_attempt_${account.id}`);
         reconnectPlans.delete(account.id);
-        clearCredentialRecoveryIfIdle();
         if (!options.automatic) reconnectAttemptsMap.delete(account.id);
         if (!options.automatic) loginRecovery.cancel(account.id);
         const start = { cancelled: false, promise: null, controller: new AbortController(), identity: loginIdentity(account) };
@@ -386,7 +330,7 @@ function createWorkerManager(deps) {
             } finally {
                 if (startingWorkers.get(account.id) === start) {
                     startingWorkers.delete(account.id);
-                    // Code 刷新发生在 Worker 创建之前，失败时也必须进入有上限的重连流程。
+                    // 取码失败同样退避重试，不依赖尚未创建的 Worker 上报断线。
                     // 保留失败诊断；不能调用 stopWorker，否则会把本次失败当作用户取消。
                     if (!started && !start.cancelled && !workers[account.id] && (account.loginType === 'yyb' || isNativeQq(account))) {
                         void scheduleReconnect(account.id, 'startup_failed', { stopCurrent: false });
@@ -476,11 +420,6 @@ function createWorkerManager(deps) {
             wsError: null
         };
 
-        // 注意：这里不再清理应用宝离线重连计数（reconnectAttemptsMap）。
-        // 旧逻辑会在 startWorker 成功时清零，导致重连计数永远从 0 起算、
-        // maxAttempts 失效、账号被无限重连。计数只在"达到上限 /
-        // 账号被删 / 手动停止"时清零（见下方 ws_reconnect_failed 与 stopWorker）。
-
         // 发送启动配置
         proc.send({
             type: 'start',
@@ -492,6 +431,13 @@ function createWorkerManager(deps) {
             type: 'config_sync',
             config: buildConfigSnapshotForAccount(account.id)
         });
+
+        scheduler.setTimeoutTask(`connect_timeout_${account.id}`, CONNECT_TIMEOUT_MS, () => {
+            const current = workers[account.id];
+            if (current?.process === proc && !current.stopping && !current.status?.connection?.connected) {
+                void scheduleReconnect(account.id, '连接游戏超时');
+            }
+        }).unref?.();
 
         // 监听 Worker 消息
         proc.on('message', (msg) => {
@@ -542,6 +488,9 @@ function createWorkerManager(deps) {
             if (wrk && wrk.process === proc) {
                 if (!wrk.stopping) startupResults.set(account.id, { updatedAt: Date.now(), error: `账号进程退出（${code ?? signal ?? '未知原因'}），可重试启动` });
                 delete workers[account.id];
+                scheduler.clear(`connect_timeout_${account.id}`);
+                scheduler.clear(`reconnect_reset_${account.id}`);
+                if (!wrk.stopping) void scheduleReconnect(account.id, 'worker_exited', { stopCurrent: false });
             }
         });
 
@@ -552,9 +501,7 @@ function createWorkerManager(deps) {
      * 停止账号 Worker
      * @param {string} accountId 账号 ID
      * @param {object} [opts]
-     * @param {boolean} [opts.resetReconnect] 是否同时清零「应用宝离线重连」计数，默认 true。
-     *   手动停止 / 踢下线 / 删除账号时应清零；唯独自动重连流程(ws_reconnect_failed)必须传 false，
-     *   否则每次断线都会被清零，导致 maxAttempts 永远不触发、无限重连。
+     * @param {boolean} [opts.resetReconnect] 手动停止或删除时清除退避状态；自动恢复时保留。
      */
     function stopWorker(accountId, opts = {}) {
         const { resetReconnect = true, preserveRestart = false } = opts;
@@ -564,7 +511,6 @@ function createWorkerManager(deps) {
         if (resetReconnect) {
             startupResults.delete(accountId);
             reconnectPlans.delete(accountId);
-            clearCredentialRecoveryIfIdle();
         }
         const pending = startingWorkers.get(accountId);
         if (pending) { pending.cancelled = true; pending.controller?.abort(); }
@@ -572,7 +518,7 @@ function createWorkerManager(deps) {
 
         // 取消尚未触发的离线重连计划
         scheduler.clear(`reconnect_attempt_${accountId}`);
-        // 【2026-08-12】同步清理"重连成功稳定期清零"定时器，避免账号停止后残留定时器意外清零计数
+        scheduler.clear(`connect_timeout_${accountId}`);
         scheduler.clear(`reconnect_reset_${accountId}`);
         if (resetReconnect) {
             // 仅「账号退役 / 用户主动停止」场景清零计数；自动重连循环内不在此清零
@@ -643,19 +589,6 @@ function createWorkerManager(deps) {
         return startWorker(stored, options);
     }
 
-    /**
-     * 统一的应用宝离线重连调度
-     * 由 ws_reconnect_failed（连接中断）/ account_kicked（被踢下线）/ ws_error 400（登录失效/异地登录）
-     * 三种场景共用，避免某些场景“永不重连”。
-     * 受（账号级优先、全局兜底）autoReconnect + reconnectDelayMin + maxAttempts 控制；重连前由 startWorker →
-     * refreshYybCodeIfNeeded 自动刷新 code（内置 YYB 走 yyb-go；第三方 tab 接入时按 provider 分流）。
-     */
-
-    /**
-     * 解析某账号的离线重连配置。
-     * 第三方账号（provider==='thirdparty'）优先使用账号级独立配置（thirdparty.*），
-     * 未设置账号级配置时回退到全局 wxConfig（与内置 YYB 一致）。
-     */
     function isNativeQq(account) {
         return account?.platform === 'qq' && account.loginType !== 'yyb' && !account.yybOpenid;
     }
@@ -666,162 +599,75 @@ function createWorkerManager(deps) {
 
     function resolveReconnectConfig(account) {
         if (isNativeQq(account)) {
-            return { autoReconnect: !!account.qqLoginProfile && account.qqAutoReconnect !== false,
-                reconnectDelayMin: 0.5, reconnectMaxAttempts: 3, source: 'qq' };
+            return { autoReconnect: !!account.qqLoginProfile && account.qqAutoReconnect !== false, source: 'qq' };
         }
-        const store = require('../models/store');
-        const wxConfig = store.getUserWxConfig(account.userId);
-        const globalCfg = {
-            autoReconnect: !!(wxConfig && wxConfig.autoReconnect),
-            reconnectDelayMin: wxConfig ? wxConfig.reconnectDelayMin : 5,
-            reconnectMaxAttempts: wxConfig ? wxConfig.reconnectMaxAttempts : 3,
-        };
-
-        if (account && account.provider === 'thirdparty' && account.thirdparty) {
-            const tp = account.thirdparty;
-            const hasAccountLevel =
-                tp.autoReconnect !== undefined ||
-                tp.reconnectDelayMin !== undefined ||
-                tp.reconnectMaxAttempts !== undefined;
-            if (hasAccountLevel) {
-                return {
-                    autoReconnect: tp.autoReconnect === undefined
-                        ? globalCfg.autoReconnect
-                        : tp.autoReconnect === true,
-                    reconnectDelayMin: (tp.reconnectDelayMin === undefined || tp.reconnectDelayMin === null || tp.reconnectDelayMin === '')
-                        ? globalCfg.reconnectDelayMin
-                        : Math.max(1, Number(tp.reconnectDelayMin) || globalCfg.reconnectDelayMin),
-                    reconnectMaxAttempts: (tp.reconnectMaxAttempts === undefined || tp.reconnectMaxAttempts === null || tp.reconnectMaxAttempts === '')
-                        ? globalCfg.reconnectMaxAttempts
-                        : Math.max(1, Number(tp.reconnectMaxAttempts) || globalCfg.reconnectMaxAttempts),
-                    source: 'account',
-                };
-            }
+        if (account.provider === 'thirdparty' && account.thirdparty?.autoReconnect !== undefined) {
+            return { autoReconnect: account.thirdparty.autoReconnect === true, source: 'account' };
         }
-        return { ...globalCfg, source: 'global' };
+        return { autoReconnect: require('../models/store').getUserWxConfig(account.userId).autoReconnect === true, source: 'user' };
     }
 
-    async function scheduleReconnect(accountId, reason, { stopCurrent = true } = {}) {
+    // 1、5、10 分钟退避，之后每 10 分钟继续；明确失效或用户停止才暂停。
+    async function scheduleReconnect(accountId, reason, { stopCurrent = true, kind: failureKind } = {}) {
         const wrk = workers[accountId];
         const name = wrk ? wrk.name : accountId;
-
-        log('系统', `账号 ${name} 触发离线重连调度 (${reason})`, {
-            accountId: String(accountId),
-            accountName: name,
-            reason,
-        });
-
-        // 先停止当前 worker（清理进程）；自动重连流程内【不】清零计数，
-        // 否则每次断线都被清零，maxAttempts 永不触发、无限重连。
         if (stopCurrent) {
             const error = wrk?.wsError?.message || reason;
             stopWorker(accountId, { resetReconnect: false });
-            startupResults.set(accountId, { updatedAt: Date.now(), error });
+            startupResults.set(accountId, { updatedAt: Date.now(), error, kind: failureKind || 'temporary' });
         }
-
         try {
             const store = require('../models/store');
-            // 取完整账号（含第三方真实 token 与账号级离线重连配置）
-            const accountsData = store.getAccounts();
-            const account = (accountsData.accounts || []).find(a => a.id === accountId);
-            if (!account || getAccountAccessRejection(account)) {
+            const account = store.getAccounts().accounts.find(a => a.id === accountId);
+            if (!account || account.autoStart !== true || getAccountAccessRejection(account)) {
+                scheduler.clear(`reconnect_attempt_${accountId}`);
                 reconnectAttemptsMap.delete(accountId);
                 reconnectPlans.delete(accountId);
                 return;
             }
             const cfg = resolveReconnectConfig(account);
             const kind = startupResults.get(accountId)?.kind || 'temporary';
-            if (['rescan', 'configuration', 'cancelled', 'kicked'].includes(kind)) {
+            if (['rescan', 'configuration', 'cancelled'].includes(kind)) {
                 scheduler.clear(`reconnect_attempt_${accountId}`);
                 reconnectPlans.set(accountId, { state: kind === 'rescan' ? 'needs_rescan' : 'blocked',
-                    attempt: reconnectAttemptsMap.get(accountId) || 0, maxAttempts: cfg.reconnectMaxAttempts, nextRetryAt: null, reason, kind });
-                log('系统', `账号 ${name} ${kind === 'rescan' ? '需要扫码更新，已暂停自动重试' : '需要检查登录配置，已暂停自动重试'}`, { accountId: String(accountId) });
+                    attempt: reconnectAttemptsMap.get(accountId) || 0, nextRetryAt: null, reason, kind });
                 return;
             }
-
-            if (!cfg.autoReconnect || !(cfg.reconnectDelayMin > 0)) {
+            if (!cfg.autoReconnect) {
                 reconnectPlans.delete(accountId);
-                if (isNativeQq(account) && !account.qqLoginProfile) reconnectPlans.set(accountId, { state: 'needs_rescan', attempt: 0, maxAttempts: cfg.reconnectMaxAttempts, nextRetryAt: null, reason, kind: 'rescan' });
-                const hint = isNativeQq(account) && !account.qqLoginProfile ? '缺少可恢复的 QQ 登录态，请使用 QQ 扫码更新一次' : `未启用${  reconnectLabel(account)}`;
-                log('系统', `账号 ${name} ${hint}，已停止`, { accountId: String(accountId) });
-                return;
-            }
-
-            const attemptKey = `reconnect_attempt_${accountId}`;
-            // 从独立计数 Map 读取（不受 startWorker 清零影响，保证 maxAttempts 生效）
-            const currentAttempt = reconnectAttemptsMap.get(accountId) || 0;
-            const maxAttempts = cfg.reconnectMaxAttempts;
-
-            if (currentAttempt >= maxAttempts) {
-                const awaitCredentials = account.autoStart !== false && account.provider !== 'thirdparty'
-                    && account.loginType === 'yyb' && !!account.yybOpenid
-                    && startupResults.get(accountId)?.category === 'credentials';
-                reconnectPlans.set(accountId, { state: awaitCredentials ? 'waiting_credentials' : 'exhausted',
-                    attempt: currentAttempt, maxAttempts, nextRetryAt: null, reason, waitingSince: Date.now() });
-                if (awaitCredentials && !scheduler.has('credential_recovery')) {
-                    scheduler.setIntervalTask('credential_recovery', 60000, checkCredentialRecovery);
-                }
-                log('系统', `账号 ${name} 自动重连已达上限(${maxAttempts}次)，停止重连`, {
-                    accountId: String(accountId),
-                    attempts: currentAttempt,
+                if (isNativeQq(account) && !account.qqLoginProfile) reconnectPlans.set(accountId, {
+                    state: 'needs_rescan', attempt: 0, nextRetryAt: null, reason, kind: 'rescan',
                 });
+                const hint = isNativeQq(account) && !account.qqLoginProfile ? '缺少可恢复的 QQ 登录态，请使用 QQ 扫码更新一次' : `未启用${reconnectLabel(account)}`;
+                log('系统', `账号 ${name} ${hint}，已停止`, { accountId });
                 return;
             }
-
-            // 记录重连计数（先自增，作为下一次判断基准）
-            const nextAttempt = kind === 'busy' ? currentAttempt : currentAttempt + 1;
+            const attemptKey = `reconnect_attempt_${accountId}`;
+            if (scheduler.has(attemptKey)) return;
+            const nextAttempt = Math.min(Number.MAX_SAFE_INTEGER, (reconnectAttemptsMap.get(accountId) || 0) + 1);
             reconnectAttemptsMap.set(accountId, nextAttempt);
-
-            const baseDelay = cfg.reconnectDelayMin * 60 * 1000;
-            const delayMs = kind === 'busy' ? Math.min(baseDelay, 15000) : Math.min(baseDelay * 2 ** Math.max(0, nextAttempt - 1), Math.max(baseDelay, 15 * 60000));
-            reconnectPlans.set(accountId, { state: 'scheduled', attempt: nextAttempt, maxAttempts, nextRetryAt: Date.now() + delayMs, reason, kind });
-            log('系统', `账号 ${name} 将在 ${delayMs / 1000} 秒后自动重连 (${nextAttempt}/${maxAttempts})${cfg.source === 'qq' ? ' [QQ 独立配置]' : cfg.source === 'account' ? ' [账号级配置]' : ' [全局配置]'}`, {
-                accountId: String(accountId),
-                delayMin: delayMs / 60000,
-                attempt: nextAttempt,
-                maxAttempts,
+            const delayMs = RECONNECT_DELAYS_MS[Math.min(nextAttempt - 1, RECONNECT_DELAYS_MS.length - 1)];
+            const plan = { state: 'scheduled', attempt: nextAttempt, nextRetryAt: Date.now() + delayMs, reason, kind };
+            const identity = loginIdentity(account);
+            reconnectPlans.set(accountId, plan);
+            log('系统', `账号 ${name} 将在 ${delayMs / 60000} 分钟后重新取码重连（第 ${nextAttempt} 次）`, {
+                accountId, delayMin: delayMs / 60000, attempt: nextAttempt,
             });
-
             scheduler.setTimeoutTask(attemptKey, delayMs, async () => {
+                if (reconnectPlans.get(accountId) !== plan) return;
                 scheduler.clear(attemptKey);
                 reconnectPlans.delete(accountId);
-                // 重连前检查账号是否还存在、是否已有 worker 在跑（无需重复重连）
-                const currentWrk = workers[accountId];
-                if (currentWrk) return;
-
-                try {
-                    const accountsData2 = store.getAccounts();
-                    const account2 = (accountsData2.accounts || []).find(a => a.id === accountId);
-                    if (!account2) {
-                        log('系统', `账号 ${name} 已被删除，取消自动重连`, { accountId: String(accountId) });
-                        reconnectAttemptsMap.delete(accountId);
-                        return;
-                    }
-                    // 等待期间可能关闭重连，必须以最新设置为准。
-                    const currentConfig = resolveReconnectConfig(account2);
-                    if (account2.autoStart === false || !currentConfig.autoReconnect || !(currentConfig.reconnectDelayMin > 0)
-                        || nextAttempt > currentConfig.reconnectMaxAttempts) return;
-                    log('系统', `账号 ${name} 开始自动重连 (${nextAttempt}/${cfg.reconnectMaxAttempts})`, { accountId: String(accountId) });
-                    const started = await startWorker(account2, { automatic: true });
-                    if (started) {
-                        // 【2026-08-12 修复】重连成功后：若账号稳定在线 10 分钟未再断线，清零重连计数。
-                        // 原逻辑计数永不清零 → 断线 3 次后 currentAttempt>=maxAttempts 直接停止重连、账号永久离线。
-                        // 若 10 分钟内再次断线，计数保留继续累积，仍受 maxAttempts 限制，防止无限重连。
-                        scheduler.setTimeoutTask(`reconnect_reset_${accountId}`, RECONNECT_SUCCESS_STABLE_MS, () => {
-                            if (workers[accountId]?.status?.connection?.connected) {
-                                reconnectAttemptsMap.delete(accountId);
-                            }
-                        });
-                        addAccountLog('reconnect_success',
-                            `账号 ${name} 已发起${reconnectLabel(account2)}，等待游戏连接确认 (${nextAttempt}/${cfg.reconnectMaxAttempts})`,
-                            accountId, name, { attempt: nextAttempt, maxAttempts: cfg.reconnectMaxAttempts });
-                    }
-                } catch (e) {
-                    log('系统', `账号 ${name} 自动重连启动失败: ${e.message}`, { accountId: String(accountId) });
-                }
-            });
-        } catch (e) {
-            log('系统', `账号 ${name} 自动重连逻辑异常: ${e.message}`, { accountId: String(accountId) });
+                const current = store.getAccounts().accounts.find(a => a.id === accountId);
+                if (!current || current.autoStart !== true || current.deleting || getAccountAccessRejection(current)
+                    || loginIdentity(current) !== identity || !resolveReconnectConfig(current).autoReconnect) return;
+                if (workers[accountId]) return;
+                const started = await startWorker(current, { automatic: true });
+                if (started) addAccountLog('reconnect_started',
+                    `账号 ${name} 已发起${reconnectLabel(current)}，等待游戏连接确认（第 ${nextAttempt} 次）`,
+                    accountId, name, { attempt: nextAttempt });
+            }).unref?.();
+        } catch (error) {
+            log('系统', `账号 ${name} 自动重连异常: ${safeRuntimeError(error.message)}`, { accountId });
         }
     }
 
@@ -836,6 +682,7 @@ function createWorkerManager(deps) {
         if (msg.type === 'status_sync') {
             if (wrk.stopping) return;
             // 状态同步
+            const wasConnected = !!wrk.status?.connection?.connected;
             wrk.status = normalizeStatusForPanel(msg.data, accountId, wrk.name);
             syncAccountProfile(accountId, msg.data, wrk);
 
@@ -867,9 +714,13 @@ function createWorkerManager(deps) {
                 if (last?.error || last?.kind) startupResults.set(accountId, { updatedAt: Date.now(), error: '' });
                 reconnectPlans.delete(accountId);
                 scheduler.clear(`reconnect_attempt_${accountId}`);
-                clearCredentialRecoveryIfIdle();
+                scheduler.clear(`connect_timeout_${accountId}`);
+                if (!wasConnected) scheduler.setTimeoutTask(`reconnect_reset_${accountId}`, RECONNECT_SUCCESS_STABLE_MS, () => {
+                    if (workers[accountId] === wrk && wrk.status?.connection?.connected) reconnectAttemptsMap.delete(accountId);
+                }).unref?.();
                 loginRecovery.confirmConnected(accountId);
             } else if (!wrk.stopping) {
+                scheduler.clear(`reconnect_reset_${accountId}`);
                 const now = Date.now();
                 if (!wrk.disconnectedSince) wrk.disconnectedSince = now;
 
@@ -971,22 +822,10 @@ function createWorkerManager(deps) {
                     accountId, wrk.name);
             }
         } else if (msg.type === 'account_kicked') {
-            // An explicit server kick is not a transport failure. Persist the
-            // pause so neither retry timers nor a server restart reclaim it.
             const reason = safeRuntimeError(msg.reason || '未知');
-            stopWorker(accountId);
-            startupResults.set(accountId, { updatedAt: Date.now(), error: `已被踢下线：${reason}，请手动启动`, kind: 'kicked' });
-            reconnectPlans.set(accountId, { state: 'blocked', attempt: 0, maxAttempts: 0, nextRetryAt: null, reason, kind: 'kicked' });
-            addOrUpdateAccount({ id: accountId, autoStart: false });
-            triggerOfflineReminder({
-                accountId,
-                accountName: wrk.name,
-                reason: `kickout:${  reason}`,
-                offlineMs: 0
-            });
-            addAccountLog('kickout_paused',
-                `账号 ${wrk.name} 已被踢下线，已暂停，请手动启动`,
-                accountId, wrk.name, { reason });
+            triggerOfflineReminder({ accountId, accountName: wrk.name, reason: `kickout:${reason}`, offlineMs: 0 });
+            addAccountLog('kickout_reconnect', `账号 ${wrk.name} 已被踢下线，等待重新取码`, accountId, wrk.name);
+            void scheduleReconnect(accountId, reason, { kind: 'kicked' });
         } else if (msg.type === 'ws_reconnect_failed') {
             const reason = msg.reason || '未知';
             triggerOfflineReminder({

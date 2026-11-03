@@ -159,7 +159,7 @@ async function performUseItem(itemId, count, landIds, uid) {
         },
     })).finish();
     const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', 'Use', body);
-    return types.UseReply.decode(replyBody);
+    return describeUseReply(types.UseReply.decode(replyBody));
 }
 function batchUseItems(items) {
     return serializeInventory(() => performBatchUseItems(items));
@@ -178,7 +178,12 @@ async function sendBatchUseItems(items) {
     }));
     const body = types.BatchUseRequest.encode(types.BatchUseRequest.create({ items: payload })).finish();
     const { body: replyBody } = await sendMsgAsync('gamepb.itempb.ItemService', 'BatchUse', body);
-    return types.BatchUseReply.decode(replyBody);
+    return describeUseReply(types.BatchUseReply.decode(replyBody));
+}
+function describeUseReply(reply) {
+    return { ...reply, rewards: [...(reply.items || []), ...(reply.compensated_items || [])].map(item => ({
+        id: toNum(item.id), count: String(item.count), name: getItemById(toNum(item.id))?.name || `物品${item.id}`,
+    })) };
 }
 function isFruitItemId(id) {
     return !!getPlantByFruitId(Number(id));
@@ -692,13 +697,10 @@ async function sellAllFruits() {
         let serverGoldTotal = 0;
         for (let i = 0; i < toSell.length; i += SELL_BATCH_SIZE) {
             const batch = toSell.slice(i, i + SELL_BATCH_SIZE);
-            try {
-                const reply = await sellItems(batch);
-                const gained = getGoldFromItems(reply.get_items || []);
-                if (gained > 0)
-                    serverGoldTotal += gained;
-            }
-            catch (error) { throw error; }
+            const reply = await sellItems(batch);
+            const gained = getGoldFromItems(reply.get_items || []);
+            if (gained > 0)
+                serverGoldTotal += gained;
             if (i + SELL_BATCH_SIZE < toSell.length)
                 await sleep(300);
         }

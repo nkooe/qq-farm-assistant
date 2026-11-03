@@ -28,7 +28,7 @@ export interface Account {
   connected?: boolean
   runtimeState?: 'online' | 'starting' | 'reconnecting' | 'failed' | 'stopped' | 'stopping'
   runtimeError?: string
-  runtimeReconnect?: { state: 'scheduled' | 'exhausted' | 'waiting_credentials' | 'needs_rescan' | 'blocked', attempt: number, maxAttempts: number, nextRetryAt: number | null, reason: string, kind?: string }
+  runtimeReconnect?: { state: 'scheduled' | 'needs_rescan' | 'blocked', attempt: number, nextRetryAt: number | null, reason: string, kind?: string }
   runtimeLogin?: { source: string, state: 'queued' | 'requesting' | 'success' | 'failed' | 'cancelled', kind: string, startedAt: number, lastSuccessAt: number | null, durationMs: number | null } | null
   // Add other fields as discovered
 }
@@ -48,7 +48,7 @@ export interface RefreshWxCodesResult {
 }
 
 export function hasPendingAccountRecovery(account: Pick<Account, 'runtimeState' | 'runtimeReconnect'>) {
-  return account.runtimeState === 'reconnecting' || ['scheduled', 'waiting_credentials'].includes(account.runtimeReconnect?.state || '')
+  return account.runtimeState === 'reconnecting' || account.runtimeReconnect?.state === 'scheduled'
 }
 
 export interface RefreshWxCodesJob {

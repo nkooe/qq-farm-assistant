@@ -1,6 +1,6 @@
 // Adapted from qq-farm-bot-master (ISC); see docs/activity-features.md.
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
+const __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -123,7 +123,9 @@ function normalizeGoods(entry, settling) {
     // The official shop uses a positive purchase_limit as the finite cap.
     const remaining = limit > 0 ? Math.max(0, limit - bought) : null;
     return { id: String(entry.id), name: entry.name, description: entry.desc, rewards: items(entry.item), costs: items(entry.cost),
-        remaining, conditions, category: entry.category_tag,
+        remaining, purchaseLimit: limit > 0 ? limit : null,
+        limitPeriod: ({ 1: 'daily', 2: 'weekly', 3: 'monthly', 4: 'permanent' })[toNum(entry.restriction_type)] || 'unknown',
+        conditions, category: entry.category_tag,
         available: remaining !== 0 && conditions.every((v) => v.satisfied) && !(settling && entry.category_tag === 'seed'),
     };
 }
@@ -152,7 +154,9 @@ async function getMilkTeaActivity(page = 'shop', input = {}) {
         const shop = entries.find((v) => String(v.head?.activity_id) === SHOP)?.shop;
         if (!shop)
             fail('兑换商店未返回');
-        result.goods = (shop.goods || []).map((v) => normalizeGoods(v, settling));
+        const rank = goods => !(goods.cond_hints || []).every(condition => condition.satisfied) ? 3
+            : toNum(goods.purchase_limit) > 0 && toNum(goods.purchased_count) >= toNum(goods.purchase_limit) ? 2 : 1;
+        result.goods = [...(shop.goods || [])].sort((a, b) => rank(a) - rank(b) || toNum(a.order) - toNum(b.order)).map(v => normalizeGoods(v, settling));
     }
     else if (page === 'fund') {
         const fund = entries.find((v) => String(v.head?.activity_id) === FUND)?.growth_fund;

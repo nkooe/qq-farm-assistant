@@ -28,7 +28,7 @@ test('1000 is the only admin; allocation survives reload and never reuses delete
 });
 
 test('identity parsing rejects role forgery and malformed ID aliases', () => {
-  for (const value of [999, -1000, 1000.5, NaN, Infinity, '1000', null]) {
+  for (const value of [999, -1000, 1000.5, Number.NaN, Infinity, '1000', null]) {
     assert.equal(isUserIdentity({ id: value, role: 'admin' }), false);
   }
   assert.equal(isUserIdentity({ id: 1000, role: 'user' }), false);
@@ -39,7 +39,7 @@ test('identity parsing rejects role forgery and malformed ID aliases', () => {
 });
 
 test('all user settings and farm ownership remain independent and delete by ID', () => {
-  const a = 1002, b = 1003;
+  const a = 1002; const b = 1003;
   for (const id of [a, b]) {
     store.setUITheme(id === a ? 'dark' : 'light', id);
     store.setOfflineReminder({ smtpPass: `fixture-${id}` }, id);
@@ -76,8 +76,8 @@ test('user login settings retain runtime fields and discard unsupported options 
   assert.equal(Object.hasOwn(expected, 'autoAddAccount'), false);
   assert.equal(expected.apiKey, 'fixture-private');
   assert.equal(expected.autoReconnect, false);
-  assert.equal(expected.reconnectDelayMin, 7);
-  assert.equal(expected.reconnectMaxAttempts, 2);
+  assert.equal(Object.hasOwn(expected, 'reconnectDelayMin'), false);
+  assert.equal(Object.hasOwn(expected, 'reconnectMaxAttempts'), false);
   const filename = path.join(process.env.FARM_DATA_DIR, 'store.json');
   const persisted = JSON.parse(fs.readFileSync(filename, 'utf8'));
   assert.deepEqual(persisted.userWxConfigs['1003'], expected);

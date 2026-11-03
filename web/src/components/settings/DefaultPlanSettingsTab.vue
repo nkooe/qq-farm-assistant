@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch, watchEffect } from 'vue'
 import api from '@/api'
-import { useUserStore } from '@/stores/user'
 import ConfirmModal from '@/components/ConfirmModal.vue'
 import AutomationSettingsTab from '@/components/settings/AutomationSettingsTab.vue'
 import StrategySettingsTab from '@/components/settings/StrategySettingsTab.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
+import { useUserStore } from '@/stores/user'
 
 interface BagSeedItem {
   seedId: number
@@ -105,6 +105,7 @@ function createAutomationSettings() {
   return {
     automation: {
       farm: false,
+      farm_harvest_tiangong: true,
       task: false,
       sell: false,
       friend: false,
@@ -418,7 +419,7 @@ watchEffect(() => {
     <div class="flex flex-col gap-3 border-b border-gray-200 pb-4 lg:flex-row lg:items-center lg:justify-between dark:border-gray-700">
       <div class="min-w-0">
         <div class="flex flex-wrap items-center gap-3">
-          <h3 class="flex items-center gap-2 text-lg text-gray-900 font-bold dark:text-gray-100 max-sm:text-base">
+          <h3 class="flex items-center gap-2 text-lg text-gray-900 font-bold max-sm:text-base dark:text-gray-100">
             <span class="i-carbon-settings-adjust" />
             默认方案
           </h3>

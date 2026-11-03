@@ -1,8 +1,8 @@
 const process = require('node:process');
 
-// Aligned with upstream 80488ec and its 2026-10-22 platform captures.
-const DEFAULT_CLIENT_VERSION = '1.15.1.4_20261001';
-const DEFAULT_WX_CLIENT_VERSION = '1.15.1.4_20261001';
+// Aligned with upstream fac75e4 and the matching dual-platform runtime.
+const DEFAULT_CLIENT_VERSION = '1.16.1.6_20261028';
+const DEFAULT_WX_CLIENT_VERSION = '1.16.1.6_20261028';
 
 // 默认系统配置
 const DEFAULT_SYSTEM_CONFIG = {

@@ -43,6 +43,7 @@ async function loadProto() {
         getResourcePath('proto', 'qqvippb.proto'),
         getResourcePath('proto', 'sharepb.proto'),
         getResourcePath('proto', 'illustratedpb.proto'),
+        getResourcePath('proto', 'collectionpb.proto'),
         getResourcePath('proto', 'careerpb.proto'),
         getResourcePath('proto', 'interactpb.proto'),
         getResourcePath('proto', 'dogpb.proto'),
@@ -150,6 +151,9 @@ async function loadProto() {
     types.ClaimShareRewardRequest = root.lookupType('gamepb.sharepb.ClaimShareRewardRequest');
     types.ClaimShareRewardReply = root.lookupType('gamepb.sharepb.ClaimShareRewardReply');
     types.GetIllustratedListV2Request = root.lookupType('gamepb.illustratedpb.GetIllustratedListV2Request');
+    for (const name of ['GetCollectionsRequest', 'GetCollectionsReply', 'UpgradeCollectionRequest', 'UpgradeCollectionReply', 'ClaimCollectionRewardRequest', 'ClaimCollectionRewardReply', 'SwitchSceneDisplayRequest', 'SwitchSceneDisplayReply']) {
+        types[name] = root.lookupType(`gamepb.collectionpb.${name}`);
+    }
     types.GetIllustratedListV2Reply = root.lookupType('gamepb.illustratedpb.GetIllustratedListV2Reply');
     types.ClaimAllRewardsV2Request = root.lookupType('gamepb.illustratedpb.ClaimAllRewardsV2Request');
     types.ClaimAllRewardsV2Reply = root.lookupType('gamepb.illustratedpb.ClaimAllRewardsV2Reply');

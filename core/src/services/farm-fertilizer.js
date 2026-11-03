@@ -10,11 +10,13 @@ const { getCurrentPhase } = require('./farm-land-analyzer');
 // ─── 常量 ───
 
 /** 全部可施肥土地类型 */
-const ALL_FERTILIZER_LAND_TYPES = ['purple', 'gold', 'black', 'red', 'normal'];
+const DEFAULT_FERTILIZER_LAND_TYPES = ['purple', 'gold', 'black', 'red', 'normal'];
+const ALL_FERTILIZER_LAND_TYPES = ['blue', 'purple', 'gold', 'black', 'red', 'normal'];
 
 /** 土地类型中文标签 */
 const FERTILIZER_LAND_TYPE_LABELS = {
-  purple: '紫土地',
+  blue: '蓝晶土地',
+  purple: '紫金土地',
   gold: '金土地',
   black: '黑土地',
   red: '红土地',
@@ -181,6 +183,7 @@ function getFinalStageLands(lands, options = {}) {
 /** 根据等级获取土地类型 */
 function getLandTypeByLevel(level) {
   const lv = toNum(level);
+  if (lv === 6) return 'blue';
   if (lv === 5) return 'purple';   // 紫土地
   if (lv === 4) return 'gold';     // 金土地
   if (lv === 3) return 'black';    // 黑土地
@@ -190,7 +193,7 @@ function getLandTypeByLevel(level) {
 
 /** 标准化施肥土地类型列表 */
 function normalizeFertilizerLandTypes(types) {
-  const input = Array.isArray(types) ? types : ALL_FERTILIZER_LAND_TYPES;
+  const input = Array.isArray(types) ? types : DEFAULT_FERTILIZER_LAND_TYPES;
   const result = [];
   for (const t of input) {
     const normalized = String(t || '').trim().toLowerCase();
@@ -228,7 +231,7 @@ function formatFertilizerLandTypes(types) {
  * 根据配置执行施肥
  * @param {number[]} explicitLandIds - 指定地块 ID（空数组则自动获取）
  * @param {object} options - { reason, skipNormal }
- * @returns {{ normal: number, organic: number }}
+ * @returns {{ normal: number, organic: number }} 实际使用的无机和有机肥数量
  */
 async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
   const automation = getAutomation() || {};

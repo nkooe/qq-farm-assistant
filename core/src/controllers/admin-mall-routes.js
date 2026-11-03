@@ -100,6 +100,7 @@ function registerAdminMallRoutes({
           price,
           isFree,
           isLimited,
+          limitPeriod: ({ 1: '每日', 2: '每周', 3: '每月', 4: '永久' })[toNum(discount.purchase_limit?.limit_type)] || '限购',
           limitCount,
           boughtNum,
           isSoldOut,

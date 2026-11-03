@@ -80,6 +80,9 @@ function balance(cost: any) {
           <p v-if="info.prerequisite">
             前置土地 #{{ info.prerequisite.landId }}：{{ connected ? info.prerequisite.met ? '已解锁' : '未解锁' : '待同步' }}
           </p>
+          <p v-if="info.precedingLands">
+            {{ info.precedingLands.name }} {{ info.precedingLands.required }} 块（当前 {{ info.precedingLands.owned ?? '待同步' }} 块）
+          </p>
           <ul v-if="info.costs?.length" aria-label="所需资源">
             <li v-for="cost in info.costs" :key="cost.id">
               <span>{{ cost.name }} ×{{ cost.count === null ? '待同步' : BigInt(cost.count).toLocaleString('zh-CN') }}</span><span>{{ balance(cost) }}</span>

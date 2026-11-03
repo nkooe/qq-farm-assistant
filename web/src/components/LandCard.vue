@@ -82,6 +82,9 @@ function getLandStatusClass(targetLand: any) {
     case 4:
       baseClass = 'bg-amber-100/80 dark:bg-amber-900/20 border-amber-300 dark:border-amber-600'
       break
+    case 6:
+      baseClass = 'bg-blue-100/80 dark:bg-blue-900/20 border-blue-300 dark:border-blue-700'
+      break
     case 5:
       baseClass = 'bg-purple-100/80 dark:bg-purple-900/20 border-purple-300 dark:border-purple-700'
       break
@@ -127,7 +130,8 @@ function getLandTypeName(level: number) {
     2: '红土地',
     3: '黑土地',
     4: '金土地',
-    5: '紫土地',
+    5: '紫金土地',
+    6: '蓝晶土地',
   }
   return typeMap[Number(level) || 0] || ''
 }
@@ -155,7 +159,7 @@ function getPlantSizeText(targetLand: any) {
 
     <div
       v-if="land.plantSize > 1"
-      class="absolute right-1 top-1 z-10 rounded bg-pink-100 px-1.5 py-0.5 text-[10px] font-semibold text-pink-700 dark:bg-pink-900/30 dark:text-pink-300"
+      class="absolute right-1 top-1 z-10 rounded bg-pink-100 px-1.5 py-0.5 text-[10px] text-pink-700 font-semibold dark:bg-pink-900/30 dark:text-pink-300"
     >
       合种 {{ getPlantSizeText(land) }}
     </div>
@@ -163,7 +167,7 @@ function getPlantSizeText(targetLand: any) {
     <!-- 合种（2x2 合并）土地：跨 2 行 2 列占位，直观区别于普通土地 -->
     <div
       v-if="Number(land.plantSize) > 1"
-      class="pointer-events-none absolute inset-x-0 top-0 h-[3px] rounded-t-lg bg-gradient-to-r from-pink-400 via-fuchsia-400 to-pink-400 opacity-80"
+      class="pointer-events-none absolute inset-x-0 top-0 h-[3px] rounded-t-lg from-pink-400 via-fuchsia-400 to-pink-400 bg-gradient-to-r opacity-80"
     />
 
     <div
@@ -426,5 +430,4 @@ function getPlantSizeText(targetLand: any) {
 .land-card--merged .land-card-id {
   font-size: 11px;
 }
-
 </style>

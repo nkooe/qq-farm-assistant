@@ -6,6 +6,21 @@ import BaseInput from '@/components/ui/BaseInput.vue'
 import ScrollTabs from '@/components/ui/ScrollTabs.vue'
 import AdminSiteSettings from './AdminSiteSettings.vue'
 
+defineProps<{
+  defaultSystemConfig: SystemConfig
+  platformOptions: OptionItem[]
+  osOptions: OptionItem[]
+  systemConfigSaving: boolean
+  loginLinksSaving: boolean
+  loginLogoUploading: boolean
+}>()
+const emit = defineEmits<{
+  resetSystem: []
+  saveSystem: []
+  resetLoginLinks: []
+  saveLoginLinks: []
+  uploadLoginLogo: [file: File]
+}>()
 const sections = [
   { key: 'access', label: '访问控制', icon: 'i-carbon-security' },
   { key: 'announcement', label: '公告', icon: 'i-carbon-notification' },
@@ -21,23 +36,6 @@ interface OptionItem {
   label: string
   value: string
 }
-
-defineProps<{
-  defaultSystemConfig: SystemConfig
-  platformOptions: OptionItem[]
-  osOptions: OptionItem[]
-  systemConfigSaving: boolean
-  loginLinksSaving: boolean
-  loginLogoUploading: boolean
-}>()
-
-const emit = defineEmits<{
-  resetSystem: []
-  saveSystem: []
-  resetLoginLinks: []
-  saveLoginLinks: []
-  uploadLoginLogo: [file: File]
-}>()
 
 const localSystemConfig = defineModel<SystemConfig>('localSystemConfig', { required: true })
 const localLoginLinks = defineModel<LoginLinks>('localLoginLinks', { required: true })
@@ -62,7 +60,7 @@ function handleLogoFileChange(event: Event) {
 </script>
 
 <template>
-  <div class="min-w-0 max-w-full space-y-4">
+  <div class="max-w-full min-w-0 space-y-4">
     <div class="min-w-0 rounded-xl bg-gray-50 dark:bg-gray-900/40">
       <ScrollTabs v-model="activeSection" :items="sections" label="配置子菜单" />
     </div>
@@ -230,14 +228,14 @@ function handleLogoFileChange(event: Event) {
             v-model="localSystemConfig.clientVersion"
             label="QQ 客户端版本"
             type="text"
-            placeholder="1.15.1.4_20261001"
+            placeholder="1.16.1.6_20261028"
             class="col-span-2"
           />
           <BaseInput
             v-model="localSystemConfig.wxClientVersion"
             label="微信客户端版本"
             type="text"
-            placeholder="1.15.1.4_20261001"
+            placeholder="1.16.1.6_20261028"
             class="col-span-2"
           />
           <div class="flex flex-col gap-1.5">
@@ -295,7 +293,6 @@ function handleLogoFileChange(event: Event) {
           </BaseButton>
         </div>
       </div>
-
     </div>
   </div>
 </template>

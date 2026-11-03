@@ -10,6 +10,14 @@ export interface MenuItem {
 
 export const menuRoutes: MenuItem[] = [
   {
+    path: 'game-mall',
+    name: 'game-mall',
+    label: '游戏商城',
+    icon: 'i-carbon-shopping-bag',
+    showInNav: false,
+    component: () => import('@/views/GameMall.vue'),
+  },
+  {
     path: '',
     name: 'dashboard',
     label: '首页',
@@ -38,11 +46,18 @@ export const menuRoutes: MenuItem[] = [
     component: () => import('@/views/Illustrated.vue'),
   },
   {
-    path: 'activity', name: 'activity', label: '活动', icon: 'i-carbon-gift',
+    path: 'activity',
+    name: 'activity',
+    label: '活动',
+    icon: 'i-carbon-gift',
     component: () => import('@/views/Activities.vue'),
   },
   {
-    path: 'solar-calendar', name: 'solar-calendar', label: '节令日历', icon: 'i-carbon-calendar', showInNav: false,
+    path: 'solar-calendar',
+    name: 'solar-calendar',
+    label: '节令日历',
+    icon: 'i-carbon-calendar',
+    showInNav: false,
     component: () => import('@/views/Activities.vue'),
   },
   {

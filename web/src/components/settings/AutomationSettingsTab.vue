@@ -1,13 +1,14 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
-import { computed } from 'vue'
 
 interface AutomationSettings {
   automation: {
     farm: boolean
+    farm_harvest_tiangong: boolean
     task: boolean
     sell: boolean
     friend: boolean
@@ -80,7 +81,7 @@ function isFastMatureFertilizerMode(mode: string) {
 <template>
   <div class="space-y-4">
     <div class="flex items-center justify-between">
-      <h3 class="text-lg text-gray-900 font-bold dark:text-gray-100 max-sm:text-base">
+      <h3 class="text-lg text-gray-900 font-bold max-sm:text-base dark:text-gray-100">
         {{ title }}
         <span v-if="currentAccountName" class="ml-2 text-sm text-gray-500 font-normal dark:text-gray-400">
           ({{ currentAccountName }})
@@ -100,47 +101,51 @@ function isFastMatureFertilizerMode(mode: string) {
 
     <div v-else class="space-y-4">
       <div class="grid grid-cols-2 gap-2 sm:gap-3">
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动种植收获</span>
           <BaseSwitch v-model="settings.automation.farm" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动做任务</span>
           <BaseSwitch v-model="settings.automation.task" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动卖果实</span>
           <BaseSwitch v-model="settings.automation.sell" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动好友互动</span>
           <BaseSwitch v-model="settings.automation.friend" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">推送触发巡田</span>
           <BaseSwitch v-model="settings.automation.farm_push" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动升级土地</span>
           <BaseSwitch v-model="settings.automation.land_upgrade" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+          <span class="text-[13px] text-gray-800 dark:text-gray-100">收获天工作物</span>
+          <BaseSwitch v-model="settings.automation.farm_harvest_tiangong" />
+        </div>
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动填充化肥</span>
           <BaseSwitch v-model="settings.automation.fertilizer_gift" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动购买有机化肥</span>
           <BaseSwitch v-model="settings.automation.fertilizer_buy_organic" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动购买无机化肥</span>
           <BaseSwitch v-model="settings.automation.fertilizer_buy_normal" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">不除自己草虫</span>
           <BaseSwitch v-model="settings.automation.skip_own_weed_bug" />
         </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+        <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动清除黄金虫</span>
           <BaseSwitch v-model="settings.automation.golden_bug_clear" />
         </div>
@@ -204,52 +209,54 @@ function isFastMatureFertilizerMode(mode: string) {
       </div>
 
       <div v-if="settings.automation.friend" class="space-y-2">
-        <div class="text-sm text-gray-500 dark:text-gray-400">好友互动</div>
+        <div class="text-sm text-gray-500 dark:text-gray-400">
+          好友互动
+        </div>
         <div class="grid grid-cols-2 gap-2 sm:gap-3">
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <span class="text-[13px] text-gray-800 dark:text-gray-100">自动偷菜</span>
-          <BaseSwitch v-model="settings.automation.friend_steal" />
-        </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <span class="text-[13px] text-gray-800 dark:text-gray-100">自动帮忙</span>
-          <BaseSwitch v-model="settings.automation.friend_help" />
-        </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <span class="text-[13px] text-gray-800 dark:text-gray-100">自动捣乱</span>
-          <BaseSwitch v-model="settings.automation.friend_bad" />
-        </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <span class="text-[13px] text-gray-800 dark:text-gray-100">自动放黄金虫</span>
-          <BaseSwitch v-model="settings.automation.friend_golden_bug" />
-        </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <span class="text-[13px] text-gray-800 dark:text-gray-100">经验满只帮护主犬</span>
-          <BaseSwitch v-model="settings.automation.friend_help_exp_limit" />
-        </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <span class="text-[13px] text-gray-800 dark:text-gray-100">极速务农</span>
-          <BaseSwitch v-model="settings.automation.friend_turbo_mode" />
-        </div>
-        <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <div class="flex flex-col gap-0.5">
-            <span class="text-[13px] text-gray-800 dark:text-gray-100">定时极速务农</span>
-            <span class="text-[11px] text-gray-500">开启后仅时段内极速，其余正常巡查</span>
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <span class="text-[13px] text-gray-800 dark:text-gray-100">自动偷菜</span>
+            <BaseSwitch v-model="settings.automation.friend_steal" />
           </div>
-          <BaseSwitch v-model="settings.automation.friend_turbo_scheduled" />
-        </div>
-        <div v-if="settings.automation.friend_turbo_scheduled" class="flex items-center gap-2 rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
-          <input
-            v-model="turboWindow.start"
-            type="time"
-            class="rounded-md border border-white/40 bg-white/70 px-2 py-1 text-[13px] text-gray-800 dark:bg-white/10 dark:text-gray-100"
-          />
-          <span class="text-[13px] text-gray-500">至</span>
-          <input
-            v-model="turboWindow.end"
-            type="time"
-            class="rounded-md border border-white/40 bg-white/70 px-2 py-1 text-[13px] text-gray-800 dark:bg-white/10 dark:text-gray-100"
-          />
-        </div>
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <span class="text-[13px] text-gray-800 dark:text-gray-100">自动帮忙</span>
+            <BaseSwitch v-model="settings.automation.friend_help" />
+          </div>
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <span class="text-[13px] text-gray-800 dark:text-gray-100">自动捣乱</span>
+            <BaseSwitch v-model="settings.automation.friend_bad" />
+          </div>
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <span class="text-[13px] text-gray-800 dark:text-gray-100">自动放黄金虫</span>
+            <BaseSwitch v-model="settings.automation.friend_golden_bug" />
+          </div>
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <span class="text-[13px] text-gray-800 dark:text-gray-100">经验满只帮护主犬</span>
+            <BaseSwitch v-model="settings.automation.friend_help_exp_limit" />
+          </div>
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <span class="text-[13px] text-gray-800 dark:text-gray-100">极速务农</span>
+            <BaseSwitch v-model="settings.automation.friend_turbo_mode" />
+          </div>
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <div class="flex flex-col gap-0.5">
+              <span class="text-[13px] text-gray-800 dark:text-gray-100">定时极速务农</span>
+              <span class="text-[11px] text-gray-500">开启后仅时段内极速，其余正常巡查</span>
+            </div>
+            <BaseSwitch v-model="settings.automation.friend_turbo_scheduled" />
+          </div>
+          <div v-if="settings.automation.friend_turbo_scheduled" class="flex items-center gap-2 border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+            <input
+              v-model="turboWindow.start"
+              type="time"
+              class="border border-white/40 rounded-md bg-white/70 px-2 py-1 text-[13px] text-gray-800 dark:bg-white/10 dark:text-gray-100"
+            >
+            <span class="text-[13px] text-gray-500">至</span>
+            <input
+              v-model="turboWindow.end"
+              type="time"
+              class="border border-white/40 rounded-md bg-white/70 px-2 py-1 text-[13px] text-gray-800 dark:bg-white/10 dark:text-gray-100"
+            >
+          </div>
         </div>
       </div>
 
@@ -320,7 +327,7 @@ function isFastMatureFertilizerMode(mode: string) {
         </div>
 
         <div class="grid grid-cols-2 gap-2 sm:gap-3">
-          <div class="flex items-center justify-between rounded-full border border-white/40 bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
+          <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
             <span class="text-[13px] text-gray-800 dark:text-gray-100">多季补肥</span>
             <BaseSwitch v-model="settings.automation.fertilizer_multi_season" />
           </div>

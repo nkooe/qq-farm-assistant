@@ -1,0 +1,79 @@
+syntax = "proto3";
+package gamepb.collectionpb;
+
+import "corepb.proto";
+
+// Verified against the official 2026-11-01 encoders and GetCollections capture.
+message GetCollectionsRequest {
+    repeated int32 categories = 1;
+}
+message CollectionInfo {
+    int64 collection_id = 1;
+    int32 star_level = 2;
+    bool is_new = 3;
+    int64 first_obtained_time = 4;
+    int64 own_count = 5;
+}
+message PedestalInfo {
+    int64 pedestal_id = 1;
+    bool is_new = 2;
+}
+message WishInfo {
+    int32 series_id = 1;
+    int64 collection_id = 2;
+    int64 cooldown_until = 3;
+}
+message CategoryDetail {
+    int32 category = 1;
+    repeated CollectionInfo collections = 2;
+    repeated PedestalInfo pedestals = 3;
+    repeated WishInfo wished = 4;
+    int32 claimed_reward_score = 5;
+    int32 current_score = 6;
+    int64 collection_like_count = 7;
+    int64 pedestal_like_count = 8;
+}
+message DisplayInfo {
+    int32 category = 1;
+    int64 item_id = 2;
+    int64 pedestal_id = 3;
+}
+message DisplaySlot {
+    int32 slot_type = 1;
+    DisplayInfo display = 2;
+}
+message GetCollectionsReply {
+    repeated CategoryDetail details = 1;
+    repeated DisplaySlot display_slots = 2;
+}
+
+// Official activation and star-up share this method.
+message UpgradeCollectionRequest {
+    int32 category = 1;
+    int64 collection_id = 2;
+}
+message UpgradeCollectionReply {
+    int32 category = 1;
+    int64 collection_id = 2;
+    int32 star_level = 3;
+    int32 current_score = 4;
+    bool is_max_star = 5;
+    int64 own_count = 6;
+}
+message ClaimCollectionRewardRequest {
+    int32 category = 1;
+}
+message ClaimCollectionRewardReply {
+    repeated corepb.Item total_rewards = 1;
+    int32 current_score = 2;
+    int32 claimed_reward_score = 3;
+    repeated int32 claimed_scores = 4 [packed = true];
+}
+
+// Slot 1 is the single collection display slot; item_id=0 clears it.
+message SwitchSceneDisplayRequest {
+    DisplaySlot display_slot = 1;
+}
+message SwitchSceneDisplayReply {
+    DisplaySlot display_slot = 1;
+}

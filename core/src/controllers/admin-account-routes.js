@@ -541,7 +541,7 @@ function registerAdminAccountRoutes({
         const refreshing = [...refreshJobs.values()].some(job =>
           ['queued', 'running'].includes(job.state) && job.targets.some(target => target.id === accountId));
         const reconnect = runtime?.reconnect || account.runtimeReconnect;
-        const reconnectPending = ['scheduled', 'waiting_credentials'].includes(reconnect?.state);
+        const reconnectPending = reconnect?.state === 'scheduled';
         if (state !== 'stopped' || runtime?.running || runtime?.connected || account.running || account.connected || refreshing || reconnectPending) {
           return res.status(409).json({ ok: false, error: '账号状态已变化或正在刷新 Code，已跳过清理' });
         }

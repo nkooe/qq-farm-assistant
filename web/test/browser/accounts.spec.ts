@@ -47,10 +47,10 @@ test('shared proxy options show only their name without an empty address', async
 
 for (const [kind, state, label] of [
   ['rescan', 'needs_rescan', '请扫码，重试已暂停'],
-  ['configuration', 'blocked', '配置异常，重试已暂停'],
+  ['configuration', 'blocked', '重试已暂停，请检查登录配置'],
 ] as const) {
   test(`login recovery explains ${kind} without claiming retries are exhausted`, async ({ page }) => {
-    await mockApi(page, [{ id: 'recovery', name: '登录恢复账号', platform: 'qq', runtimeState: 'failed', running: false, runtimeReconnect: { state, kind, attempt: 0, maxAttempts: 3, nextRetryAt: null }, runtimeLogin: { state: 'failed', kind, startedAt: Date.now(), durationMs: 2000 } }] as any)
+    await mockApi(page, [{ id: 'recovery', name: '登录恢复账号', platform: 'qq', runtimeState: 'failed', running: false, runtimeReconnect: { state, kind, attempt: 0, nextRetryAt: null }, runtimeLogin: { state: 'failed', kind, startedAt: Date.now(), durationMs: 2000 } }] as any)
     await page.route('**/api/accounts/recovery/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: {} } } }))
     await page.goto('/test/browser/accounts.html')
     await expect(page.getByText(label, { exact: true })).toBeVisible()
@@ -61,19 +61,20 @@ for (const [kind, state, label] of [
   })
 }
 
-test('server kick explains its pause without claiming a scan or configuration failure', async ({ page }) => {
-  await mockApi(page, [{ id: 'kicked', name: '被踢账号', platform: 'wx', loginType: 'yyb', yybOpenid: 'fixture', runtimeState: 'failed', running: false, autoStart: false, runtimeReconnect: { state: 'blocked', kind: 'kicked', attempt: 0, maxAttempts: 0, nextRetryAt: null } }] as any)
+test('server kick displays automatic retry countdown without asking for manual startup', async ({ page }) => {
+  await mockApi(page, [{ id: 'kicked', name: '被踢账号', platform: 'wx', loginType: 'yyb', yybOpenid: 'fixture', runtimeState: 'reconnecting', running: false, autoStart: true, runtimeReconnect: { state: 'scheduled', kind: 'kicked', attempt: 1, nextRetryAt: Date.now() + 60000 } }] as any)
   await page.route('**/api/accounts/kicked/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: {} } } }))
   await page.goto('/test/browser/accounts.html')
-  await expect(page.getByText('已被踢下线，请手动启动', { exact: true })).toBeVisible()
-  await expect(page.getByText('配置异常，重试已暂停', { exact: true })).toHaveCount(0)
+  await expect(page.getByText(/被踢下线，第 1 次重连，\d+ 秒后重试/)).toBeVisible()
+  await expect(page.getByText(/请手动启动|重连已达上限/)).toHaveCount(0)
+  await expect(page.getByText('重试已暂停，请检查登录配置', { exact: true })).toHaveCount(0)
   await expect(page.getByText('请扫码，重试已暂停', { exact: true })).toHaveCount(0)
   await expectFits(page)
 })
 
-test('busy recovery counts down without spending attempts and follows fresh account state', async ({ page }) => {
+test('busy recovery counts down and follows fresh account state', async ({ page }) => {
   await page.clock.install()
-  const account: any = { id: 'queue', name: '排队取码账号', platform: 'qq', runtimeState: 'reconnecting', running: false, runtimeReconnect: { state: 'scheduled', kind: 'busy', attempt: 0, maxAttempts: 3, nextRetryAt: Date.now() + 15000 }, runtimeLogin: { state: 'queued', source: 'qq', startedAt: Date.now(), lastSuccessAt: null } }
+  const account: any = { id: 'queue', name: '排队取码账号', platform: 'qq', runtimeState: 'reconnecting', running: false, runtimeReconnect: { state: 'scheduled', kind: 'busy', attempt: 1, nextRetryAt: Date.now() + 60000 }, runtimeLogin: { state: 'queued', source: 'qq', startedAt: Date.now(), lastSuccessAt: null } }
   await mockApi(page, [account])
   await page.route('**/api/accounts/queue/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: { login: { state: 'failed', kind: 'rescan' } } } } }))
   await page.goto('/test/browser/accounts.html')
@@ -162,7 +163,7 @@ for (const saved of [true, false]) {
 for (const retainLoginHistory of [true, false]) {
   test(`QQ connection recovery hides past failures even when health is stale: ${retainLoginHistory}`, async ({ page }) => {
     const failedLogin = { source: 'qq', state: 'failed', kind: 'rescan', durationMs: 3800 }
-    const failedPlan = { state: 'needs_rescan', attempt: 0, maxAttempts: 3, nextRetryAt: null }
+    const failedPlan = { state: 'needs_rescan', attempt: 0, nextRetryAt: null }
     let account: any = { id: 'qq-recovered', name: '恢复账号', platform: 'qq', runtimeState: 'failed', connected: false, running: false, qqAutoCodeAvailable: true, runtimeError: '旧登录错误', runtimeLogin: failedLogin, runtimeReconnect: failedPlan }
     await mockApi(page, [account])
     await page.route('**/api/accounts', route => route.fulfill({ json: { ok: true, data: { accounts: [account] } } }))
@@ -191,7 +192,7 @@ for (const retainLoginHistory of [true, false]) {
     await expectFits(page)
     await page.screenshot({ path: test.info().outputPath(`qq-recovered-${retainLoginHistory}.png`) })
 
-    account = { ...account, runtimeState: 'reconnecting', connected: false, runtimeLogin: { state: 'requesting' }, runtimeReconnect: { state: 'scheduled', attempt: 1, maxAttempts: 3, nextRetryAt: Date.now() + 30000 } }
+    account = { ...account, runtimeState: 'reconnecting', connected: false, runtimeLogin: { state: 'requesting' }, runtimeReconnect: { state: 'scheduled', attempt: 1, nextRetryAt: Date.now() + 30000 } }
     await page.getByTestId('force-fetch').click()
     await expect(page.getByRole('button', { name: /状态检查 · 等待重连/ })).toBeVisible()
     await expect(page.getByText('正在取码', { exact: true })).toBeVisible()
@@ -514,8 +515,8 @@ test('long cleanup list scrolls inside the dialog while confirmation remains rea
 })
 
 test('reconnecting accounts show their retry plan, stay out of cleanup and can cancel recovery', async ({ page }) => {
-  const pending = { id: '5', name: '等待重连账号', runtimeState: 'reconnecting', running: false, yybOpenid: 'fixture', runtimeReconnect: { state: 'scheduled', attempt: 2, maxAttempts: 3, nextRetryAt: Date.now() + 300000, reason: 'heartbeat_timeout' } }
-  const stale = { id: '6', name: '旧状态恢复账号', runtimeState: 'stopped', running: false, runtimeReconnect: { state: 'waiting_credentials', attempt: 3, maxAttempts: 3, nextRetryAt: null, reason: 'startup_failed' } }
+  const pending = { id: '5', name: '等待重连账号', runtimeState: 'reconnecting', running: false, yybOpenid: 'fixture', runtimeReconnect: { state: 'scheduled', attempt: 2, nextRetryAt: Date.now() + 300000, reason: 'heartbeat_timeout' } }
+  const stale = { id: '6', name: '旧状态恢复账号', runtimeState: 'stopped', running: false, runtimeReconnect: { state: 'scheduled', attempt: 4, nextRetryAt: Date.now() + 600000, reason: 'startup_failed' } }
   await mockApi(page, [...initialAccounts, pending, stale])
   const actions: string[] = []
   await page.route('**/api/accounts/5/stop', (route) => {
@@ -524,7 +525,7 @@ test('reconnecting accounts show their retry plan, stay out of cleanup and can c
   })
   await page.goto('/test/browser/accounts.html')
   await expect(page.getByText('状态检查 · 等待重连')).toBeVisible()
-  await expect(page.getByText(/重连 2\/3，\d+ 秒后重试/)).toBeVisible()
+  await expect(page.getByText(/第 2 次重连，\d+ 秒后重试/)).toBeVisible()
   await page.getByRole('button', { name: /清理\s*\(2\)/ }).click()
   const dialog = page.getByRole('dialog', { name: '一键清理已停止账号' })
   await expect(dialog).not.toContainText('等待重连账号')

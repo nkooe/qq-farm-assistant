@@ -14,7 +14,7 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function harness(options = {}) {
   const rows = options.rows || [{ id: 3001, count: 2, uid: 11, locked: false }];
   const state = { gold: 100, exp: 0 };
-  const calls = [], events = new EventEmitter(), logs = [], statusWrites = [];
+  const calls = []; const events = new EventEmitter(); const logs = []; const statusWrites = [];
   let clock = 0;
   const mocks = {
     '../utils/proto': { types },
@@ -49,7 +49,7 @@ function harness(options = {}) {
         const row = rows.find(row => row.id === Number(item.id) && row.uid === Number(item.uid));
         if (row) row.count -= Number(item.count);
       }
-      return { body: types[`${method}Reply`].encode({ used_items: requested }).finish() };
+      return { body: types[`${method}Reply`].encode({ used_items: requested, ...(options.useReply || {}) }).finish() };
     } },
   };
   const module = { exports: {} };
@@ -72,6 +72,17 @@ test('use waits for the preceding lock and rejects the newly locked stack', asyn
   assert.deepEqual(result.map(row => row.status), ['fulfilled', 'rejected']);
   assert.match(result[1].reason.message, /锁定/);
   assert.equal(h.rows[0].count, 2);
+});
+
+test('single and batch gifts report server rewards and compensation without guessing bag changes', async () => {
+  const useReply = { items: [{ id: 700001, count: 2 }], compensated_items: [{ id: 1001, count: 50 }] };
+  const h = harness({ useReply });
+  const single = await h.api.useItem(3001);
+  assert.deepEqual(Array.from(single.rewards, row => [row.id, row.count]), [[700001, '2'], [1001, '50']]);
+  // The official BatchUseReply carries items only; do not invent a compensation field.
+  const batch = await h.api.batchUseItems([{ itemId: 3001, count: 1 }]);
+  assert.deepEqual(Array.from(batch.rewards, row => [row.id, row.count]), [[700001, '2']]);
+  assert.deepEqual(h.calls.map(call => call.method), ['Use', 'BatchUse']);
 });
 
 test('concurrent uses re-read stock after the prior mutation', async () => {
@@ -111,7 +122,7 @@ test('multi-stack use splits across concrete unlocked UIDs without a nested queu
 
 test('inventory mutations in another account are independent', async () => {
   let release; const gate = new Promise(resolve => { release = resolve; });
-  const first = harness({ beforeMutation: () => gate }), second = harness();
+  const first = harness({ beforeMutation: () => gate }); const second = harness();
   const pending = first.api.useItem(3001);
   try {
     await second.api.useItem(3001);
@@ -120,7 +131,7 @@ test('inventory mutations in another account are independent', async () => {
 });
 
 test('a queued use never shares a UI bag snapshot taken before the preceding lock', async () => {
-  let releaseLock, releaseBag, delayBag = false;
+  let releaseLock; let releaseBag; let delayBag = false;
   const lockGate = new Promise(resolve => { releaseLock = resolve; });
   const bagGate = new Promise(resolve => { releaseBag = resolve; });
   const h = harness({ beforeMutation: method => method === 'LockItems' ? lockGate : undefined,

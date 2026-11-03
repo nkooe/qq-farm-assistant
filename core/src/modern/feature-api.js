@@ -15,6 +15,8 @@ const groups = {
   'share-reward-activity': ['getShareRewardActivity', 'operateShareRewardActivity'],
   'autumn-activities': ['getAutumnActivity', 'operateAutumnActivity'],
   'illustrated': ['getIllustratedSnapshot', 'claimIllustratedRewards'],
+  'collections': ['getCollectionsSnapshot', 'operateCollections', 'getMutationCatalog'],
+  'commerce': ['getPropsShop', 'purchaseProps', 'getMallCatalog', 'purchaseMallProduct'],
   'warehouse': ['setItemsLocked'],
 };
 const methods = Object.freeze(Object.fromEntries(Object.entries(groups).flatMap(([service, names]) => names.map(name => [name, service]))));

@@ -22,7 +22,8 @@ const FARM_ROWS = 6;
 
 // 土地品质类型 → 中文名（用于日志展示）
 const LAND_TYPE_NAME_MAP = {
-  purple: '紫土地',
+  blue: '蓝晶土地',
+  purple: '紫金土地',
   gold: '金土地',
   black: '黑土地',
   red: '红土地',
@@ -822,7 +823,7 @@ function sortSeedCandidates(candidates, overrideStrategy, accountId) {
 async function getAvailableSeeds() {
   const seedShopId = await getSeedShopId();
   const userState = getUserState();
-  let seeds = [];
+  const seeds = [];
 
   const shopInfo = await getShopInfo(seedShopId);
   if (shopInfo.goods_list) {

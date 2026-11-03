@@ -6,10 +6,12 @@ import { useSettingStore } from '@/stores/setting'
 
 type AlertType = 'primary' | 'danger'
 
-const allFertilizerLandTypes = ['purple', 'gold', 'black', 'red', 'normal']
+const defaultFertilizerLandTypes = ['purple', 'gold', 'black', 'red', 'normal']
+const allFertilizerLandTypes = ['blue', ...defaultFertilizerLandTypes]
 
 const defaultAutomation = {
   farm: false,
+  farm_harvest_tiangong: true,
   task: false,
   sell: false,
   friend: false,
@@ -30,7 +32,7 @@ const defaultAutomation = {
   fertilizer: 'none',
   skip_own_weed_bug: false,
   fertilizer_multi_season: false,
-  fertilizer_land_types: [...allFertilizerLandTypes],
+  fertilizer_land_types: [...defaultFertilizerLandTypes],
   fertilizer_smart_seconds: 300,
 }
 
@@ -68,7 +70,8 @@ export function useAutomationSettings({
   const autoCodeRefreshing = ref(false)
 
   const fertilizerLandTypeOptions = [
-    { label: '紫土地', value: 'purple' },
+    { label: '蓝晶土地', value: 'blue' },
+    { label: '紫金土地', value: 'purple' },
     { label: '金土地', value: 'gold' },
     { label: '黑土地', value: 'black' },
     { label: '红土地', value: 'red' },

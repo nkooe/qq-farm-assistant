@@ -164,11 +164,12 @@ const DEFAULT_OFFLINE_REMINDER = {
 };
 
 const DEFAULT_FERTILIZER_LAND_TYPES = ['purple', 'gold', 'black', 'red', 'normal'];
-const FERTILIZER_LAND_TYPE_SET = new Set(DEFAULT_FERTILIZER_LAND_TYPES);
+const FERTILIZER_LAND_TYPE_SET = new Set(['blue', ...DEFAULT_FERTILIZER_LAND_TYPES]);
 
 /** 默认自动化配置 */
 const DEFAULT_AUTOMATION = {
     farm: true,
+    farm_harvest_tiangong: true,
     farm_push: true,
     land_upgrade: false,
     friend: true,
@@ -1383,12 +1384,6 @@ function sanitizeThirdparty(input, existing) {
     const autoReconnect = input.autoReconnect === undefined
         ? (existing && existing.autoReconnect !== undefined ? existing.autoReconnect : true)
         : input.autoReconnect === true;
-    const reconnectDelayMin = input.reconnectDelayMin === undefined || input.reconnectDelayMin === null || input.reconnectDelayMin === ''
-        ? (existing && existing.reconnectDelayMin !== undefined ? existing.reconnectDelayMin : 5)
-        : Math.max(1, Number(input.reconnectDelayMin) || 5);
-    const reconnectMaxAttempts = input.reconnectMaxAttempts === undefined || input.reconnectMaxAttempts === null || input.reconnectMaxAttempts === ''
-        ? (existing && existing.reconnectMaxAttempts !== undefined ? existing.reconnectMaxAttempts : 3)
-        : Math.max(1, Number(input.reconnectMaxAttempts) || 3);
     return {
         apiBase: String(input.apiBase || "").trim(),
         apiToken: keep
@@ -1396,8 +1391,6 @@ function sanitizeThirdparty(input, existing) {
             : String(apiToken).trim(),
         openid: String(input.openid || "").trim(),
         autoReconnect,
-        reconnectDelayMin,
-        reconnectMaxAttempts,
     };
 }
 
@@ -1698,8 +1691,6 @@ const DEFAULT_WX_CONFIG = {
     // 【2026-08-12 修复】内置 YYB 自动重连默认为开（原 false 导致多数用户从未触发重连，
     // 表现为"老是没重连"）。第三方 YYB 账号级默认本就是 true，二者对齐。
     autoReconnect: true,
-    reconnectDelayMin: 5,
-    reconnectMaxAttempts: 3
 };
 
 function pickUserWxConfigs(configs = {}) {
@@ -1723,10 +1714,7 @@ function setUserWxConfig(config, userId) {
         proxyApiUrl: String(config.proxyApiUrl ?? DEFAULT_WX_CONFIG.proxyApiUrl).trim(),
         appId: String(config.appId ?? DEFAULT_WX_CONFIG.appId).trim(),
         autoReconnect: config.autoReconnect !== false,
-        reconnectDelayMin: Number(config.reconnectDelayMin ?? 5),
-        reconnectMaxAttempts: Number(config.reconnectMaxAttempts ?? 3),
     };
-    if (!Number.isFinite(next.reconnectDelayMin) || next.reconnectDelayMin <= 0 || !Number.isSafeInteger(next.reconnectMaxAttempts) || next.reconnectMaxAttempts < 0) throw new Error('无效的重连设置');
     saveGlobalConfig({ userWxConfigs: { ...globalConfig.userWxConfigs, [userId]: next } });
     return getUserWxConfig(userId);
 }

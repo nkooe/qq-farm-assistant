@@ -47,7 +47,7 @@ test('cleanup rejects contradictory running state, missing accounts and inaccess
   assert.equal((await setup(null, { allowed: false }).remove()).statusCode, 403);
 });
 
-for (const state of ['scheduled', 'waiting_credentials']) {
+for (const state of ['scheduled']) {
   test(`cleanup preserves ${state} accounts even when a stale state says stopped`, async () => {
     const h = setup({ state: 'stopped', running: false, connected: false, reconnect: { state } });
     assert.equal((await h.remove()).statusCode, 409);

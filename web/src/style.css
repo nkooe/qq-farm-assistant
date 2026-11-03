@@ -149,3 +149,28 @@ body {
     transition: none !important;
   }
 }
+
+/* Game catalogs share the current application theme. */
+.book-page, .mall-catalog, .game-catalog-theme {
+  --ui-primary: var(--theme-primary);
+  --ui-ink: var(--theme-text);
+  --ui-muted: #6b7280;
+  --ui-subtle: #9ca3af;
+  --ui-surface-strong: var(--ui-surface);
+  --ui-surface-solid: var(--ui-surface);
+  --ui-surface-soft: color-mix(in srgb, var(--ui-surface) 92%, var(--theme-text));
+  --ui-bg-soft: var(--ui-surface-soft);
+  --ui-border-strong: var(--ui-border);
+  --ui-primary-soft: color-mix(in srgb, var(--theme-primary) 14%, transparent);
+  --ui-primary-fill: var(--theme-primary);
+  --ui-warning: #b7791f;
+  --ui-warning-soft: #b7791f18;
+  --ui-danger: #dc2626;
+  --ui-danger-soft: #dc262618;
+  --ui-blue: #2563eb;
+  --ui-violet: #8b5cf6;
+  --ui-radius-card: 14px;
+  --ui-radius-control: 10px;
+  --ui-shadow-sm: 0 1px 4px #0001;
+}
+.dark .book-page, .dark .mall-catalog { --ui-muted: #a3acb6; --ui-warning: #e2ab5f; }

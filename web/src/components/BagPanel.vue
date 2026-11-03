@@ -73,18 +73,24 @@ const confirmModal = ref({
 const batchMode = ref(false)
 const selectedForBatch = ref<Set<string>>(new Set())
 const lockBusy = ref(false)
-function itemKey(item: any) { return String(item.key || item.groupKey || `uid:${item.uid}`) }
+function itemKey(item: any) {
+  return String(item.key || item.groupKey || `uid:${item.uid}`)
+}
 function expiryLabel(item: any) {
   const time = Number(item.expireTime || 0)
-  if (!time) return ''
+  if (!time)
+    return ''
   const remaining = time - Date.now() / 1000
-  if (remaining <= 0) return '已到期'
-  if (remaining < 86400) return `${Math.ceil(remaining / 3600)} 小时内到期`
+  if (remaining <= 0)
+    return '已到期'
+  if (remaining < 86400)
+    return `${Math.ceil(remaining / 3600)} 小时内到期`
   return `${Math.ceil(remaining / 86400)} 天后到期`
 }
 async function toggleLock(item: any) {
   const id = currentAccountId.value
-  if (!id || lockBusy.value || confirmModal.value.loading) return
+  if (!id || lockBusy.value || confirmModal.value.loading)
+    return
   lockBusy.value = true
   try {
     await bagStore.setLocked(id, [Number(item.uid)], !item.locked)
@@ -94,7 +100,10 @@ async function toggleLock(item: any) {
       toastStore.success(item.locked ? '已解锁' : '已锁定，自动出售也会跳过')
     }
   }
-  catch (error: any) { if (id === currentAccountId.value) toastStore.error(error.message) }
+  catch (error: any) {
+    if (id === currentAccountId.value)
+      toastStore.error(error.message)
+  }
   finally { lockBusy.value = false }
 }
 const batchSellResult = ref<{ gold: number, goldBean: number } | null>(null)
@@ -122,7 +131,7 @@ function canBatchSell(item: any) {
 
 function canUse(item: any) {
   const itemType = Number(item?.itemType || 0)
-  return itemType === 11 && !item.locked
+  return [11, 33].includes(itemType) && !item.locked
 }
 
 function handleSellClick(item: any) {
@@ -189,7 +198,8 @@ async function handleConfirm() {
       }
 
       const res = await bagStore.sellItems(requestedId, sellItems)
-      if (requestedId !== currentAccountId.value) return
+      if (requestedId !== currentAccountId.value)
+        return
       if (res.ok) {
         toastStore.success(`已出售 ${item.name || `物品${item.id}`}`)
         await loadBag()
@@ -209,7 +219,8 @@ async function handleConfirm() {
       }
 
       const res = await bagStore.sellItems(requestedId, itemsToSell)
-      if (requestedId !== currentAccountId.value) return
+      if (requestedId !== currentAccountId.value)
+        return
       if (res.ok) {
         let totalGold = 0
         let totalGoldBean = 0
@@ -239,7 +250,8 @@ async function handleConfirm() {
     }
     else if (action === 'use' && item) {
       const res = await bagStore.useItem(requestedId, Number(item.id), Number(item.count || 1), Number(item.uid || 0))
-      if (requestedId !== currentAccountId.value) return
+      if (requestedId !== currentAccountId.value)
+        return
       if (res.ok) {
         toastStore.success(`已使用 ${item.name || `物品${item.id}`}`)
         await loadBag()
@@ -429,7 +441,7 @@ useIntervalFn(loadBag, 60000)
         <button
           v-for="cat in CATEGORY_OPTIONS"
           :key="cat.value"
-          class="whitespace-nowrap rounded-[14px] border border-[var(--theme-border)] bg-[var(--theme-glass)] px-3.5 py-[7px] text-xs font-semibold text-[var(--theme-text)] backdrop-blur-[16px] transition-colors"
+          class="whitespace-nowrap border border-[var(--theme-border)] rounded-[14px] bg-[var(--theme-glass)] px-3.5 py-[7px] text-xs text-[var(--theme-text)] font-semibold backdrop-blur-[16px] transition-colors"
           :class="selectedCategory === cat.value
             ? '!border-[var(--theme-primary)] !bg-[var(--theme-primary)] text-white'
             : 'hover:bg-white/20 dark:hover:bg-white/10'"
@@ -443,7 +455,7 @@ useIntervalFn(loadBag, 60000)
 
         <template v-if="selectedCategory === 'fruit' || selectedCategory === 'all'">
           <button
-            class="whitespace-nowrap rounded-[14px] border border-[var(--theme-border)] bg-[var(--theme-glass)] px-3.5 py-[7px] text-xs font-semibold text-[var(--theme-text)] backdrop-blur-[16px] transition-colors"
+            class="whitespace-nowrap border border-[var(--theme-border)] rounded-[14px] bg-[var(--theme-glass)] px-3.5 py-[7px] text-xs text-[var(--theme-text)] font-semibold backdrop-blur-[16px] transition-colors"
             :class="batchMode
               ? 'bg-orange-500 text-white dark:bg-orange-600'
               : 'hover:bg-white/20 dark:hover:bg-white/10'"
@@ -454,13 +466,13 @@ useIntervalFn(loadBag, 60000)
           </button>
           <template v-if="batchMode">
             <button
-              class="whitespace-nowrap rounded-[14px] border border-blue-500 bg-blue-500 px-3.5 py-[7px] text-xs font-semibold text-white transition-colors dark:bg-blue-600"
+              class="whitespace-nowrap border border-blue-500 rounded-[14px] bg-blue-500 px-3.5 py-[7px] text-xs text-white font-semibold transition-colors dark:bg-blue-600"
               @click="selectAllSellable"
             >
               全选
             </button>
             <button
-              class="whitespace-nowrap rounded-[14px] border border-[var(--theme-border)] bg-[var(--theme-glass)] px-3.5 py-[7px] text-xs font-semibold text-[var(--theme-text)] backdrop-blur-[16px] transition-colors"
+              class="whitespace-nowrap border border-[var(--theme-border)] rounded-[14px] bg-[var(--theme-glass)] px-3.5 py-[7px] text-xs text-[var(--theme-text)] font-semibold backdrop-blur-[16px] transition-colors"
               :class="selectedSellableCount > 0
                 ? 'bg-red-500 text-white hover:bg-red-600 dark:bg-red-600 dark:hover:bg-red-700'
                 : 'opacity-60'"
@@ -490,7 +502,9 @@ useIntervalFn(loadBag, 60000)
 
           <div class="absolute right-1 top-1 flex gap-1">
             <template v-if="!batchMode">
-              <button v-if="item.uid && [5, 6, 17].includes(Number(item.itemType))" class="min-h-11 min-w-11 rounded bg-gray-100 text-xs dark:bg-gray-700" :disabled="lockBusy || confirmModal.loading" :aria-label="item.locked ? '解锁物品' : '锁定物品'" :aria-pressed="!!item.locked" @click.stop="toggleLock(item)">{{ item.locked ? '解锁' : '锁定' }}</button>
+              <button v-if="item.uid && [5, 6, 17].includes(Number(item.itemType))" class="min-h-11 min-w-11 rounded bg-gray-100 text-xs dark:bg-gray-700" :disabled="lockBusy || confirmModal.loading" :aria-label="item.locked ? '解锁物品' : '锁定物品'" :aria-pressed="!!item.locked" @click.stop="toggleLock(item)">
+                {{ item.locked ? '解锁' : '锁定' }}
+              </button>
               <button
                 v-if="canSell(item)"
                 class="min-h-11 min-w-11 rounded bg-red-500 px-1.5 py-0.5 text-xs text-white transition dark:bg-red-600 hover:opacity-100"

@@ -32,7 +32,7 @@ function harness(options = {}) {
             reads.push('group');
             options.onRead?.('group');
             if (failRefresh && writes) throw new Error('offline');
-            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { ...milk.head, activity_id: '2026110102' }, shop: { goods: [goods] } }, { head: { ...milk.head, activity_id: '2026110103' }, growth_fund: fund }] } }) };
+            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { ...milk.head, activity_id: '2026110102' }, shop: { goods: [goods, ...(options.extraGoods || [])] } }, { head: { ...milk.head, activity_id: '2026110103' }, growth_fund: fund }] } }) };
         }
         const req = types.MilkTeaOperateRequest.toObject(types.MilkTeaOperateRequest.decode(body), { longs: String });
         const cmd = Number(req.operate_type);
@@ -74,6 +74,22 @@ test('background cycle manages crafting, boosts, fund unlock and exchange withou
     assert.equal(h.calls.find(value => Number(value.operate_type) === 1).shop_buy.count, '10');
     assert.deepEqual((await h.service.runMilkTeaAutomation(() => true)).completed, []);
     assert.equal(h.calls.filter(value => [59, 64, 62, 60, 75, 76, 1].includes(Number(value.operate_type))).length, 7);
+});
+
+test('exchange preserves separate same-item offers and sorts availability before official order', async () => {
+    const h = harness({ extraGoods: [
+        { id: 302, item: [{ id: 20525, count: 1 }], order: 1, purchase_limit: 5, purchased_count: 5, restriction_type: 2 },
+        { id: 303, item: [{ id: 20525, count: 1 }], order: 2, purchase_limit: 7, purchased_count: 1, restriction_type: 3 },
+        { id: 304, item: [{ id: 20525, count: 1 }], order: 0, cond_hints: [{ satisfied: false }] },
+    ] });
+    h.goods.order = 3;
+    h.goods.restriction_type = 1;
+    const result = await h.service.getMilkTeaActivity('exchange');
+    assert.deepEqual(result.goods.map(row => row.id), ['303', '301', '302', '304']);
+    assert.deepEqual(result.goods.slice(0, 3).map(row => [row.limitPeriod, row.purchaseLimit, row.remaining]), [
+        ['monthly', 7, 6], ['daily', 108, 106], ['weekly', 5, 0],
+    ]);
+    assert.equal(h.calls.length, 0);
 });
 
 test('background cycle opens unopened shops and restricts settlement to allowed operations', async () => {

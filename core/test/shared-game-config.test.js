@@ -18,7 +18,7 @@ const EXTRA_IDS = [20113, 20265, 20266, 40113, 40265, 40266];
 
 test('两套实际加载器读取同一公共源，modern 专属表继续可用', () => {
   const tables = shared.loadSharedGameTables();
-  assert.equal(tables.ItemInfo.length, 971);
+  assert.equal(tables.ItemInfo.length, 1072);
   for (const item of tables.ItemInfo) {
     assert.equal(legacy.getItemById(item.id).name, item.name);
     assert.equal(modern.getItemById(item.id).name, item.name);

@@ -17,6 +17,14 @@ function registerModernFeatureRoutes(context) {
   post('/api/solar-calendar/:action', 'operateSolarCalendar', req => [req.params.action, req.body]);
   get('/api/illustrated/snapshot', 'getIllustratedSnapshot');
   post('/api/illustrated/claim', 'claimIllustratedRewards', req => [req.body?.type]);
+  get('/api/collections', 'getCollectionsSnapshot');
+  get('/api/props-shop', 'getPropsShop');
+  post('/api/props-shop/purchase', 'purchaseProps', req => [req.body?.goodsId, req.body?.count, req.body?.expectedOffer]);
+  get('/api/game-mall', 'getMallCatalog', req => [req.query.slotType]);
+  post('/api/game-mall/purchase', 'purchaseMallProduct', req => [req.body?.goodsId, req.body?.count, req.body?.slotType, req.body?.expectedPrice]);
+  post('/api/collections/:action', 'operateCollections', req => [req.params.action, req.body]);
+  // The catalog contains static game definitions; it has no account data.
+  app.get('/api/illustrated/mutations', (_req, res) => res.json({ ok: true, data: require('../modern/services/collections').getMutationCatalog() }));
   post('/api/bag/lock', 'setItemsLocked', req => {
     if (typeof req.body?.locked !== 'boolean' || !Array.isArray(req.body?.uids) || !req.body.uids.length || req.body.uids.length > 100)
       throw new Error('请选择物品并指定锁定状态');

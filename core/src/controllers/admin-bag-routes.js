@@ -1,9 +1,4 @@
 const { getItemById, getPlantBySeedId, getPlantByFruitId } = require("../config/gameConfig");
-const { toNum } = require("../utils/utils");
-
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 function requireAccessibleAccount(
   req,
@@ -38,36 +33,6 @@ function getItemName(itemId) {
   const fruitPlant = getPlantByFruitId(itemId);
   if (fruitPlant?.name) return fruitPlant.name;
   return `物品${itemId}`;
-}
-
-function getBagItemCountMap(bag) {
-  const counts = new Map();
-  for (const item of bag?.originalItems || []) {
-    counts.set(toNum(item.id), toNum(item.count));
-  }
-  return counts;
-}
-
-function getNewItemsAfterUse(bagBefore, bagAfter, usedItemId) {
-  const beforeCounts = getBagItemCountMap(bagBefore);
-  const newItems = [];
-
-  for (const item of bagAfter?.originalItems || []) {
-    const itemId = toNum(item.id);
-    if (itemId === usedItemId)
-      continue;
-
-    const countDelta = toNum(item.count) - (beforeCounts.get(itemId) || 0);
-    if (countDelta > 0) {
-      newItems.push({
-        id: itemId,
-        count: countDelta,
-        name: getItemName(itemId),
-      });
-    }
-  }
-
-  return newItems;
 }
 
 function buildUseItemMessage(usedItemName, usedCount, newItems) {
@@ -114,13 +79,8 @@ function registerAdminBagRoutes({
       const usedItemId = itemId;
       const usedCount = count;
       const usedItemName = getItemName(usedItemId);
-      const bagBefore = await provider.getBag(accountId);
-
-      await provider.useItem(accountId, usedItemId, usedCount, uid);
-      await wait(500);
-
-      const bagAfter = await provider.getBag(accountId);
-      const newItems = getNewItemsAfterUse(bagBefore, bagAfter, usedItemId);
+      const result = await provider.useItem(accountId, usedItemId, usedCount, uid);
+      const newItems = result.rewards;
 
       emitRealtimeLog({
         accountId,

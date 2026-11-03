@@ -37,7 +37,7 @@ api.interceptors.request.use((config) => {
     token: tokenRef.value,
     userId: userInfoRef.value?.id ?? null,
   }
-  if (/^\/api\/(activity-center|activities|solar-calendar|illustrated\/snapshot|illustrated\/claim)/.test(config.url || ''))
+  if (/^\/api\/(?:activity-center|activities|solar-calendar|illustrated\/snapshot|illustrated\/claim|collections|game-mall|props-shop)/.test(config.url || ''))
     config.timeout = Math.max(config.timeout || 0, 180000)
   const token = tokenRef.value
   if (token) {
@@ -111,11 +111,11 @@ export function getApiErrorMessage(error: any, fallback = '操作失败，请稍
   const responseData = error?.response?.data
   const raw = String(
     responseData?.errorMessage
-      || responseData?.error
-      || responseData?.message
-      || (typeof responseData === 'string' ? responseData : '')
-      || error?.message
-      || '',
+    || responseData?.error
+    || responseData?.message
+    || (typeof responseData === 'string' ? responseData : '')
+    || error?.message
+    || '',
   ).trim()
 
   // 网关/axios 的英文原文不能直接泄漏到中文界面，尤其是“刷新全部微信 Code”。

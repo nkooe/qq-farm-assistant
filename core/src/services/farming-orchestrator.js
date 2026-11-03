@@ -1,4 +1,5 @@
 const { CONFIG } = require('../config/config');
+const { getPlantById, getItemById } = require('../config/gameConfig');
 const { getUserState, isConnected, networkEvents } = require('../utils/network');
 const { toNum, log, logWarn, randomDelay, isTransientNetworkError } = require('../utils/utils');
 const { isAutomationOn, getAutomation, getPrioritize2x2Crops } = require('../models/store');
@@ -117,20 +118,23 @@ async function performFarmOperation(opType) {
   let removeResult = null;
 
   if (opType === 'all' || opType === 'harvest') {
-    if (analysis.harvestable.length > 0) {
+    const protectedIds = opType === 'all' && getAutomation().farm_harvest_tiangong === false
+      ? new Set(analysis.harvestableInfo.filter(info => Number(getItemById(getPlantById(info.plantId)?.seed_id)?.rarity) === 4).map(info => info.landId)) : new Set();
+    const harvestable = analysis.harvestable.filter(id => !protectedIds.has(id));
+    if (harvestable.length > 0) {
       try {
-        harvestResult = await harvest(analysis.harvestable);
-        log('收获', `收获完成 ${analysis.harvestable.length} 块土地`, {
+        harvestResult = await harvest(harvestable);
+        log('收获', `收获完成 ${harvestable.length} 块土地`, {
           module: 'farm', event: '收获作物', result: 'ok',
-          count: analysis.harvestable.length, landIds: [...analysis.harvestable]
+          count: harvestable.length, landIds: [...harvestable]
         });
-        actions.push(`收获${  analysis.harvestable.length}`);
-        recordOperation('harvest', analysis.harvestable.length);
-        harvestedLands = [...analysis.harvestable];
+        actions.push(`收获${  harvestable.length}`);
+        recordOperation('harvest', harvestable.length);
+        harvestedLands = [...harvestable];
 
         networkEvents.emit('farmHarvested', {
-          count: analysis.harvestable.length,
-          landIds: [...analysis.harvestable],
+          count: harvestable.length,
+          landIds: [...harvestable],
           opType
         });
       } catch (err) {

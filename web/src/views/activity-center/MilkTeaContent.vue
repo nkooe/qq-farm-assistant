@@ -338,7 +338,7 @@ onMounted(() => {
           <div class="item-row" :class="{ 'item-row--set': goods.rewards.length > 1 }">
             <span v-for="reward in goods.rewards" :key="reward.id" class="item-box" :title="reward.name"><CommerceItemImage :src="reward.image" :alt="reward.name" /><b>{{ reward.count }}</b></span>
           </div>
-          <small v-if="goods.remaining !== null">剩余 {{ goods.remaining }}</small>
+          <small v-if="goods.remaining !== null">{{ ({ daily: '每日', weekly: '每周', monthly: '每月', permanent: '永久' } as Record<string, string>)[goods.limitPeriod] || '限购' }} {{ goods.purchaseLimit }} · 剩余 {{ goods.remaining }}</small>
           <small v-for="condition in goods.conditions" :key="condition.type">需店铺等级 {{ condition.target }}（当前 {{ condition.current }}）</small>
           <button class="primary price" :disabled="busy || !state.active || !goods.available" @click="select('exchange', goods.name || goods.rewards[0]?.name, { goodsId: goods.id }, goods.costs, goods.rewards, Math.min(9999, goods.remaining ?? 9999))">
             <template v-if="goods.remaining === 0">

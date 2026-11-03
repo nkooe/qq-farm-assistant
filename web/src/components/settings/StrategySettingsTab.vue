@@ -79,7 +79,8 @@ const emit = defineEmits<{
 const settings = defineModel<StrategySettings>('settings', { required: true })
 
 const bagPriorityLandTypeOptions = [
-  { label: '紫土地', value: 'purple' },
+  { label: '蓝晶土地', value: 'blue' },
+  { label: '紫金土地', value: 'purple' },
   { label: '金土地', value: 'gold' },
   { label: '黑土地', value: 'black' },
   { label: '红土地', value: 'red' },
@@ -90,7 +91,7 @@ const bagPriorityLandTypeOptions = [
 <template>
   <div class="space-y-4">
     <div class="flex items-center justify-between">
-      <h3 class="flex items-center gap-2 text-lg text-gray-900 font-bold dark:text-gray-100 max-sm:text-base">
+      <h3 class="flex items-center gap-2 text-lg text-gray-900 font-bold max-sm:text-base dark:text-gray-100">
         <div class="i-fas-cog text-lg" />
         {{ title }}
         <span v-if="currentAccountName" class="ml-2 text-sm text-gray-500 font-normal dark:text-gray-400">

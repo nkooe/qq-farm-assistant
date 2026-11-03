@@ -1,6 +1,6 @@
 const { PlantPhase, PHASE_NAMES } = require('../config/config');
-const { getPlantName, getPlantNameOrNull, getPlantExp, getPlantById, getPlantGrowTime, getSeedImageBySeedId, getMutantEffectsByIds } = require('../config/gameConfig');
-const { toNum, toTimeSec, getServerTimeSec, logWarn, isTransientNetworkError } = require('../utils/utils');
+const { getPlantName, getPlantNameOrNull, getPlantExp, getPlantById, getPlantGrowTime, getSeedImageBySeedId, getMutantEffectsByIds, getItemById, getItemImageById } = require('../config/gameConfig');
+const { toNum, toTimeSec, getServerTimeSec, logWarn } = require('../utils/utils');
 const { getAllLands } = require('./farm-api');
 const { buildLandUpgradeDetail } = require('./land-upgrade-detail');
 
@@ -325,6 +325,7 @@ async function resolveRemovableHarvestedLands(harvestedLandIds, harvestResult) {
 
 function getLandTypeByLevel(level) {
   const lv = toNum(level);
+  if (lv === 6) return 'blue';
   if (lv === 5) return 'purple';
   if (lv === 4) return 'gold';
   if (lv === 3) return 'black';
@@ -334,7 +335,8 @@ function getLandTypeByLevel(level) {
 
 function getLandTypeNameByLevel(level) {
   const typeMap = {
-    purple: '紫土地',
+    blue: '蓝晶土地',
+  purple: '紫金土地',
     gold: '金土地',
     black: '黑土地',
     red: '红土地',
@@ -447,8 +449,18 @@ async function getLandsDetail() {
         (toTimeSec(currentPhase.insect_time) > 0 && toTimeSec(currentPhase.insect_time) <= serverTime);
 
       // 变异效果
-      const mutantConfigIds = plant.mutant_config_ids || [];
-      const mutantEffects = getMutantEffectsByIds(mutantConfigIds);
+      const records = [...(currentPhase.mutants || []), ...(plant.extended_mutations || [])];
+      const mutantConfigIds = [...new Set([...(plant.mutant_config_ids || []), ...records.map(record => record.mutant_config_id)].map(toNum).filter(id => id > 0))];
+      const collections = new Map();
+      for (const record of records) {
+        if (toNum(record.mutant_config_id) !== 18) continue;
+        const itemId = toNum(record.collection_item_id);
+        const seriesId = toNum(record.collection_series_id);
+        if (!itemId && !seriesId) continue;
+        collections.set(`${seriesId}:${itemId}`, { itemId: String(itemId || ''), seriesId: String(seriesId || ''),
+          name: itemId ? getItemById(itemId)?.name || `藏品${itemId}` : `藏品系列${seriesId}`, image: itemId ? getItemImageById(itemId) : '' });
+      }
+      const mutantEffects = getMutantEffectsByIds(mutantConfigIds).map(effect => effect.id === 18 ? { ...effect, collections: [...collections.values()] } : effect);
 
       details.push({
         id: landId, unlocked: true, status,
