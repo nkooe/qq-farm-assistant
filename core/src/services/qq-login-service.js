@@ -46,6 +46,10 @@ function helperEnvironment(sessionDir, launch, environment = process.env) {
 class QqLoginService {
   constructor(options = {}) {
     this.sessions = new Map();
+    this.accountSessions = new Map();
+    this.activeProfiles = new Map();
+    this.accountRequests = new Map();
+    this.accountGenerations = new Map();
     this.trackedItems = new Set();
     this.retiredUsers = new Set();
     this.suspendedUsers = new Set();
@@ -60,11 +64,10 @@ class QqLoginService {
     this.ttlMs = options.ttlMs || 5 * 60 * 1000;
     this.now = options.now || Date.now;
     this.prewarmError = '';
-    this.bootDir = null;
-    this.credentialQueue = Promise.resolve();
     this.resolveProxy = options.resolveProxy;
     this.bridgeProxy = options.bridgeProxy;
     this.identityWaitMs = options.identityWaitMs ?? 5000;
+    this.codeTimeoutMs = options.codeTimeoutMs ?? 25000;
     this.lastRecovery = null;
   }
 
@@ -85,29 +88,28 @@ class QqLoginService {
     let installed = false; let error = '';
     try { this.getLaunch(); installed = true; }
     catch (cause) { error = cause instanceof QqScanError ? cause.message : 'QQ 扫码组件暂时不可用'; }
-    const activeSessions = admin ? this.sessions.size : [...this.sessions.values()].filter(item => item.owner === owner).length;
-    return { enabled, installed, available: enabled && installed, running: activeSessions > 0 || (admin && !!this.warm),
-      activeSessions, error: error || this.prewarmError, lastRecovery: admin ? this.lastRecovery : null };
+    const activeSessions = [...this.sessions.values()].filter(item => !item.accountKey && (admin || item.owner === owner)).length;
+    const userId = Number(owner?.split(':')[0]);
+    const residentAccounts = [...this.accountSessions.values()].filter(item => !item.disposed && !item.exited && (admin || item.accountUserId === userId)).length;
+    return { enabled, installed, available: enabled && installed, running: activeSessions > 0 || residentAccounts > 0 || (admin && !!this.warm),
+      activeSessions, residentAccounts, error: error || this.prewarmError, lastRecovery: admin ? this.lastRecovery : null };
   }
 
   launch(options = {}) {
     const launch = this.getLaunch();
-    if (!this.bootDir) {
-      fs.mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
-      this.bootDir = fs.mkdtempSync(path.join(this.dataDir, 'boot-'));
-    }
-    const directory = fs.mkdtempSync(path.join(this.bootDir, 'session-'));
+    // The native client writes directly to its own persistent profile. Never
+    // copy a live QQ database or change its working directory after login.
+    const profileId = options.profileDirectory ? path.basename(options.profileDirectory) : crypto.randomUUID();
+    const directory = this.profilePath(profileId);
+    if (options.profileDirectory && path.resolve(options.profileDirectory) !== path.resolve(directory)) throw new QqScanError('QQ 登录资料目录无效', 503, 'configuration');
+    if (this.activeProfiles.has(profileId)) throw new QqScanError('该账号 QQ 进程正在停止，请稍后重试', 429);
+    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+    if (fs.lstatSync(directory).isSymbolicLink()) throw new QqScanError('QQ 登录资料目录无效', 503, 'configuration');
     const item = { id: crypto.randomUUID(), owner: null, directory, phase: 'starting', message: '正在生成 QQ 二维码',
       image: '', code: '', canRequest: false, version: 0, createdAt: this.now(), expiresAt: this.now() + this.ttlMs, disposed: false,
-      abortController: new AbortController(), ...options };
+      abortController: new AbortController(), ...options, profileId, retainDirectory: !!options.profileDirectory };
     try {
       if (options.userId) fs.writeFileSync(path.join(directory, 'owner.json'), JSON.stringify({ userId: options.userId, targetUserId: options.targetUserId ?? null }), { mode: 0o600 });
-      if (options.profileDirectory) {
-        for (const name of ['qq-data', 'state']) {
-          const source = path.join(options.profileDirectory, name);
-          if (fs.existsSync(source)) fs.cpSync(source, path.join(directory, name), { recursive: true, dereference: false });
-        }
-      }
       const args = launch.electron ? ['--no-sandbox'] : [launch.host, launch.runtime, directory];
       const environment = options.nativeProxyURL !== undefined ? { ...this.environment, QQ_LOGIN_SOCKS_PROXY: options.nativeProxyURL } : this.environment;
       const env = helperEnvironment(directory, launch, environment);
@@ -116,6 +118,7 @@ class QqLoginService {
       item.child = this.spawn(launch.executable, args, { cwd: directory, env,
         windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
       this.trackedItems.add(item);
+      this.activeProfiles.set(profileId, item);
       // Linux QQ's Electron bootstrap needs a pipe for stderr. Drain native
       // diagnostics here without persisting account or protocol output.
       item.child.stderr?.on('data', () => {});
@@ -139,8 +142,11 @@ class QqLoginService {
       const exited = () => {
         if (item.exited) return;
         item.exited = true;
+        if (this.activeProfiles.get(profileId) === item) this.activeProfiles.delete(profileId);
+        if (this.accountSessions.get(item.accountKey) === item) this.accountSessions.delete(item.accountKey);
+        item.nativeOnline = false;
         item.proxyBridge?.close();
-        item.codeReject?.(new QqScanError('QQ 取码进程已退出，请重新扫码'));
+        item.codeReject?.(new QqScanError('QQ 登录进程已退出，稍后自动重试', 503, 'temporary'));
         if (!item.disposed) this.fail(item, 'QQ 扫码组件已退出，请重新生成二维码');
         if (!item.retainDirectory) this.cleanDirectory(directory);
         this.releaseItem(item);
@@ -151,7 +157,7 @@ class QqLoginService {
       item.startTimer.unref?.();
       return item;
     } catch (error) {
-      this.cleanDirectory(directory);
+      if (!item.retainDirectory) this.cleanDirectory(directory);
       throw error;
     }
   }
@@ -169,13 +175,16 @@ class QqLoginService {
         if (/^\d{5,20}$/.test(text)) {
           if (item.uin && item.uin !== text) item.identityChanged = true;
           item.uin = text;
+          item.nativeOnline = true;
         }
       } else if (kind === 'state' && PHASES.has(value.phase)) {
         if (value.reason === 'identity_pending') item.identityPending = true;
         item.nativePhase = value.phase;
         // A native result remains retrievable even if the helper later exits.
-        if (item.code && !item.codeResolve) return;
+        if (item.code && !item.codeResolve && !item.accountKey) return;
         item.phase = value.phase; item.message = String(value.message || '').slice(0, 240); item.canRequest = value.canRequest === true;
+        if (['offline', 'waiting_scan', 'expired', 'login_failed'].includes(value.phase)) item.nativeOnline = false;
+        if (value.phase === 'success') item.nativeOnline = true;
         if (['error', 'offline', 'expired', 'login_failed'].includes(value.phase)) {
           clearTimeout(item.startTimer);
           item.image = '';
@@ -185,7 +194,7 @@ class QqLoginService {
               item.message += '；扫码代理链路返回异常，请重新生成二维码';
             }
           }
-          item.codeReject?.(new QqScanError(item.message));
+          if (!value.requestId || value.requestId === item.codeRequestId) item.codeReject?.(new QqScanError(item.message, 503, value.reason === 'busy' ? 'busy' : 'temporary'));
         }
       } else if (kind === 'diagnostic' && ['identity_ready', 'identity_pending'].includes(value.event)) {
         if (['undefined', 'string', 'number', 'bigint', 'object', 'null', 'boolean'].includes(value.type)) {
@@ -204,20 +213,24 @@ class QqLoginService {
         if (!png.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return;
         clearTimeout(item.startTimer);
         item.image = `data:image/png;base64,${value.png}`;
+        item.nativeOnline = false;
         item.phase = 'waiting_scan'; item.message = '请用手机 QQ 扫码并确认登录'; item.version++;
         const seconds = Number(value.expireTimeRaw);
         item.qrExpiresAt = this.now() + (seconds > 0 && seconds <= 600 ? seconds : 120) * 1000;
       } else if (kind === 'code' && validCode(value.code)) {
+        if (item.codeResolve && value.requestId !== item.codeRequestId) return;
+        if (item.accountKey && !item.codeResolve && !item.restoring) return;
         clearTimeout(item.startTimer);
         item.code = value.code; item.image = ''; item.phase = 'success'; item.message = '已获取 Code';
-        // Keep the native session until its current credentials are saved.
+        item.nativeOnline = true;
         item.codeResolve?.(value.code);
       }
     } catch { /* Discard malformed/native diagnostic lines without logging credentials. */ }
   }
 
   fail(item, message) {
-    if (item.disposed || item.code) return;
+    if (item.disposed || (item.code && !item.accountKey)) return;
+    item.nativeOnline = false;
     item.phase = 'error'; item.message = message; item.image = ''; item.canRequest = false;
     clearTimeout(item.startTimer);
     this.stopChild(item);
@@ -233,7 +246,7 @@ class QqLoginService {
       || this.suspendedUsers.has(userId) || this.suspendedUsers.has(options.targetUserId)) throw new QqScanError('用户已停用', 403);
     if (this.closed || this.environment.QQ_LOGIN_ENABLED === '0') throw new QqScanError('QQ 扫码服务未启用', 503);
     this.sweep();
-    if (this.sessions.size >= this.maxSessions) throw new QqScanError('QQ 扫码正在被使用，请稍后重试', 429);
+    if ([...this.sessions.values()].filter(item => !item.accountKey).length >= this.maxSessions) throw new QqScanError('QQ 扫码正在被使用，请稍后重试', 429);
     let item = this.warm;
     this.warm = null;
     const requestedProxy = options.nativeProxyURL ?? this.environment.QQ_LOGIN_SOCKS_PROXY ?? '';
@@ -253,7 +266,7 @@ class QqLoginService {
   owned(owner, id) {
     const item = this.sessions.get(String(id || ''));
     if (!item || item.owner !== owner) throw new QqScanError('扫码会话不存在或已过期，请重新生成', 404);
-    if (item.expiresAt <= this.now()) { this.dispose(item); throw new QqScanError('扫码会话已过期，请重新生成', 410); }
+    if (item.expiresAt <= this.now()) { this.releaseScan(item); throw new QqScanError('扫码会话已过期，请重新生成', 410); }
     return item;
   }
 
@@ -262,24 +275,37 @@ class QqLoginService {
       expiresAt: item.expiresAt, qrVersion: item.version };
   }
   get(owner, id) { return this.snapshot(this.owned(owner, id)); }
-  async refreshCode(owner, id) {
-    const item = this.owned(owner, id);
+  refreshCode(owner, id) { return this.requestCode(this.owned(owner, id)); }
+  async requestCode(item, signal) {
     if (!item.child || item.stopping || item.disposed) throw new QqScanError('QQ 取码会话已结束，请重新扫码');
-    if (item.codeResolve) throw new QqScanError('正在获取新 Code，请稍后重试', 409);
+    if (item.codeResolve) throw new QqScanError('正在获取新 Code，请稍后重试', 429);
+    if (signal?.aborted) throw new QqScanError('QQ 取码已取消', 410);
+    if (item.nativeOnline === false) throw new QqScanError('QQ 会话连接已断开，稍后自动重试', 503, 'temporary');
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => done(new QqScanError('获取新 Code 超时，请重新扫码')), 25000);
+      const requestId = crypto.randomUUID();
+      let settled = false;
+      item.code = ''; item.codeRequestId = requestId;
+      const abort = () => { done(new QqScanError('QQ 取码已取消', 410)); this.dispose(item); };
+      const timer = setTimeout(() => { done(new QqScanError('获取新 Code 超时，稍后自动重试', 504)); this.dispose(item); }, this.codeTimeoutMs);
       const done = (error, code) => {
-        clearTimeout(timer); item.codeResolve = null; item.codeReject = null;
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer); signal?.removeEventListener('abort', abort); item.codeResolve = null; item.codeReject = null; item.codeRequestId = null;
         if (error) reject(error); else resolve(code);
       };
       item.codeResolve = code => done(null, code);
       item.codeReject = error => done(error);
-      item.child.stdin.write('{"command":"request_code"}\n', error => { if (error) done(new QqScanError('QQ 取码会话已结束，请重新扫码')); });
+      signal?.addEventListener('abort', abort, { once: true });
+      item.child.stdin.write(`${JSON.stringify({ command: 'request_code', requestId })}\n`, error => { if (error) done(new QqScanError('QQ 取码会话已结束，稍后自动重试', 503, 'temporary')); });
     });
   }
-  cancel(owner, id) { this.dispose(this.owned(owner, id)); }
+  releaseScan(item) {
+    this.sessions.delete(item.id);
+    if (!item.accountKey) this.dispose(item);
+  }
+  cancel(owner, id) { this.releaseScan(this.owned(owner, id)); }
   sweep() {
-    for (const item of this.sessions.values()) if (item.expiresAt <= this.now()) this.dispose(item);
+    for (const item of this.sessions.values()) if (item.expiresAt <= this.now()) this.releaseScan(item);
     if (this.warm && this.warm.expiresAt <= this.now()) { this.dispose(this.warm); this.warm = null; }
   }
   stopChild(item) {
@@ -291,11 +317,13 @@ class QqLoginService {
     item.child.once('exit', () => clearTimeout(timer));
   }
   cleanDirectory(directory) {
-    if (!this.bootDir || path.dirname(directory) !== this.bootDir || !path.basename(directory).startsWith('session-')) return;
+    if (path.resolve(path.dirname(directory)) !== path.resolve(this.dataDir, 'profiles') || !/^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(path.basename(directory))) return;
     fs.rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
   dispose(item) {
     item.disposed = true; item.image = ''; item.code = ''; clearTimeout(item.startTimer);
+    item.nativeOnline = false;
+    if (this.accountSessions.get(item.accountKey) === item) this.accountSessions.delete(item.accountKey);
     item.abortController?.abort();
     item.codeReject?.(new QqScanError('扫码会话已取消或过期', 410));
     if (item.importPromise && !item.waitingImport) {
@@ -326,46 +354,77 @@ class QqLoginService {
     if (!item.exited && item.child?.exitCode === null) throw new QqScanError('QQ 登录态保存超时，请重新扫码更新', 503);
   }
 
-  async saveProfile(item, userId, id = crypto.randomUUID()) {
+  async saveProfile(item, userId) {
     require('../models/user-id').assertUserId(userId);
     if (this.retiredUsers.has(userId) || this.suspendedUsers.has(userId)) throw new QqScanError('用户已停用', 403);
     if (!item.uin || item.identityChanged || item.nativePhase === 'offline') throw new QqScanError('QQ 登录态不可用，请重新扫码更新', 409);
-    const verifiedUin = item.uin;
-    const directory = this.profilePath(id);
-    const staging = `${directory  }.new-${  crypto.randomUUID()}`;
-    try {
-      await this.shutdownForProfile(item);
-      if (item.disposed) throw new QqScanError('扫码已取消，请重新扫码更新', 410);
-      if (item.identityChanged || item.uin !== verifiedUin || item.nativePhase === 'offline') {
-        throw new QqScanError('QQ 保存期间登录身份或状态变化，请重新扫码更新', 409, 'rescan');
-      }
-      fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
-      for (const name of ['qq-data', 'state']) {
-        const source = path.join(item.directory, name);
-        if (fs.existsSync(source)) fs.cpSync(source, path.join(staging, name), { recursive: true, dereference: false });
-      }
-      if (!fs.existsSync(path.join(staging, 'qq-data'))) throw new QqScanError('QQ 未生成可恢复的登录态，请重新扫码更新', 409);
-      fs.writeFileSync(path.join(staging, 'identity.json'), JSON.stringify({ userId, uin: item.uin }), { mode: 0o600 });
-      if (this.retiredUsers.has(userId) || this.suspendedUsers.has(userId)) throw new QqScanError('用户已停用', 403);
-      fs.renameSync(staging, directory);
-      return id;
-    } finally {
-      fs.rmSync(staging, { recursive: true, force: true });
-      item.retainDirectory = false;
-      if (item.exited || item.child?.exitCode !== null) this.cleanDirectory(item.directory);
-    }
+    if (item.disposed || item.stopping || item.exited) throw new QqScanError('QQ 登录进程已结束，请重新扫码更新', 503, 'temporary');
+    if (!fs.existsSync(path.join(item.directory, 'qq-data'))) throw new QqScanError('QQ 未生成可恢复的登录态，请重新扫码更新', 409);
+    const identityFile = path.join(item.directory, 'identity.json');
+    fs.writeFileSync(identityFile, JSON.stringify({ userId, uin: item.uin }), { mode: 0o600 });
+    item.retainDirectory = true;
+    return item.profileId;
   }
 
-  discardProfile(id) {
+  async discardProfile(id) {
     if (!id) return;
+    const item = this.activeProfiles.get(id);
+    if (item) { this.dispose(item); await this.shutdownForProfile(item); }
     fs.rmSync(this.profilePath(id), { recursive: true, force: true });
+  }
+
+  accountKey(account) {
+    require('../models/user-id').assertUserId(account.userId);
+    if (!account.id || !/^\d{5,20}$/.test(String(account.uin || account.qq || ''))) throw new QqScanError('QQ 账号身份无效', 409, 'rescan');
+    return `${account.userId}:${account.id}`;
+  }
+
+  sessionIdentity(account) {
+    return JSON.stringify([account.userId, String(account.id), String(account.uin || account.qq), account.qqLoginProfile,
+      account.proxyMode || 'direct', account.proxyProfileId || null]);
+  }
+
+  getAccountState(account) {
+    const key = this.accountKey(account);
+    const item = this.accountSessions.get(key);
+    if (!item || item.disposed || item.exited || item.sessionIdentity !== this.sessionIdentity(account)) return { state: 'stopped', connected: false };
+    const connected = item.nativeOnline === true && !item.stopping && !item.identityChanged;
+    const state = item.stopping ? 'stopping' : connected ? 'online' : ['waiting_scan', 'expired', 'login_failed'].includes(item.phase) ? 'needs_rescan' : item.phase === 'starting' ? 'starting' : 'offline';
+    return { state, connected };
+  }
+
+  async retainAccountSession(item, account) {
+    const key = this.accountKey(account);
+    const identity = JSON.parse(fs.readFileSync(path.join(this.profilePath(account.qqLoginProfile), 'identity.json'), 'utf8'));
+    if (item.profileId !== account.qqLoginProfile || identity.userId !== account.userId || identity.uin !== String(account.uin || account.qq)
+      || item.uin !== identity.uin || item.identityChanged) throw new QqScanError('QQ 登录态身份不符，请重新扫码更新', 409, 'rescan');
+    if (this.closed || item.disposed || item.stopping || item.exited || this.retiredUsers.has(account.userId) || this.suspendedUsers.has(account.userId)) throw new QqScanError('QQ 登录进程已取消', 410);
+    const generation = (this.accountGenerations.get(key) || 0) + 1;
+    this.accountGenerations.set(key, generation);
+    const previous = this.accountSessions.get(key);
+    if (previous && previous !== item) { this.dispose(previous); await this.shutdownForProfile(previous); }
+    if (this.closed || item.disposed || item.stopping || item.exited || this.retiredUsers.has(account.userId)
+      || this.suspendedUsers.has(account.userId) || this.accountGenerations.get(key) !== generation) {
+      this.dispose(item);
+      throw new QqScanError('QQ 登录进程已取消', 410);
+    }
+    Object.assign(item, { accountKey: key, accountUserId: account.userId, targetAccountId: String(account.id),
+      sessionIdentity: this.sessionIdentity(account), retainDirectory: true });
+    this.accountSessions.set(key, item);
+  }
+
+  async stopAccount(account) {
+    const key = this.accountKey(account);
+    this.accountGenerations.set(key, (this.accountGenerations.get(key) || 0) + 1);
+    const item = this.accountSessions.get(key);
+    if (item) { this.dispose(item); await this.shutdownForProfile(item); }
   }
 
   async purgeAccount(account) {
     const profile = account.qqLoginProfile ? this.profilePath(account.qqLoginProfile) : null;
     const uin = String(account.uin || account.qq || '');
     const items = [...this.trackedItems].filter(item =>
-      (String(item.targetAccountId || '') === String(account.id) && (item.targetUserId ?? item.userId) === account.userId)
+      (String(item.targetAccountId || '') === String(account.id) && (item.accountUserId ?? item.targetUserId ?? item.userId) === account.userId)
       || (item.userId === account.userId && ((uin && String(item.uin || item.restoreUin || '') === uin)
         || (profile && item.profileDirectory === profile))));
     const imports = items.map(item => item.importPromise).filter(Boolean);
@@ -375,14 +434,14 @@ class QqLoginService {
     for (const item of items) {
       item.retainDirectory = false;
       this.cleanDirectory(item.directory);
-      if (item.savedProfile) this.discardProfile(item.savedProfile);
+      if (item.savedProfile) await this.discardProfile(item.savedProfile);
     }
-    if (account.qqLoginProfile) this.discardProfile(account.qqLoginProfile);
+    if (account.qqLoginProfile) await this.discardProfile(account.qqLoginProfile);
   }
 
   async purgeUser(userId) {
     this.retiredUsers.add(userId);
-    const items = [...this.trackedItems].filter(item => item.userId === userId || item.targetUserId === userId);
+    const items = [...this.trackedItems].filter(item => item.accountKey ? item.accountUserId === userId : item.userId === userId || item.targetUserId === userId);
     const imports = items.map(item => item.importPromise).filter(Boolean);
     for (const item of items) {
       item.retainDirectory = true;
@@ -412,14 +471,17 @@ class QqLoginService {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
       if (!entry.isDirectory() || !/^[0-9a-f]{8}-[0-9a-f-]{27}(?:\.(?:new|old)-[0-9a-f-]{36})?$/i.test(entry.name)) throw new Error('QQ 登录态目录格式无效');
       const target = path.join(directory, entry.name);
-      const identity = JSON.parse(fs.readFileSync(path.join(target, 'identity.json'), 'utf8'));
-      if (identity.userId === userId) fs.rmSync(target, { recursive: true, force: true });
+      const identityFile = path.join(target, 'identity.json');
+      const ownerFile = path.join(target, 'owner.json');
+      const identity = fs.existsSync(identityFile) ? JSON.parse(fs.readFileSync(identityFile, 'utf8')) : null;
+      const owner = fs.existsSync(ownerFile) ? JSON.parse(fs.readFileSync(ownerFile, 'utf8')) : null;
+      if (identity ? identity.userId === userId : owner?.userId === userId || owner?.targetUserId === userId) fs.rmSync(target, { recursive: true, force: true });
     }
   }
 
   async suspendUser(userId) {
     this.suspendedUsers.add(userId);
-    const items = [...this.trackedItems].filter(item => item.userId === userId || item.targetUserId === userId);
+    const items = [...this.trackedItems].filter(item => item.accountKey ? item.accountUserId === userId : item.userId === userId || item.targetUserId === userId);
     const imports = items.map(item => item.importPromise).filter(Boolean);
     for (const item of items) this.dispose(item);
     await Promise.all(items.map(item => this.shutdownForProfile(item)));
@@ -436,17 +498,33 @@ class QqLoginService {
     await Promise.allSettled(imports);
   }
 
-  refreshAccountCode(account, { signal, mark = () => {} } = {}) {
-    mark('queued');
-    const operation = this.credentialQueue.catch(() => {}).then(() => { mark('requesting'); return this.restoreAccountCode(account, signal); });
-    this.credentialQueue = operation;
+  async refreshAccountCode(account, { signal, mark = () => {} } = {}) {
+    if (signal?.aborted) throw new QqScanError('QQ 取码已取消', 410);
+    const key = this.accountKey(account);
+    const identity = this.sessionIdentity(account);
+    const generation = this.accountGenerations.get(key) || 0;
+    const existing = this.accountRequests.get(key);
+    if (existing) {
+      if (existing.identity === identity && existing.generation === generation && !existing.signal?.aborted) return existing.operation;
+      await existing.operation.catch(() => {});
+      if (signal?.aborted || (this.accountGenerations.get(key) || 0) !== generation) throw new QqScanError('QQ 取码已取消', 410);
+      return this.refreshAccountCode(account, { signal, mark });
+    }
+    const operation = Promise.resolve().then(() => {
+      mark('requesting');
+      return this.restoreAccountCode(account, signal, generation);
+    }).finally(() => { if (this.accountRequests.get(key)?.operation === operation) this.accountRequests.delete(key); });
+    this.accountRequests.set(key, { identity, generation, signal, operation });
     return operation;
   }
 
-  async restoreAccountCode(account, signal) {
+  async restoreAccountCode(account, signal, generation) {
+    const key = this.accountKey(account);
+    const sessionIdentity = this.sessionIdentity(account);
+    const cancelled = () => signal?.aborted || this.closed || (this.accountGenerations.get(key) || 0) !== generation;
     if (this.retiredUsers.has(account.userId) || this.suspendedUsers.has(account.userId)) throw new QqScanError('用户已停用', 403);
     if (this.closed || this.environment.QQ_LOGIN_ENABLED === '0') throw new QqScanError('QQ 登录态服务已停用', 503, 'configuration');
-    if (signal?.aborted) throw new QqScanError('QQ 取码已取消', 410);
+    if (cancelled()) throw new QqScanError('QQ 取码已取消', 410);
     const directory = this.profilePath(account.qqLoginProfile);
     let identity;
     try { identity = JSON.parse(fs.readFileSync(path.join(directory, 'identity.json'), 'utf8')); }
@@ -455,76 +533,76 @@ class QqLoginService {
       throw new QqScanError('QQ 登录态身份不符，请重新扫码更新', 409, 'rescan');
     }
     this.sweep();
-    if (this.sessions.size >= this.maxSessions) throw new QqScanError('QQ 扫码服务繁忙，稍后自动重试', 429);
     const { proxySetting, resolveProxyURL, createSocksBridge } = require('./account-proxy');
     const setting = proxySetting(account);
-    let proxyURL; let proxyBridge;
-    try {
-      proxyURL = await (this.resolveProxy || resolveProxyURL)(setting, { userId: account.userId });
-      proxyBridge = proxyURL ? await (this.bridgeProxy || createSocksBridge)(proxyURL) : null;
-    } catch { throw new QqScanError('QQ 账号代理不可用，请检查所选代理配置', 503, 'proxy'); }
-    let item;
+    let item = this.accountSessions.get(key);
+    let completed = false;
+    let proxyBridge;
+    let source = 'resident';
     const startedAt = Date.now();
     const diagnostic = outcome => {
-      this.lastRecovery = { outcome, durationMs: Date.now() - startedAt, hasCode: !!item?.code,
+      this.lastRecovery = { outcome, source, nativePhase: item?.nativePhase || item?.phase || '', durationMs: Date.now() - startedAt, hasCode: !!item?.code,
         hasIdentity: !!item?.uin, identityType: item?.identityShape?.type || 'undefined',
         identityLength: item?.identityShape?.length || 0,
         matchesSaved: item?.uin ? item.uin === identity.uin && !item.identityChanged : null };
     };
     try {
-      if (signal?.aborted) throw new QqScanError('QQ 取码已取消', 410);
+      if (cancelled()) throw new QqScanError('QQ 取码已取消', 410);
       if (this.retiredUsers.has(account.userId) || this.suspendedUsers.has(account.userId)) throw new QqScanError('用户已停用', 403);
-      if (this.closed || this.sessions.size >= this.maxSessions) throw new QqScanError('QQ 扫码服务繁忙，稍后自动重试', 429);
-      if (this.warm) { this.dispose(this.warm); this.warm = null; }
-      item = this.launch({ ...setting, userId: account.userId, proxyURL, proxyBridge, nativeProxyURL: proxyBridge?.url || '',
-        profileDirectory: directory, restoreUin: identity.uin });
-      item.owner = `credential:${  crypto.randomUUID()}`;
-      this.sessions.set(item.id, item);
-      const deadline = Date.now() + 65000;
-      let identityDeadline;
-      while (!item.code || !item.uin) {
-        if (signal?.aborted || item.disposed || this.closed) throw new QqScanError('QQ 取码已取消', 410);
-        if (item.identityChanged || (item.uin && item.uin !== identity.uin)) throw new QqScanError('QQ 登录身份变化，请重新扫码更新', 409, 'rescan');
-        if (item.code && !item.uin) identityDeadline ??= Date.now() + this.identityWaitMs;
-        if (item.identityPending || (identityDeadline && Date.now() >= identityDeadline)) {
-          throw new QqScanError('QQ 身份尚未就绪，稍后自动重试', 503, 'temporary');
-        }
-        if (['waiting_scan', 'expired', 'login_failed'].includes(item.phase)) {
-          throw new QqScanError('QQ 登录态需要重新验证，请使用 QQ 扫码更新', 409, 'rescan');
-        }
-        if (['offline', 'error'].includes(item.phase) || item.exited) {
-          throw new QqScanError('QQ 登录连接中断或取码失败，请检查网络后重试', 503, item.proxyMode === 'static' ? 'proxy' : 'temporary');
-        }
-        if (Date.now() >= deadline) throw new QqScanError('QQ 登录态恢复超时，稍后自动重试', 504);
-        await new Promise(resolve => setTimeout(resolve, 100));
+      if (item && (item.disposed || item.exited || item.stopping || item.sessionIdentity !== sessionIdentity || !item.nativeOnline)) {
+        this.dispose(item); await this.shutdownForProfile(item); item = null;
       }
-      if (signal?.aborted || item.disposed || this.closed) throw new QqScanError('QQ 取码已取消', 410);
-      if (item.nativePhase === 'offline' || item.exited) throw new QqScanError('QQ 登录连接已断开，稍后自动重试', 503, 'temporary');
+      let code;
+      if (item) {
+        if (item.identityChanged || item.uin !== identity.uin) throw new QqScanError('QQ 登录身份变化，请重新扫码更新', 409, 'rescan');
+        code = await this.requestCode(item, signal);
+      } else {
+        source = 'restored';
+        let proxyURL;
+        try {
+          proxyURL = await (this.resolveProxy || resolveProxyURL)(setting, { userId: account.userId });
+          proxyBridge = proxyURL ? await (this.bridgeProxy || createSocksBridge)(proxyURL) : null;
+        } catch { throw new QqScanError('QQ 账号代理不可用，请检查所选代理配置', 503, 'proxy'); }
+        if (cancelled()) throw new QqScanError('QQ 取码已取消', 410);
+        if (this.retiredUsers.has(account.userId) || this.suspendedUsers.has(account.userId)) throw new QqScanError('用户已停用', 403);
+        if (this.warm) { this.dispose(this.warm); this.warm = null; }
+        item = this.launch({ ...setting, userId: account.userId, accountUserId: account.userId, accountKey: key,
+          targetAccountId: String(account.id), sessionIdentity, restoring: true,
+          proxyURL, proxyBridge, nativeProxyURL: proxyBridge?.url || '', profileDirectory: directory, restoreUin: identity.uin });
+        this.accountSessions.set(key, item);
+        const deadline = Date.now() + 65000;
+        let identityDeadline;
+        while (!item.code || !item.uin) {
+          if (cancelled() || item.disposed) throw new QqScanError('QQ 取码已取消', 410);
+          if (item.identityChanged || (item.uin && item.uin !== identity.uin)) throw new QqScanError('QQ 登录身份变化，请重新扫码更新', 409, 'rescan');
+          if (item.code && !item.uin) identityDeadline ??= Date.now() + this.identityWaitMs;
+          if (item.identityPending || (identityDeadline && Date.now() >= identityDeadline)) throw new QqScanError('QQ 身份尚未就绪，稍后自动重试', 503, 'temporary');
+          if (['waiting_scan', 'expired', 'login_failed'].includes(item.phase)) throw new QqScanError('QQ 登录态需要重新验证，请使用 QQ 扫码更新', 409, 'rescan');
+          if (['offline', 'error'].includes(item.phase) || item.exited) throw new QqScanError('QQ 登录连接中断或取码失败，请检查网络后重试', 503, item.proxyMode === 'static' ? 'proxy' : 'temporary');
+          if (Date.now() >= deadline) throw new QqScanError('QQ 登录态恢复超时，稍后自动重试', 504);
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        item.restoring = false;
+        code = item.code;
+      }
+      if (cancelled() || item.disposed || this.accountSessions.get(key) !== item) throw new QqScanError('QQ 取码已取消', 410);
+      if (item.nativePhase === 'offline' || item.exited || !item.nativeOnline) throw new QqScanError('QQ 登录连接已断开，稍后自动重试', 503, 'temporary');
       if (item.identityChanged || item.uin !== identity.uin) throw new QqScanError('QQ 登录身份变化，请重新扫码更新', 409, 'rescan');
-      diagnostic('identity_verified');
-      const code = item.code;
-      // Keep the refreshed native credentials without changing the account's
-      // opaque profile reference. Replace the snapshot only after native exit.
-      const fresh = await this.saveProfile(item, identity.userId);
-      const freshPath = this.profilePath(fresh);
-      const old = `${directory  }.old-${  crypto.randomUUID()}`;
-      try {
-        if (signal?.aborted || this.closed) throw new QqScanError('QQ 取码已取消', 410);
-        if (!fs.existsSync(directory)) throw new QqScanError('QQ 登录态已删除或替换，请重新扫码更新', 409, 'rescan');
-        fs.renameSync(directory, old);
-        try { fs.renameSync(freshPath, directory); }
-        catch (error) { fs.renameSync(old, directory); throw error; }
-        fs.rmSync(old, { recursive: true, force: true });
-      } finally {
-        fs.rmSync(freshPath, { recursive: true, force: true });
-      }
+      if (!fs.existsSync(path.join(directory, 'identity.json'))) throw new QqScanError('QQ 登录态已删除或替换，请重新扫码更新', 409, 'rescan');
+      completed = true;
       diagnostic('success');
       return code;
     } catch (error) {
+      // An authorization error does not itself terminate an otherwise healthy
+      // QQ connection. A timeout, cancellation or identity change does.
+      if (source === 'resident' && ['temporary', 'busy'].includes(error.kind) && item?.nativeOnline
+        && !item.disposed && !item.exited && !item.identityChanged && !cancelled() && this.accountSessions.get(key) === item) completed = true;
       diagnostic(error.kind || 'temporary');
       throw error;
     } finally {
-      if (item) this.dispose(item); else proxyBridge?.close();
+      if (!completed) {
+        if (item) this.dispose(item); else proxyBridge?.close();
+      }
     }
   }
 

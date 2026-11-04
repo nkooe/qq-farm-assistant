@@ -160,6 +160,23 @@ for (const saved of [true, false]) {
   })
 }
 
+for (const [farmState, farmLabel, qqState, qqLabel] of [
+  ['reconnecting', '等待重连', 'online', '在线'],
+  ['online', '在线', 'offline', '已断开'],
+  ['stopped', '已停止', 'stopped', '未启动'],
+] as const) {
+  test(`QQ session and farm connection show independent states: ${farmState}/${qqState}`, async ({ page }) => {
+    await mockApi(page, [{ id: 'qq-resident', name: 'QQ 常驻账号', platform: 'qq', loginType: 'manual', runtimeState: farmState, running: farmState === 'online', qqAutoCodeAvailable: true, runtimeQqSession: { state: qqState, connected: qqState === 'online' } }] as any)
+    await page.route('**/api/accounts/qq-resident/health', route => route.fulfill({ json: { ok: true, data: { supported: false, runtime: {} } } }))
+    await page.goto('/test/browser/accounts.html')
+    await page.getByRole('button', { name: /状态检查/ }).click()
+    await expect(page.getByRole('button', { name: new RegExp(`状态检查 · ${farmLabel}`) })).toBeVisible()
+    await expect(page.getByText(`QQ 会话：${qqLabel}`, { exact: true })).toBeVisible()
+    await expect(page.getByText('登录态：已保存', { exact: true })).toBeVisible()
+    await expectFits(page)
+  })
+}
+
 for (const retainLoginHistory of [true, false]) {
   test(`QQ connection recovery hides past failures even when health is stale: ${retainLoginHistory}`, async ({ page }) => {
     const failedLogin = { source: 'qq', state: 'failed', kind: 'rescan', durationMs: 3800 }

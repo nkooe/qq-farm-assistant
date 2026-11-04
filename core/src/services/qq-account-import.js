@@ -80,10 +80,10 @@ function createQqAccountImporter({ qqLogin, provider, addOrUpdateAccount, userSt
           || currentAccounts.some(a => String(a.uin || a.qq || '') === item.uin && String(a.id) !== String(existing?.id || ''))) {
           throw new QqScanError('账号身份或登录配置已变化，请重新扫码；最新账号数据已保留', 409);
         }
-      } catch (error) { qqLogin.discardProfile(qqLoginProfile); item.savedProfile = null; throw error; }
+      } catch (error) { await qqLogin.discardProfile(qqLoginProfile); item.savedProfile = null; throw error; }
       if (!existing) {
         try { assertQuota(); } catch (error) {
-          qqLogin.discardProfile(qqLoginProfile); item.savedProfile = null;
+          await qqLogin.discardProfile(qqLoginProfile); item.savedProfile = null;
           throw error;
         }
       }
@@ -93,15 +93,15 @@ function createQqAccountImporter({ qqLogin, provider, addOrUpdateAccount, userSt
         proxyMode: item.proxyMode || 'direct', proxyProfileId: item.proxyProfileId || null };
       let data;
       try { data = addOrUpdateAccount(account); }
-      catch (error) { qqLogin.discardProfile(qqLoginProfile); item.savedProfile = null; throw error; }
-      if (previousProfile && previousProfile !== qqLoginProfile) {
-        qqLogin.discardProfile(previousProfile);
-      }
+      catch (error) { await qqLogin.discardProfile(qqLoginProfile); item.savedProfile = null; throw error; }
       const accountId = String(existing?.id || data.accounts.at(-1)?.id || '');
+      await qqLogin.retainAccountSession(item, { ...account, id: accountId, userId });
+      if (previousProfile && previousProfile !== qqLoginProfile) {
+        await qqLogin.discardProfile(previousProfile);
+      }
       // Store the result before requesting a start: a retried HTTP import must
       // never restart a worker twice or create a second record.
       item.importResult = { accountId, updated: !!existing, code: item.code };
-      qqLogin.stopChild(item);
       const action = existing && provider.isAccountRunning?.(accountId) ? 'restartAccount' : 'startAccount';
       await provider[action](accountId, { skipQqRefresh: true });
       provider.addAccountLog?.(existing ? 'update' : 'add', existing ? 'QQ 扫码更新账号' : 'QQ 扫码添加账号', accountId, name || existing?.name || '');

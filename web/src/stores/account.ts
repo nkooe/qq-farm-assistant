@@ -27,6 +27,7 @@ export interface Account {
   running?: boolean
   connected?: boolean
   runtimeState?: 'online' | 'starting' | 'reconnecting' | 'failed' | 'stopped' | 'stopping'
+  runtimeQqSession?: { state: 'online' | 'starting' | 'offline' | 'needs_rescan' | 'stopped' | 'stopping', connected: boolean } | null
   runtimeError?: string
   runtimeReconnect?: { state: 'scheduled' | 'needs_rescan' | 'blocked', attempt: number, nextRetryAt: number | null, reason: string, kind?: string }
   runtimeLogin?: { source: string, state: 'queued' | 'requesting' | 'success' | 'failed' | 'cancelled', kind: string, startedAt: number, lastSuccessAt: number | null, durationMs: number | null } | null

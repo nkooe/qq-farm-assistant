@@ -391,6 +391,7 @@ function createDataProvider(deps) {
                 acc.runtimeError = runtime?.error || '';
                 acc.runtimeReconnect = runtime?.reconnect || null;
                 acc.runtimeLogin = runtime?.login || null;
+                acc.runtimeQqSession = runtime?.qqSession || null;
                 if (worker && worker.status && worker.status.status && worker.status.status.name) {
                     acc.nick = worker.status.status.name;
                 }

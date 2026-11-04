@@ -13,6 +13,7 @@ function harness(options = {}) {
       owned(owner, id) { if (!active || owner !== '1001:panel-a' || id !== item.id) throw new QqScanError('missing', 404); return item; },
       async refreshCode() { calls.push(['refresh']); return 'fixture_FRESH_CODE_12345678'; },
       stopChild() { calls.push(['release']); },
+      async retainAccountSession(_item, account) { calls.push(['retain', account.id]); },
       async saveProfile(item, userId) { if (options.saveProfile) return options.saveProfile(item, userId); return '12345678-1234-4234-8234-123456789abc'; },
       discardProfile() {},
     },
@@ -86,7 +87,7 @@ test('parallel import retries save and start exactly once', async () => {
 });
 
 test('parallel imports isolate two QQ accounts for one user and the same QQ identity for another user', async () => {
-  const accounts = [], starts = [];
+  const accounts = []; const starts = [];
   const items = new Map([
     ['alice-a', { id: 'alice-a', owner: '1001:token-a', uin: '12345678', code: 'fixture_ALICE_A_CODE' }],
     ['alice-b', { id: 'alice-b', owner: '1001:token-a', uin: '87654321', code: 'fixture_ALICE_B_CODE' }],
@@ -96,7 +97,7 @@ test('parallel imports isolate two QQ accounts for one user and the same QQ iden
     qqLogin: {
       owned(owner, id) { const item = items.get(id); if (item?.owner !== owner) throw new QqScanError('missing', 404); return item; },
       async saveProfile(item, userId) { return `${userId}-profile-${item.id}`; },
-      stopChild() {}, discardProfile() {},
+      async retainAccountSession() {}, discardProfile() {},
     },
     provider: { getAccounts: () => ({ accounts }), startAccount: id => starts.push(id) },
     addOrUpdateAccount(account) { accounts.push({ ...account, id: String(accounts.length + 1) }); return { accounts }; },
@@ -150,7 +151,7 @@ test('an account added while native credentials are saving cannot bypass the use
 });
 
 test('quota reduced while a native profile is saving is enforced before account persistence', async () => {
-  let limit = 2, finish;
+  let limit = 2; let finish;
   const h = harness({ accounts: [{ id: '1', userId: 1001, platform: 'wx' }], currentLimit: () => limit,
     saveProfile: () => new Promise(resolve => { finish = resolve; }),
   });

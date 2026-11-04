@@ -15,13 +15,14 @@ let controller: AbortController | null = null
 
 // Connection and recovery details must come from the same runtime snapshot.
 const runtime = computed(() => props.account?.runtimeState
-  ? { state: props.account.runtimeState, error: props.account.runtimeError, reconnect: props.account.runtimeReconnect, login: props.account.runtimeLogin }
+  ? { state: props.account.runtimeState, error: props.account.runtimeError, reconnect: props.account.runtimeReconnect, login: props.account.runtimeLogin, qqSession: props.account.runtimeQqSession }
   : health.value?.runtime)
 const online = computed(() => runtime.value?.state === 'online')
 const runtimeLabel = computed(() => ({ online: '在线', starting: '连接中', reconnecting: '等待重连', failed: '连接失败', stopped: '已停止', stopping: '停止中' } as Record<string, string>)[runtime.value?.state] || '状态未知')
 const reconnect = computed(() => online.value ? null : runtime.value?.reconnect)
 const runtimeError = computed(() => online.value ? '' : runtime.value?.error)
 const loginState = computed(() => runtime.value?.login)
+const qqSessionLabel = computed(() => ({ online: '在线', starting: '连接中', offline: '已断开', needs_rescan: '需扫码', stopped: '未启动', stopping: '停止中' } as Record<string, string>)[runtime.value?.qqSession?.state] || '未启动')
 const loginLabel = computed(() => {
   // A completed login attempt is history once the game has connected.
   if (online.value)
@@ -147,6 +148,7 @@ onBeforeUnmount(() => {
           {{ runtimeError }}
         </p>
         <template v-if="account?.platform === 'qq' && account?.loginType !== 'yyb' && !account?.yybOpenid">
+          <p>QQ 会话：{{ qqSessionLabel }}</p>
           <p>登录态：{{ account?.qqAutoCodeAvailable ? '已保存' : '未保存' }}</p>
         </template>
         <template v-else-if="health.supported">

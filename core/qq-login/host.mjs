@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import {pathToFileURL} from 'node:url';
-import {decodeQrPicture, requestFarmCode, describeIdentity, waitForIdentity} from './qq-native-login.mjs';
+import {decodeQrPicture, describeIdentity, requestFarmCode, waitForIdentity} from './qq-native-login.mjs';
 
 const runtimeArg = process.env.FARM_QQ_RUNTIME || process.argv[2];
 const dataArg = process.env.FARM_QQ_SESSION_DIR || process.argv[3];
@@ -24,22 +24,24 @@ const labels = {
   expired:'二维码已过期，请刷新', offline:'QQ 会话已断开，请切换账号重新扫码',
   error:'扫码组件遇到错误，请重新打开扫码登录'
 };
-function phase(value, message=labels[value], reason) {
+function phase(value, message=labels[value], reason, requestId) {
   if (shuttingDown) return;
-  current=value; emit('state',{phase:value,message:message||labels.error,canRequest:!!session&&!!confirmedUin&&!requesting&&value!=='offline',...(reason?{reason}:{})});
+  current=value; emit('state',{phase:value,message:message||labels.error,canRequest:!!session&&!!confirmedUin&&!requesting&&value!=='offline',...(reason?{reason}:{}),...(requestId?{requestId}:{})});
 }
-async function getCode() {
-  if (!session || !confirmedUin || requesting || current==='offline' || shuttingDown) return;
+async function getCode(requestId='') {
+  if (shuttingDown) return;
+  if (!session || !confirmedUin || current==='offline') { phase('offline',labels.offline,undefined,requestId); return; }
+  if (requesting) { emit('state',{phase:'error',message:'QQ 正在取码，稍后重试',reason:'busy',requestId}); return; }
   requesting=true; phase('requesting');
   try {
     const {code}=await requestFarmCode(session,{appId:'1112386029',timeoutMs:20000});
     if (shuttingDown || current==='offline') return;
-    emit('code',{code});
+    emit('code',{code,...(requestId?{requestId}:{})});
     requesting=false; phase('success');
   } catch(error) {
     requesting=false;
     if(error.name==='QqLoginError'&&error.diagnostic)emit('diagnostic',{event:'invalid_code_result',...error.diagnostic});
-    phase('error',error.name==='QqLoginError'?error.message:'QQ 原生取码调用失败，请重试');
+    phase('error',error.name==='QqLoginError'?error.message:'QQ 原生取码调用失败，请重试',undefined,requestId);
   }
 }
 globalThis.__qqFarmLogin = {
@@ -75,9 +77,9 @@ globalThis.__qqFarmLogin = {
 readline.createInterface({input:process.stdin,crlfDelay:Infinity}).on('line',line=>{
   if(line.length>4096)return;
   try {
-    const {command}=JSON.parse(line);
+    const {command,requestId}=JSON.parse(line);
     if(command==='shutdown'){shuttingDown=true;process.exit(0);}
-    if(command==='request_code'){void getCode();}
+    if(command==='request_code'&&typeof requestId==='string'&&/^[0-9a-f-]{36}$/i.test(requestId)){void getCode(requestId);}
     if(command==='refresh'&&login&&['waiting_scan','expired','login_failed'].includes(current)){
       phase('starting','正在刷新二维码…');
       if(!login.getQRCodePicture())phase('login_failed','QQ 未接受刷新请求，请稍后重试');

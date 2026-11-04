@@ -119,6 +119,8 @@ function createRuntimeEngine(options = {}) {
         addOrUpdateAccount: store.addOrUpdateAccount,
         deleteAccount: id => engine.deleteAccount(id),
         refreshQqCode: (account, options) => require('../services/qq-login-service').getQqLoginService().refreshAccountCode(account, options),
+        stopQqSession: account => require('../services/qq-login-service').getQqLoginService().stopAccount(account),
+        getQqSessionState: account => require('../services/qq-login-service').getQqLoginService().getAccountState(account),
         onStatusSync: (accountId, status, accountName) => {
             runtimeEvents.emit('status', { accountId, status, accountName });
             if (onStatusSync) onStatusSync(accountId, status, accountName);

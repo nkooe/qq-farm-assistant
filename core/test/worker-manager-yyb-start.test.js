@@ -830,3 +830,29 @@ test('disabled reconnect, deleted accounts and changed settings prevent automati
   assert.equal(calls, 3);
   assert.equal(h.scheduler.has('reconnect_attempt_1'), false);
 });
+
+test('QQ native sessions survive farm reconnect and worker restart, and manual stop waits for the native client', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const stopped = []; let finishStop;
+  const h = harness(t, {}, {
+    refreshQqCode: async () => 'fixture_RESIDENT_FRESH_CODE',
+    getQqSessionState: () => ({ state: 'online', connected: true }),
+    stopQqSession: account => { stopped.push(account.id); return new Promise(resolve => { finishStop = resolve; }); },
+  });
+  const account = { autoStart: true, id: '1', userId: 1001, name: 'Q', platform: 'qq', uin: '12345678', qqLoginProfile: 'fixture' };
+  h.accounts.push(account);
+  assert.equal(await h.manager.startWorker(account), true);
+  h.created[0].emit('message', { type: 'ws_reconnect_failed', reason: 'heartbeat_timeout' });
+  assert.deepEqual(stopped, []);
+  assert.deepEqual(h.manager.getWorkerRuntime('1').qqSession, { state: 'online', connected: true });
+  t.mock.timers.tick(60000); await setImmediate();
+  assert.equal(h.created.length, 2);
+  await h.manager.restartWorker(account);
+  assert.deepEqual(stopped, []);
+  let done = false;
+  const stop = h.manager.stopWorkerAndWait('1').then(() => { done = true; });
+  await setImmediate();
+  assert.deepEqual(stopped, ['1']); assert.equal(done, false);
+  finishStop(); await stop;
+  assert.equal(done, true);
+});

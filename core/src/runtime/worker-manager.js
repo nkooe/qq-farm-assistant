@@ -31,6 +31,8 @@ function createWorkerManager(deps) {
             userId: account?.userId || '',
         }),
         refreshQqCode,
+        stopQqSession,
+        getQqSessionState,
         getOfflineAutoDeleteMs,
         triggerOfflineReminder,
         addOrUpdateAccount,
@@ -46,6 +48,7 @@ function createWorkerManager(deps) {
     const restartingWorkers = new Map();
     const startupResults = new Map();
     const reconnectPlans = new Map();
+    const nativeStops = new Map();
     const loginRecovery = deps.loginRecovery || createLoginRecovery();
 
     function getWorkerRuntime(accountId) {
@@ -64,7 +67,9 @@ function createWorkerManager(deps) {
             state = error || (last?.updatedAt && Date.now() - last.updatedAt > 90000) ? 'failed' : 'starting';
             if (state === 'failed' && !error) error = '连接游戏超时，请检查网络后重试启动';
         } else if (error) state = 'failed';
-        return { state, connected, running: !!worker, error: safeRuntimeError(error), updatedAt: last?.updatedAt || null, login: loginRecovery.getState(accountId),
+        const account = getQqSessionState ? require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(accountId)) : null;
+        const qqSession = account?.qqLoginProfile && isNativeQq(account) && (account.uin || account.qq) ? getQqSessionState(account) : null;
+        return { state, connected, running: !!worker, error: safeRuntimeError(error), updatedAt: last?.updatedAt || null, login: loginRecovery.getState(accountId), qqSession,
             reconnect: reconnect ? { ...reconnect, reason: safeRuntimeError(reconnect.reason) } : null };
     }
 
@@ -342,6 +347,8 @@ function createWorkerManager(deps) {
     }
 
     async function performStartWorker(account, start, options) {
+        if (nativeStops.has(account.id)) await nativeStops.get(account.id);
+        if (start.cancelled || start.controller.signal.aborted) return false;
         const identity = loginIdentity(account);
         const isCurrent = () => {
             const current = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(account.id));
@@ -504,7 +511,16 @@ function createWorkerManager(deps) {
      * @param {boolean} [opts.resetReconnect] 手动停止或删除时清除退避状态；自动恢复时保留。
      */
     function stopWorker(accountId, opts = {}) {
-        const { resetReconnect = true, preserveRestart = false } = opts;
+        const { resetReconnect = true, preserveRestart = false, preserveQqSession = false } = opts;
+        if (resetReconnect && !preserveQqSession && stopQqSession) {
+            const account = require('../models/store').getAccounts().accounts.find(a => String(a.id) === String(accountId));
+            if (isNativeQq(account) && account.qqLoginProfile && (account.uin || account.qq) && !nativeStops.has(accountId)) {
+                const stopping = Promise.resolve(stopQqSession(account));
+                nativeStops.set(accountId, stopping);
+                stopping.catch(error => log('错误', `QQ 进程停止失败: ${safeRuntimeError(error.message)}`, { accountId }))
+                    .finally(() => { if (nativeStops.get(accountId) === stopping) nativeStops.delete(accountId); });
+            }
+        }
         if (!preserveRestart) {
             restartingWorkers.delete(accountId);
         }
@@ -554,7 +570,9 @@ function createWorkerManager(deps) {
         const exited = process ? workerExits.get(process) : null;
         if (process && !exited) throw new Error('账号进程退出监听未初始化');
         stopWorker(accountId, options);
+        const nativeStop = nativeStops.get(accountId);
         if (pending) await pending.promise;
+        if (nativeStop) await nativeStop;
         if (exited) {
             let timer;
             try {
@@ -581,7 +599,7 @@ function createWorkerManager(deps) {
 
         const restart = { identity: loginIdentity(account) };
         restartingWorkers.set(accountId, restart);
-        await stopWorkerAndWait(accountId, { preserveRestart: true });
+        await stopWorkerAndWait(accountId, { preserveRestart: true, preserveQqSession: true });
         if (restartingWorkers.get(accountId) !== restart) return false;
         restartingWorkers.delete(accountId);
         const stored = store.getAccounts().accounts.find(a => String(a.id) === String(accountId));

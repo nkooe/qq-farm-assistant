@@ -17,9 +17,13 @@ function harness(t, options = {}) {
       const child = new EventEmitter();
       child.stdout = new PassThrough(); child.stdin = new PassThrough(); child.exitCode = null;
       child.kill = () => { child.exitCode = 0; child.emit('exit',0); };
-      child.stdin.on('data', chunk => { if (String(chunk).includes('shutdown')) child.kill(); });
+      child.stdin.on('data', chunk => {
+        const command = JSON.parse(String(chunk));
+        if (command.command === 'shutdown') child.kill();
+        if (command.command === 'request_code') child.requestId = command.requestId;
+      });
       child.config = config;
-      child.event = (kind,value) => child.stdout.write(`QQFARM_LOGIN:${  JSON.stringify({kind,value})  }\n`);
+      child.event = (kind,value) => child.stdout.write(`QQFARM_LOGIN:${  JSON.stringify({kind,value: kind === 'code' && child.requestId ? {requestId:child.requestId,...value} : value})  }\n`);
       children.push(child); return child;
     } });
   t.after(() => { service.close(); for (const child of children) child.kill(); fs.rmSync(dataDir,{recursive:true,force:true}); });
@@ -329,23 +333,30 @@ async function savedProfile(t, options = {}) {
   h.children[0].event('session', { uin: '12345678' });
   h.children[0].event('code', { code: 'fixture_INITIAL_CODE_12345678' });
   const profile = await h.service.saveProfile(item, 1001);
+  const account = { id: '1', userId: 1001, uin: '12345678', qqLoginProfile: profile };
+  await h.service.retainAccountSession(item, account);
   h.service.cancel('1001:fixture-token', scan.sessionId);
-  return { ...h, profile, account: { userId: 1001, uin: '12345678', qqLoginProfile: profile } };
+  if (!options.resident) await h.service.stopAccount(account);
+  return { ...h, profile, account };
 }
 
 test('saved isolated QQ credentials survive UI cancellation and repeated fresh-code requests', async t => {
   const h = await savedProfile(t);
+  let resident;
   for (let i = 1; i <= 2; i++) {
     const pending = h.service.refreshAccountCode(h.account);
     await new Promise(resolve => setImmediate(resolve));
     const child = h.children.at(-1);
     assert.equal(child.config.env.FARM_QQ_RESTORE_UIN, '12345678');
+    if (resident) assert.equal(child, resident);
     assert.equal(fs.readFileSync(path.join(child.config.cwd, 'qq-data', 'fixture-ticket'), 'utf8'), 'private-ticket');
     child.event('session', { uin: '12345678' });
     child.event('code', { code: `fixture_REFRESH_CODE_1234567${  i}` });
     assert.equal(await pending, `fixture_REFRESH_CODE_1234567${  i}`);
     assert.equal(h.service.sessions.size, 0);
     assert(fs.existsSync(h.service.profilePath(h.profile)));
+    assert.equal(child.exitCode, null);
+    resident = child;
   }
 });
 
@@ -401,6 +412,11 @@ test('restoring native QQ uses its selected proxy and never falls back to direct
   assert.equal(child.config.env.NAPCAT_PROXY_PORT, '18080');
   child.event('session', { uin: '12345678' }); child.event('code', { code: 'fixture_PROXY_CODE_12345678' });
   await pending; fail = true;
+  const reused = h.service.refreshAccountCode(h.account);
+  await new Promise(resolve => setImmediate(resolve));
+  child.event('code', { code: 'fixture_RESIDENT_PROXY_CODE_12345678' });
+  assert.equal(await reused, 'fixture_RESIDENT_PROXY_CODE_12345678');
+  await h.service.stopAccount(h.account);
   await assert.rejects(h.service.refreshAccountCode(h.account), error => error.kind === 'proxy' && /代理不可用/.test(error.message));
   assert.equal(h.children.length, 2);
   assert.deepEqual(settings.at(-1), { proxyMode: 'static', proxyProfileId: 7 });
@@ -421,11 +437,11 @@ test('deleting a saved profile during restore cannot resurrect it or leak a fres
   const h = await savedProfile(t);
   const pending = h.service.refreshAccountCode(h.account);
   await new Promise(resolve => setImmediate(resolve));
-  h.service.discardProfile(h.profile);
+  await h.service.discardProfile(h.profile);
   const child = h.children.at(-1);
   child.event('session', { uin: '12345678' });
   child.event('code', { code: 'fixture_DELETED_CODE_12345678' });
-  await assert.rejects(pending, /删除或替换/);
+  await assert.rejects(pending, error => error.kind === 'cancelled');
   assert.equal(h.service.sessions.size, 0);
   assert.deepEqual(fs.readdirSync(path.join(h.service.dataDir, 'profiles')), []);
 });
@@ -498,18 +514,19 @@ test('identity changing within a native session cannot save Code even if it chan
   assert.equal(h.service.status({ admin: true }).lastRecovery.matchesSaved, false);
 });
 
-test('identity changes during native shutdown cannot overwrite the saved profile', async t => {
+test('refresh leaves the same native process and database alive without requesting shutdown', async t => {
   const h = await savedProfile(t);
   const before = fs.readFileSync(path.join(h.service.profilePath(h.profile), 'identity.json'), 'utf8');
   const pending = h.service.refreshAccountCode(h.account);
   await new Promise(resolve => setImmediate(resolve));
   const child = h.children.at(-1);
-  child.stdin.prependListener('data', chunk => {
-    if (String(chunk).includes('shutdown')) child.event('session', { uin: '87654321' });
-  });
+  const commands = [];
+  child.stdin.prependListener('data', chunk => { commands.push(JSON.parse(String(chunk)).command); });
   child.event('session', { uin: '12345678' });
   child.event('code', { code: 'fixture_DURING_SHUTDOWN_CODE' });
-  await assert.rejects(pending, error => error.kind === 'rescan');
+  assert.equal(await pending, 'fixture_DURING_SHUTDOWN_CODE');
+  assert.equal(child.exitCode, null);
+  assert.deepEqual(commands, []);
   assert.equal(fs.readFileSync(path.join(h.service.profilePath(h.profile), 'identity.json'), 'utf8'), before);
 });
 
@@ -530,4 +547,176 @@ test('account purge cancels its admin-targeted import and removes snapshots with
   assert.equal(fs.existsSync(h.service.profilePath(h.profile)), false);
   assert.equal(fs.existsSync(item.directory), false);
   assert.equal(otherItem.disposed, false); assert.equal(fs.existsSync(otherItem.directory), true);
+});
+
+async function residentAccount(h, userId, id, uin = '12345678', settings = {}) {
+  const owner = `${userId}:fixture-panel`;
+  const scan = h.service.create(owner, settings);
+  const item = h.service.owned(owner, scan.sessionId);
+  const child = h.children.at(-1);
+  child.event('session', { uin });
+  child.event('code', { code: `fixture_INITIAL_CODE_${id}` });
+  fs.mkdirSync(path.join(item.directory, 'qq-data'), { recursive: true });
+  fs.writeFileSync(path.join(item.directory, 'qq-data', 'fixture-ticket'), `ticket-${userId}-${id}`);
+  const qqLoginProfile = await h.service.saveProfile(item, userId);
+  const account = { id, userId, uin, qqLoginProfile, ...settings };
+  await h.service.retainAccountSession(item, account);
+  return { account, child, item, owner, scan };
+}
+
+test('QR expiry and window closure detach only the panel handle, preserving the account process and native directory', async t => {
+  let now = 0;
+  const h = harness(t, { now: () => now, ttlMs: 100, maxSessions: 1 });
+  const a = await residentAccount(h, 1001, '1');
+  assert.equal(a.item.directory, h.service.profilePath(a.account.qqLoginProfile));
+  now = 101; h.service.sweep();
+  assert.equal(a.child.exitCode, null);
+  assert.deepEqual(h.service.getAccountState(a.account), { state: 'online', connected: true });
+  assert.throws(() => h.service.get(a.owner, a.scan.sessionId), { status: 404 });
+  assert.equal(h.service.status({ owner: '1002:other' }).residentAccounts, 0);
+  assert.equal(h.service.status({ owner: a.owner }).residentAccounts, 1);
+  const b = await residentAccount(h, 1002, '2');
+  h.service.cancel(b.owner, b.scan.sessionId);
+  assert.equal(a.child.exitCode, null); assert.equal(b.child.exitCode, null);
+  assert.equal(h.service.status({ admin: true }).residentAccounts, 2);
+});
+
+test('multiple QQ accounts refresh independently, coalesce duplicate requests and discard responses from the wrong request', async t => {
+  const h = harness(t);
+  const a = await residentAccount(h, 1001, '1');
+  const b = await residentAccount(h, 1001, '2', '87654321');
+  const c = await residentAccount(h, 1002, '3');
+  const pa = h.service.refreshAccountCode(a.account);
+  const duplicate = h.service.refreshAccountCode(a.account);
+  const pb = h.service.refreshAccountCode(b.account);
+  const pc = h.service.refreshAccountCode(c.account);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(new Set([a.child.requestId, b.child.requestId, c.child.requestId]).size, 3);
+  let finished = false; pa.then(() => { finished = true; });
+  a.child.event('code', { code: 'fixture_WRONG_RESPONSE', requestId: b.child.requestId });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(finished, false);
+  c.child.event('code', { code: 'fixture_C_FRESH_RESPONSE' });
+  assert.equal(await pc, 'fixture_C_FRESH_RESPONSE');
+  b.child.event('code', { code: 'fixture_B_FRESH_RESPONSE' });
+  assert.equal(await pb, 'fixture_B_FRESH_RESPONSE');
+  a.child.event('code', { code: 'fixture_A_FRESH_RESPONSE' });
+  assert.deepEqual(await Promise.all([pa, duplicate]), ['fixture_A_FRESH_RESPONSE', 'fixture_A_FRESH_RESPONSE']);
+  assert.equal(h.children.length, 3);
+  assert.equal(new Set([a.item.directory, b.item.directory, c.item.directory]).size, 3);
+  assert([a,b,c].every(v => v.child.exitCode === null));
+  await assert.rejects(h.service.refreshAccountCode({ ...a.account, userId: 1002 }), { kind: 'rescan' });
+  assert.equal(c.child.exitCode, null);
+});
+
+test('manual stop cancels its pending native request without returning a late Code or stopping another account', async t => {
+  const h = harness(t);
+  const a = await residentAccount(h, 1001, '1');
+  const b = await residentAccount(h, 1002, '2');
+  const pending = h.service.refreshAccountCode(a.account);
+  const rejected = assert.rejects(pending, { kind: 'cancelled' });
+  await new Promise(resolve => setImmediate(resolve));
+  await h.service.stopAccount(a.account); await rejected;
+  a.child.event('code', { code: 'fixture_TOO_LATE_RESPONSE' });
+  assert.equal(h.service.getAccountState(a.account).state, 'stopped');
+  assert.equal(b.child.exitCode, null);
+  assert(fs.existsSync(h.service.profilePath(a.account.qqLoginProfile)));
+});
+
+test('authorization failure retains a healthy QQ connection while process death restores the same persistent directory', async t => {
+  const h = harness(t);
+  const a = await residentAccount(h, 1001, '1');
+  const first = h.service.refreshAccountCode(a.account);
+  await new Promise(resolve => setImmediate(resolve));
+  a.child.event('state', { phase: 'error', message: 'temporary request failure', requestId: a.child.requestId });
+  await assert.rejects(first, { kind: 'temporary' });
+  assert.equal(a.child.exitCode, null);
+  const second = h.service.refreshAccountCode(a.account);
+  await new Promise(resolve => setImmediate(resolve));
+  a.child.event('code', { code: 'fixture_SECOND_FRESH_RESPONSE' });
+  assert.equal(await second, 'fixture_SECOND_FRESH_RESPONSE');
+  a.child.kill();
+  assert.equal(h.service.getAccountState(a.account).state, 'stopped');
+  const restored = h.service.refreshAccountCode(a.account);
+  await new Promise(resolve => setImmediate(resolve));
+  const newChild = h.children.at(-1);
+  assert.notEqual(newChild, a.child);
+  assert.equal(newChild.config.cwd, a.child.config.cwd);
+  newChild.event('session', { uin: a.account.uin });
+  newChild.event('code', { code: 'fixture_RESTORED_FRESH_RESPONSE' });
+  assert.equal(await restored, 'fixture_RESTORED_FRESH_RESPONSE');
+  assert.equal(newChild.exitCode, null);
+});
+
+test('resident deletion, suspension and proxy revocation close only the affected account processes', async t => {
+  const h = harness(t);
+  const a = await residentAccount(h, 1001, '1', '12345678', { proxyMode: 'static', proxyProfileId: 7 });
+  const b = await residentAccount(h, 1001, '2', '87654321', { proxyMode: 'static', proxyProfileId: 8 });
+  const c = await residentAccount(h, 1002, '3', '12345678', { proxyMode: 'static', proxyProfileId: 8 });
+  for (const v of [a,b,c]) h.service.cancel(v.owner, v.scan.sessionId);
+  await h.service.invalidateProxyProfile(7);
+  assert.equal(a.child.exitCode, 0); assert.equal(b.child.exitCode, null); assert.equal(c.child.exitCode, null);
+  await h.service.suspendUser(1001);
+  assert.equal(b.child.exitCode, 0); assert.equal(c.child.exitCode, null);
+  assert(fs.existsSync(b.item.directory));
+  await h.service.purgeUser(1001);
+  assert.equal(fs.existsSync(a.item.directory), false); assert.equal(fs.existsSync(b.item.directory), false);
+  assert.equal(fs.existsSync(c.item.directory), true);
+  await h.service.purgeAccount(c.account);
+  assert.equal(c.child.exitCode, 0); assert.equal(fs.existsSync(c.item.directory), false);
+  assert.equal(h.service.accountSessions.size, 0);
+});
+
+test('native request timeout terminates only that account and discards its late Code before restoring the saved directory', async t => {
+  const h = harness(t, { codeTimeoutMs: 20 });
+  const a = await residentAccount(h, 1001, '1');
+  const b = await residentAccount(h, 1002, '2');
+  await assert.rejects(h.service.refreshAccountCode(a.account), { kind: 'timeout' });
+  assert.equal(a.child.exitCode, 0); assert.equal(b.child.exitCode, null);
+  a.child.event('code', { code: 'fixture_LATE_TIMEOUT_CODE' });
+  const pending = h.service.refreshAccountCode(a.account);
+  await new Promise(resolve => setImmediate(resolve));
+  const restored = h.children.at(-1);
+  assert.notEqual(restored, a.child);
+  assert.equal(restored.config.cwd, a.item.directory);
+  restored.event('session', { uin: a.account.uin });
+  restored.event('code', { code: 'fixture_NEW_AFTER_TIMEOUT' });
+  assert.equal(await pending, 'fixture_NEW_AFTER_TIMEOUT');
+  assert.equal(restored.exitCode, null); assert.equal(b.child.exitCode, null);
+});
+
+test('manual stop during native process replacement prevents retaining the late replacement', async t => {
+  const h = harness(t);
+  const a = await residentAccount(h, 1001, '1');
+  const scan = h.service.create(a.owner);
+  const replacement = h.service.owned(a.owner, scan.sessionId);
+  const child = h.children.at(-1);
+  child.event('session', { uin: a.account.uin });
+  child.event('code', { code: 'fixture_REPLACEMENT_CODE' });
+  fs.mkdirSync(path.join(replacement.directory, 'qq-data'), { recursive: true });
+  const profile = await h.service.saveProfile(replacement, 1001);
+  const exit = a.child.kill;
+  a.child.kill = () => {};
+  const pending = h.service.retainAccountSession(replacement, { ...a.account, qqLoginProfile: profile });
+  const rejected = assert.rejects(pending, { kind: 'cancelled' });
+  await h.service.stopAccount(a.account);
+  exit(); await rejected;
+  assert.equal(child.exitCode, 0);
+  assert.equal(h.service.accountSessions.size, 0);
+});
+
+test('stopping while a superseded request awaits proxy resolution cannot resurrect either queued native session', async t => {
+  let resolveProxy;
+  const h = await savedProfile(t, { resolveProxy: () => new Promise(resolve => { resolveProxy = resolve; }) });
+  const first = h.service.refreshAccountCode(h.account);
+  const rejectedFirst = assert.rejects(first, { kind: 'cancelled' });
+  await new Promise(resolve => setImmediate(resolve));
+  await h.service.stopAccount(h.account);
+  const second = h.service.refreshAccountCode(h.account);
+  const rejectedSecond = assert.rejects(second, { kind: 'cancelled' });
+  await h.service.stopAccount(h.account);
+  resolveProxy('');
+  await Promise.all([rejectedFirst, rejectedSecond]);
+  assert.equal(h.children.length, 1);
+  assert.equal(h.service.accountSessions.size, 0);
 });
