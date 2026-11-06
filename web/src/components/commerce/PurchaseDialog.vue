@@ -3,6 +3,7 @@ import type { MallGoodsDto } from '@/stores/commerce'
 import { NButton } from 'naive-ui/es/button'
 import { computed, ref, watch } from 'vue'
 import ModalOverlay from '@/components/ui/ModalOverlay.vue'
+import { clampPurchaseCount, purchaseMaxCount } from '@/utils/purchase-count'
 import CommerceItemImage from './CommerceItemImage.vue'
 
 const props = defineProps<{
@@ -18,18 +19,29 @@ const emit = defineEmits<{
 }>()
 
 const count = ref(1)
-const maxCount = computed(() => Math.max(1, Math.min(9999, props.goods?.limit?.remaining ?? 9999)))
+const maxCount = computed(() => !props.goods?.purchasable
+  ? 0
+  : purchaseMaxCount({
+      limitRemaining: props.goods.limit?.remaining,
+      costs: props.goods.isFree ? [] : [props.goods.price],
+    }))
 const totalCost = computed(() => (props.goods?.price.count || 0) * count.value)
-const balanceUnknown = computed(() => !props.goods?.isFree && props.goods?.price.balance == null)
+const balanceUnknown = computed(() => !props.goods?.isFree && (props.goods?.price.balance == null || !Number.isSafeInteger(props.goods.price.balance) || props.goods.price.balance < 0))
 const insufficient = computed(() => {
-  const balance = props.goods?.price.balance
-  return !props.goods?.isFree && balance !== null && balance !== undefined && totalCost.value > balance
+  const goods = props.goods
+  const balance = goods?.price.balance
+  return !!goods && !goods.isFree && balance !== null && balance !== undefined && (goods.price.count > balance || totalCost.value > balance)
 })
 
-watch(() => [props.open, props.goods?.id], () => count.value = 1)
+watch(() => [props.open, props.goods?.id], () => count.value = clampPurchaseCount(1, maxCount.value))
+watch(maxCount, () => setCount(count.value), { immediate: true })
 
 function setCount(value: number) {
-  count.value = Math.min(maxCount.value, Math.max(1, Math.floor(value) || 1))
+  count.value = clampPurchaseCount(value, maxCount.value)
+}
+function confirm() {
+  if (!props.pending && props.goods?.purchasable && !balanceUnknown.value && !insufficient.value && count.value >= 1 && count.value <= maxCount.value)
+    emit('confirm', count.value)
 }
 </script>
 
@@ -74,13 +86,13 @@ function setCount(value: number) {
         <div class="purchase-row">
           <div>
             <span class="purchase-row__label">购买数量</span>
-            <small v-if="goods.limit">{{ limitLabel || '限购' }} · 还可购买 {{ maxCount }} 份</small>
+            <small>最多 {{ maxCount }} 份<span v-if="goods.limit"> · {{ limitLabel || '限购' }}</span></small>
           </div>
           <div class="stepper">
             <button type="button" title="减少" aria-label="减少" :disabled="pending || count <= 1" @click="setCount(count - 1)">
               <span class="i-carbon-subtract" />
             </button>
-            <input :value="count" inputmode="numeric" aria-label="购买数量" :disabled="pending" @input="setCount(Number(($event.target as HTMLInputElement).value))">
+            <input :value="count" inputmode="numeric" aria-label="购买数量" :disabled="pending || maxCount === 0" @input="setCount(Number(($event.target as HTMLInputElement).value))">
             <button type="button" title="增加" aria-label="增加" :disabled="pending || count >= maxCount" @click="setCount(count + 1)">
               <span class="i-carbon-add" />
             </button>
@@ -111,7 +123,7 @@ function setCount(value: number) {
         <NButton :disabled="pending" @click="emit('close')">
           取消
         </NButton>
-        <NButton type="primary" :loading="pending" :disabled="pending || insufficient || balanceUnknown || !goods.purchasable" @click="emit('confirm', count)">
+        <NButton type="primary" :loading="pending" :disabled="pending || insufficient || balanceUnknown || !goods.purchasable || maxCount === 0" @click="confirm">
           {{ pending ? '购买中' : goods.isFree ? '确认领取' : '确认购买' }}
         </NButton>
       </footer>

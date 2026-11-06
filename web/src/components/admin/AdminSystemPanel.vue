@@ -228,14 +228,14 @@ function handleLogoFileChange(event: Event) {
             v-model="localSystemConfig.clientVersion"
             label="QQ 客户端版本"
             type="text"
-            placeholder="1.16.1.6_20261028"
+            placeholder="1.16.3.8_20261028"
             class="col-span-2"
           />
           <BaseInput
             v-model="localSystemConfig.wxClientVersion"
             label="微信客户端版本"
             type="text"
-            placeholder="1.16.1.6_20261028"
+            placeholder="1.16.3.8_20261028"
             class="col-span-2"
           />
           <div class="flex flex-col gap-1.5">

@@ -3,6 +3,8 @@ import { computed } from 'vue'
 import CollectionsPanel from '../../src/components/CollectionsPanel.vue'
 import MallCatalogPanel from '../../src/components/commerce/MallCatalogPanel.vue'
 import MutationCatalogPanel from '../../src/components/MutationCatalogPanel.vue'
+import ShareRewardActivity from '../../src/components/activity/ShareRewardActivity.vue'
+import '../../src/styles/activities.css'
 import { useAccountStore } from '../../src/stores/account'
 import { useStatusStore } from '../../src/stores/status'
 import { useUserStore } from '../../src/stores/user'
@@ -30,6 +32,7 @@ function switchAccount() {
     </button>
     <MallCatalogPanel v-if="page === 'mall' || page === 'props'" :slot-type="1" :props-shop="propsShop" />
     <MutationCatalogPanel v-else-if="page === 'catalog'" />
+    <ShareRewardActivity v-else-if="page === 'share'" activity-id="2026110104" />
     <CollectionsPanel v-else />
   </main>
 </template>

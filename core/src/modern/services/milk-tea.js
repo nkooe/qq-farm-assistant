@@ -91,10 +91,16 @@ function checkCost(costs, expected, balances, count = 1) {
     const signature = (list) => (list || []).map(v => `${toNum(v.id)}:${toNum(v.count)}`).sort().join('|');
     if (!Array.isArray(expected) || signature(costs) !== signature(expected))
         fail('费用已变化，请刷新后重新确认');
+    const totals = new Map();
     for (const cost of costs) {
-        if (toNum(cost.count) < 0 || !Number.isSafeInteger(toNum(cost.count) * count))
+        const id = String(cost.id);
+        const total = (totals.get(id) || 0) + toNum(cost.count) * count;
+        if (toNum(cost.count) < 0 || !Number.isSafeInteger(total))
             fail('费用无效');
-        if ((balances[String(cost.id)] || 0) < toNum(cost.count) * count)
+        totals.set(id, total);
+    }
+    for (const [id, total] of totals) {
+        if ((balances[id] || 0) < total)
             fail('货币或道具数量不足');
     }
 }
@@ -110,6 +116,7 @@ function normalizeRecipes(reply) {
 }
 function normalizeShop(value) {
     const result = plain(types.MilkTeaOperateReply, { milk_tea_get_shop: { shop: value } }).milk_tea_get_shop.shop;
+    result.slots ??= [];
     for (const key of ['drink_cups', 'pending_cups_by_recipe', 'pending_cups_by_source', 'boost_coin_price'])
         result[key] = cupMap(value[key]);
     result.pending_rewards = items(value.pending_rewards);

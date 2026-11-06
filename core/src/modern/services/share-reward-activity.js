@@ -1,6 +1,6 @@
 // Adapted from qq-farm-bot-master (ISC); see docs/activity-features.md.
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
+const __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -28,7 +28,8 @@ function instanceFor(activityId) {
 }
 function reward(item) {
     const id = toNum(item.id);
-    return { id, count: toNum(item.count), name: getItemById(id)?.name || `物品 #${id}`, image: getItemImageById(id) };
+    const info = getItemById(id);
+    return { id, count: toNum(item.count), name: info?.name || `物品 #${id}`, image: getItemImageById(id), description: info?.desc || '' };
 }
 function findEntry(entry, id) {
     if (String(entry?.activity?.activity_id) === id)

@@ -62,6 +62,17 @@ function harness(options = {}) {
     return { service: require(id), calls, reads, bag, shop, fund, goods, work, summary: milk.milk_tea.summary, setTime: v => now = v, failRefresh: () => failRefresh = true };
 }
 
+test('shop and hiring normalize omitted protobuf employee lists to an empty array', async () => {
+    const h = harness();
+    delete h.shop.slots;
+    for (const page of ['shop', 'hireList']) {
+        const state = await h.service.getMilkTeaActivity(page);
+        assert.deepEqual(state.shop.slots, []);
+        if (page === 'hireList') assert.equal(state.hire.robots.length, 1);
+    }
+    assert.equal(h.calls.length, 0);
+});
+
 test('background cycle manages crafting, boosts, fund unlock and exchange without switches', async () => {
     const h = harness();
     h.work.slips = [{ wage_status: 1 }, { wage_status: 0 }];
@@ -181,6 +192,13 @@ test('fund unlock is serialized and claims require paid unlock without duplicate
     const result = await h.service.operateMilkTeaActivity('fundClaim');
     assert.equal(result.rewards[0].count, 288);
     await assert.rejects(h.service.operateMilkTeaActivity('fundClaim'), /暂无/);
+});
+
+test('manual exchanges aggregate repeated currencies before checking the balance', async () => {
+    const h = harness();
+    h.goods.cost = [{ id: 1001, count: 60000 }, { id: 1001, count: 60000 }];
+    await assert.rejects(h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: h.goods.cost }), /数量不足/);
+    assert.equal(h.calls.length, 0);
 });
 test('hire partial failures are not reported as success and signed work links stay private', async () => {
     const h = harness();

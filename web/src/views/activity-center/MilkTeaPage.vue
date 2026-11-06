@@ -1,13 +1,14 @@
 <script setup lang="ts">
+import { NButton } from 'naive-ui/es/button'
+import { NTab, NTabs } from 'naive-ui/es/tabs'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import api from '@/api'
-import ActivityHeader from '@/components/activity/ActivityHeader.vue'
-import ActivityShell from '@/components/activity/ActivityShell.vue'
 import CommerceItemImage from '@/components/commerce/CommerceItemImage.vue'
 import ModalOverlay from '@/components/ui/ModalOverlay.vue'
 import { useAccountStore } from '@/stores/account'
 import { useToastStore } from '@/stores/toast'
+import { clampPurchaseCount, purchaseMaxCount } from '@/utils/purchase-count'
 import MilkTeaAutomation from './MilkTeaAutomation.vue'
 import MilkTeaContent from './MilkTeaContent.vue'
 
@@ -41,7 +42,31 @@ const periodText = computed(() => {
   const date = (value: number) => new Date(value * 1000).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric', timeZone: 'Asia/Shanghai' })
   return `${date(mainState.value.startTime)} — ${date(mainState.value.endTime)}`
 })
-const insufficient = computed(() => (dialog.value?.costs || []).some((item: any) => Number(item.count) * count.value > Number(activeState.value?.balances?.[item.id] || 0)))
+const daysLeft = computed(() => {
+  if (!mainState.value?.active || mainState.value.settling || !mainState.value.endTime)
+    return ''
+  const left = Math.ceil((mainState.value.endTime * 1000 - Date.now()) / 86400000)
+  return left <= 0 ? '今天结束' : `还剩 ${left} 天`
+})
+const maxCount = computed(() => {
+  const value = dialog.value
+  if (!value)
+    return 0
+  const goods = value.action === 'exchange' ? activeState.value?.goods?.find((item: any) => item.id === value.input.goodsId) : null
+  if (value.action === 'exchange' && (!goods?.available || !activeState.value?.active))
+    return 0
+  return purchaseMaxCount({
+    cap: value.quantity ? value.max : 1,
+    limitRemaining: goods?.remaining,
+    costs: (value.costs || []).map((cost: any) => ({
+      id: cost.uid ? `fruit:${cost.uid}` : cost.id,
+      count: Number(cost.count),
+      balance: cost.uid ? activeState.value?.fruits?.find((fruit: any) => fruit.uid === cost.uid && !fruit.locked)?.count : activeState.value?.balances?.[cost.id],
+    })),
+  })
+})
+const insufficient = computed(() => !!dialog.value && maxCount.value < 1)
+watch(maxCount, () => setCount(count.value))
 const boostEstimate = computed(() => {
   const shop = activeState.value?.shop
   if (!shop || dialog.value?.action !== 'boost')
@@ -71,11 +96,11 @@ function rewardsText(values: any[]) {
   return (values || []).map(v => `${v.name} ×${v.count}`).join('、')
 }
 function select(value: any) {
-  count.value = 1
   dialog.value = value
+  setCount(1)
 }
 function setCount(value: number) {
-  count.value = Math.max(1, Math.min(dialog.value?.max || 1, Math.floor(Number(value)) || 1))
+  count.value = clampPurchaseCount(value, maxCount.value)
 }
 async function request(action = '', input: any = {}) {
   const account = String(currentAccountId.value || '')
@@ -150,7 +175,7 @@ function reload(input: any = {}) {
   void request()
 }
 function confirm() {
-  if (!dialog.value || busy.value || insufficient.value)
+  if (!dialog.value || busy.value || insufficient.value || count.value < 1 || count.value > maxCount.value)
     return
   void request(dialog.value.action, { ...dialog.value.input, count: count.value, expectedCosts: dialog.value.costs })
 }
@@ -192,21 +217,44 @@ onUnmounted(() => sequence++)
 </script>
 
 <template>
-  <ActivityShell class="milk-shell" theme="day">
+  <div class="milk-shell">
     <div class="tea-page" :inert="!!(panel || dialog)">
-      <ActivityHeader title="奶茶热销中" :remaining="periodText" :loading="busy" show-refresh @back="$emit('back')" @refresh="request()" />
-      <div class="tea-toolbar">
-        <nav class="tea-tabs" aria-label="奶茶活动页面">
-          <button v-for="[key, label] in tabs" :key="key" :disabled="busy" :class="{ selected: mainPage === key }" @click="navigate(key)">
-            {{ label }}
-          </button>
-        </nav>
-        <div v-if="mainWallet.length" class="tea-wallet" aria-label="活动道具余额">
-          <span v-for="item in mainWallet" :key="item.id" class="tea-wallet__chip" :title="item.name">
-            <img :src="item.image" alt=""><span>{{ item.name }}</span><b>{{ item.count.toLocaleString() }}</b>
-          </span>
+      <header class="tea-head">
+        <div class="tea-head__lead">
+          <NButton secondary circle title="返回活动列表" aria-label="返回活动列表" @click="$emit('back')">
+            <template #icon>
+              <span class="i-carbon-arrow-left" />
+            </template>
+          </NButton>
+          <div class="tea-head__title">
+            <h2>奶茶热销中</h2>
+            <p v-if="mainState">
+              <span class="i-carbon-calendar" aria-hidden="true" />{{ periodText }}
+              <span v-if="daysLeft" class="tea-head__badge">{{ daysLeft }}</span>
+              <span v-else-if="!mainState.active" class="tea-head__badge is-ended">已结束</span>
+            </p>
+          </div>
         </div>
+        <NButton secondary circle :loading="busy" title="刷新活动数据" aria-label="刷新活动数据" @click="request()">
+          <template #icon>
+            <span class="i-carbon-renew" />
+          </template>
+        </NButton>
+      </header>
+
+      <div class="tea-toolbar">
+        <NTabs :value="mainPage" type="segment" class="tea-toolbar__tabs" aria-label="奶茶活动页面" @update:value="navigate">
+          <NTab v-for="[key, label] in tabs" :key="key" :name="key" :disabled="busy">
+            {{ label }}
+          </NTab>
+        </NTabs>
+        <ul v-if="mainWallet.length" class="tea-wallet" aria-label="活动道具余额">
+          <li v-for="item in mainWallet" :key="item.id" :title="item.name">
+            <img :src="item.image" :alt="item.name"><b>{{ item.count.toLocaleString() }}</b>
+          </li>
+        </ul>
       </div>
+
       <main class="tea-scroll">
         <div class="tea-body">
           <MilkTeaAutomation :snapshot="mainState?.automation" />
@@ -261,9 +309,9 @@ onUnmounted(() => sequence++)
             <div v-if="dialog.quantity" class="quantity">
               <button :disabled="busy || count <= 1" @click="setCount(count - 1)">
                 −
-              </button><input :value="count" aria-label="数量" inputmode="numeric" :disabled="busy" @input="setCount(Number(($event.target as HTMLInputElement).value))"><button :disabled="busy || count >= (dialog.max || 1)" @click="setCount(count + 1)">
+              </button><input :value="count" aria-label="数量" inputmode="numeric" :disabled="busy || maxCount === 0" @input="setCount(Number(($event.target as HTMLInputElement).value))"><button :disabled="busy || count >= maxCount" @click="setCount(count + 1)">
                 +
-              </button><button :disabled="busy" @click="setCount(dialog.max || 1)">
+              </button><button :disabled="busy || maxCount === 0" @click="setCount(maxCount)">
                 最大
               </button>
             </div>
@@ -289,154 +337,265 @@ onUnmounted(() => sequence++)
         </section>
       </template>
     </ModalOverlay>
-  </ActivityShell>
+  </div>
 </template>
 
 <style scoped>
-.activity-shell.milk-shell {
-  flex: none;
-  height: auto;
-  min-height: 0;
+.tea-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px 16px;
+  padding: 14px 4px 12px;
+  border-bottom: 1px solid var(--ui-border);
 }
-.milk-shell :deep(.activity-shell__frame) {
-  height: auto;
-}
-.tea-page {
-  --wood: #9a6438;
-  --wood-dark: #5e3a1f;
-  --paper: #fbf3e2;
-  --paper-hi: #fffaf0;
-  --ink: #4b301b;
-  --muted: #7d5c40;
+
+.tea-head__lead {
   display: flex;
-  flex-direction: column;
-  height: auto;
-  min-height: 0;
-  color: var(--ink);
-  background: #f7f3ec;
-  container-type: inline-size;
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
 }
-.tea-page :deep(.activity-header) {
-  position: relative;
-  inset: auto;
-  flex-shrink: 0;
-}
+
 .tea-toolbar {
   display: flex;
-  flex-shrink: 0;
-  flex-direction: column;
-  gap: 10px;
-  width: min(684px, calc(100% - 36px));
-  margin: 14px auto 4px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 16px;
 }
-.tea-tabs {
-  display: flex;
-  gap: 6px;
-  padding: 5px;
-  border: 3px solid var(--wood);
-  border-radius: 16px;
-  background: #e7d0aa;
-  box-shadow: inset 0 2px 0 rgba(94, 58, 31, 0.15);
+
+.tea-toolbar__tabs {
+  width: 360px;
 }
-.tea-tabs button {
+
+.tea-head__title {
+  min-width: 0;
   flex: 1;
-  min-height: 40px;
-  border: 0;
-  border-radius: 11px;
-  color: var(--muted);
-  background: transparent;
-  font-weight: 800;
 }
-.tea-tabs button.selected {
-  border: 2px solid var(--wood-dark);
-  color: #5a3214;
-  background: linear-gradient(180deg, #ffe58e, #ffc847);
-  box-shadow:
-    inset 0 2px 0 rgba(255, 255, 255, 0.6),
-    0 2px 0 var(--wood-dark);
+
+.tea-head__title h2 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ui-ink);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.tea-tabs button:disabled:not(.selected) {
-  opacity: 0.55;
-  cursor: wait;
+
+.tea-head__title p {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 3px 0 0;
+  color: var(--ui-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
 }
+
+.tea-head__badge {
+  padding: 0 7px;
+  border-radius: 999px;
+  color: var(--ui-warning);
+  background: var(--ui-warning-soft);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.tea-head__badge.is-ended {
+  color: var(--ui-muted);
+  background: var(--ui-surface-soft);
+}
+
 .tea-wallet {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
   gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
-.tea-wallet__chip {
+
+.tea-wallet li {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 14px 2px 3px;
-  border: 2px solid rgba(94, 58, 31, 0.18);
+  padding: 2px 12px 2px 3px;
+  border: 1px solid var(--ui-border);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.85);
-  font-size: 14px;
+  background: var(--ui-surface);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
-.tea-wallet__chip img {
-  width: 26px;
-  height: 26px;
+
+.tea-wallet img {
+  width: 24px;
+  height: 24px;
   object-fit: contain;
 }
-.tea-wallet__chip > span {
-  font-size: 12px;
-  font-weight: 500;
+
+.tea-wallet b {
+  color: var(--ui-ink);
+  font-weight: 600;
 }
-/* PC 宽屏：页签和余额并排，与下方内容同宽 */
-@container (min-width: 960px) {
-  .tea-toolbar {
-    width: min(1240px, calc(100% - 48px));
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-  }
-  .tea-tabs {
-    width: 460px;
-    flex: none;
-  }
+
+.tea-wallet--compact {
+  gap: 6px;
+}
+
+.tea-wallet--compact li {
+  padding-right: 10px;
+  font-size: 12px;
+}
+
+.tea-wallet--compact img {
+  width: 20px;
+  height: 20px;
+}
+
+.milk-shell,
+.tea-page {
+  min-width: 0;
+}
+.tea-page {
+  display: flex;
+  flex-direction: column;
+  container: tea-page / inline-size;
+  color: var(--ui-ink);
 }
 .tea-scroll {
-  padding: 16px 18px 32px;
+  padding: 16px 0 32px;
 }
 .tea-body {
   display: grid;
-  gap: 20px;
-  max-width: 684px;
   min-width: 0;
-  margin: 0 auto;
+  gap: 20px;
 }
 .tea-body > :deep(.tea-automation) {
-  width: auto;
   margin: 0;
 }
 .tea-body > :deep(.tea-content) {
   width: 100%;
-  max-width: none;
   padding: 0;
 }
-@container (min-width: 960px) {
-  .tea-scroll {
-    padding-inline: 24px;
-  }
-  .tea-body {
-    max-width: 1240px;
-  }
-  .tea-tabs {
-    border: 1px solid #dfd3c3;
-    border-radius: 12px;
-    background: #eee7dc;
-    box-shadow: none;
-  }
-  .tea-tabs button.selected {
-    border: 0;
-    color: #fff;
-    background: #78543a;
-    box-shadow: 0 2px 5px #4b301b14;
-  }
+.tea-wallet li {
+  list-style: none;
+}
+.tea-detail,
+.tea-dialog {
+  display: flex;
+  position: relative;
+  flex-direction: column;
+  width: min(640px, 100%);
+  max-height: min(88dvh, 960px);
+  overflow: hidden;
+  border: 1px solid var(--ui-border);
+  border-radius: 18px;
+  background: var(--ui-surface);
+  color: var(--ui-ink);
+  box-shadow: 0 20px 60px #0004;
+}
+.tea-detail--wide {
+  width: min(960px, 100%);
+}
+.tea-detail > header,
+.tea-dialog > header {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  padding: 18px 54px 16px 20px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.tea-detail h2,
+.tea-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+}
+.tea-wallet--dialog {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+.tea-wallet__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+}
+.tea-wallet__chip img {
+  width: 22px;
+  height: 22px;
+  object-fit: contain;
+}
+.close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--ui-surface-soft);
+  color: var(--ui-muted);
+}
+.close span {
+  width: 20px;
+  height: 20px;
+}
+.detail-scroll {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 16px 20px 20px;
+  overflow: hidden;
+}
+.detail-scroll > :deep(.tea-content) {
+  min-height: 0;
+}
+.tea-dialog {
+  width: min(440px, 100%);
+}
+.confirmation-body {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 16px 20px;
+}
+.confirmation-body > p {
+  margin: 0 0 12px;
+}
+.tea-dialog footer {
+  display: flex;
+  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 20px;
+  border-top: 1px solid var(--ui-border);
+}
+.tea-dialog footer button,
+.quantity button,
+.empty button {
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--ui-border);
+  border-radius: 10px;
+  color: var(--ui-ink);
+  background: var(--ui-surface-soft);
+}
+.tea-dialog footer button.primary {
+  background: var(--ui-primary);
+  color: #fff;
+  border-color: var(--ui-primary);
 }
 button,
 input {
@@ -445,304 +604,91 @@ input {
 button {
   cursor: pointer;
 }
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--ui-primary);
+  outline-offset: 2px;
+}
 .empty {
   display: grid;
   place-items: center;
   gap: 16px;
-  padding: 60px 20px;
-  color: var(--muted);
-  font-size: 15px;
-}
-.empty button,
-.tea-dialog footer button,
-.quantity button {
-  min-height: 40px;
-  padding: 0 18px;
-  border: 2px solid var(--wood-dark);
-  border-radius: 12px;
-  color: var(--ink);
-  background: linear-gradient(180deg, var(--paper-hi), #f1e1c2);
-  box-shadow: 0 3px 0 var(--wood-dark);
-  font-weight: 800;
-}
-button.primary {
-  color: #5a3214;
-  background: linear-gradient(180deg, #ffe58e, #ffc847);
-  box-shadow:
-    inset 0 2px 0 rgba(255, 255, 255, 0.6),
-    0 3px 0 var(--wood-dark);
-}
-.tea-dialog footer button:disabled,
-.quantity button:disabled {
-  border-color: #8a8178;
-  color: #776e64;
-  background: linear-gradient(180deg, #ded8ce, #c4bcb1);
-  box-shadow: 0 3px 0 #8a8178;
-  cursor: not-allowed;
-}
-button:focus-visible,
-input:focus-visible {
-  outline: 3px solid #f0a33a;
-  outline-offset: 2px;
-}
-
-/* 弹窗：羊皮纸 + 红色书签关闭 */
-.tea-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 1000;
-  display: grid;
-  place-items: center;
-  padding: 18px;
-  color: #4b301b;
-  background: rgba(40, 24, 12, 0.55);
-}
-.confirmation {
-  z-index: 1010;
-}
-.tea-detail,
-.tea-dialog {
-  --wood: #9a6438;
-  --wood-dark: #5e3a1f;
-  --paper: #fbf3e2;
-  --paper-hi: #fffaf0;
-  --ink: #4b301b;
-  --muted: #7d5c40;
-  color: var(--ink);
-  position: relative;
-  width: min(640px, 100%);
-  max-height: min(88dvh, 1000px);
-  border: 5px solid #8a5a35;
-  border-radius: 22px;
-  background: var(--paper);
-  box-shadow:
-    inset 0 0 0 3px #f3ddb0,
-    0 6px 0 var(--wood-dark),
-    0 24px 60px rgba(30, 15, 5, 0.45);
-}
-.tea-detail {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  container-type: inline-size;
-}
-.tea-detail--wide {
-  width: min(920px, 100%);
-}
-.detail-scroll {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-.detail-scroll > .empty {
-  min-height: 0;
-  overflow: auto;
-}
-.tea-detail > header,
-.tea-dialog > header {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-  padding: 18px 64px 6px;
-}
-.tea-detail > header {
-  flex-direction: column;
-  gap: 8px;
-}
-.tea-wallet--dialog {
-  justify-content: center;
-  gap: 6px;
-}
-.tea-wallet--dialog .tea-wallet__chip {
-  padding-right: 11px;
-  font-size: 13px;
-}
-.tea-wallet--dialog img {
-  width: 22px;
-  height: 22px;
-}
-/* 宽弹窗：余额放到标题左侧同一行，列表多出一行可视高度 */
-@container (min-width: 700px) {
-  .tea-detail > header {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-    align-items: center;
-    padding: 18px 24px 6px;
-  }
-  .tea-detail > header > h2 {
-    grid-row: 1;
-    grid-column: 2;
-  }
-  .tea-wallet--dialog {
-    grid-row: 1;
-    grid-column: 1;
-    justify-content: flex-start;
-  }
-}
-h2 {
-  min-width: 0;
-  max-width: 100%;
-  margin: 0;
-  padding: 4px 28px;
-  border-radius: 8px;
-  background: rgba(214, 190, 150, 0.55);
-  font-size: 20px;
-  font-weight: 900;
-  text-align: center;
-  overflow-wrap: anywhere;
-  text-wrap: balance;
-}
-.close {
-  position: absolute;
-  top: -6px;
-  right: 18px;
-  width: 46px;
-  height: 56px;
-  display: grid;
-  place-items: center;
-  padding: 0 0 8px;
-  border: 0;
-  border-radius: 4px 4px 0 0;
-  color: #fff;
-  background: linear-gradient(180deg, #e2645a, #c8443b);
-  box-shadow: 0 3px 0 rgba(90, 20, 15, 0.45);
-  clip-path: polygon(0 0, 100% 0, 100% 100%, 50% 84%, 0 100%);
-}
-.close span {
-  width: 26px;
-  height: 26px;
-}
-.close:disabled {
-  filter: grayscale(0.7);
-  cursor: not-allowed;
-}
-.tea-dialog {
-  display: flex;
-  flex-direction: column;
-  width: min(440px, 100%);
-  padding: 0 22px 22px;
-  overflow: hidden;
-}
-.tea-dialog > header {
-  margin-inline: -22px;
-  padding: 18px 64px 10px;
-}
-.confirmation-body {
-  min-height: 0;
-  overflow: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: thin;
-}
-.tea-dialog footer {
-  display: flex;
-  flex-shrink: 0;
-  justify-content: center;
-  gap: 14px;
-  margin-top: 20px;
-}
-.tea-dialog footer button {
-  min-width: 120px;
-  min-height: 46px;
-  font-size: 16px;
-}
-.confirmation-body > p {
-  margin: 10px 0;
-  text-align: center;
-  font-weight: 700;
+  padding: 48px 16px;
+  color: var(--ui-muted);
 }
 .quantity {
   display: flex;
   gap: 8px;
-  margin: 14px 0;
+  margin: 12px 0;
 }
 .quantity button {
   flex-shrink: 0;
-  padding: 0 14px;
-  white-space: nowrap;
+  padding: 0 12px;
 }
 .quantity input {
-  flex: 1;
   width: 0;
   min-width: 0;
-  border: 2px solid #c9a97c;
+  flex: 1;
+  border: 1px solid var(--ui-border);
   border-radius: 10px;
-  color: inherit;
-  background: var(--paper-hi);
+  background: var(--ui-surface-soft);
+  color: var(--ui-ink);
   text-align: center;
-  font-weight: 800;
 }
 .row {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 4px;
-  border-bottom: 1.5px dashed rgba(94, 58, 31, 0.25);
-  font-size: 15px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
 }
 .reward-list {
   display: flex;
   flex-wrap: wrap;
-  justify-content: center;
   gap: 8px;
-  margin: 12px 0;
 }
 .reward-list > span {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 3px 12px 3px 3px;
-  border: 2px solid #e6cfa6;
-  border-radius: 12px;
-  background: var(--paper-hi);
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 10px;
+  background: var(--ui-surface-soft);
   font-size: 13px;
-  font-weight: 700;
 }
 .estimate {
   display: grid;
   gap: 6px;
-  margin: 14px 0;
-  padding: 12px 14px;
-  border: 2px dashed rgba(94, 58, 31, 0.3);
+  margin: 12px 0;
+  padding: 12px;
+  background: var(--ui-primary-soft);
   border-radius: 12px;
-  font-size: 14px;
+  font-size: 13px;
 }
 .error {
-  margin-top: 12px;
-  color: #be4141;
-  font-weight: 700;
-  text-align: center;
+  color: var(--ui-danger);
 }
 @media (max-width: 600px) {
-  .tea-toolbar {
-    width: calc(100% - 20px);
-    margin-top: 10px;
-    gap: 8px;
+  .tea-toolbar__tabs {
+    width: 100%;
   }
-  .tea-tabs button {
-    font-size: 14px;
+  .tea-wallet {
+    justify-content: flex-start;
   }
-  .tea-mask {
-    padding: 12px;
+  .tea-wallet--dialog {
+    margin-left: 0;
   }
   .tea-detail > header {
-    padding: 16px 58px 4px;
+    flex-direction: column;
+    align-items: flex-start;
   }
-  h2 {
-    padding: 3px 12px;
-    font-size: 18px;
-  }
-  .tea-dialog {
-    padding: 0 16px 18px;
-  }
-  .tea-dialog > header {
-    margin-inline: -16px;
-    padding: 16px 64px 10px;
-  }
-  .tea-dialog footer button {
-    min-width: 0;
-    flex: 1;
+  .detail-scroll {
+    padding: 12px;
   }
 }
 </style>

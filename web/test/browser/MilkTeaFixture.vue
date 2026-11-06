@@ -18,6 +18,7 @@ const snapshot = computed(() => account.currentAccountId === '2' ? { status: 'pa
     <section class="activities-root">
       <header class="fixture-heading">
         <h1>活动与节令</h1><p>活动开放时间和奖励进度以当前账号为准</p>
+        <button data-testid="switch" @click="account.currentAccountId = account.currentAccountId === '1' ? '2' : '1'">切换账号</button>
       </header>
       <nav class="activity-tabs">
         <button>活动大厅</button><button>节令日历</button>
