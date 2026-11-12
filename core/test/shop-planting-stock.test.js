@@ -67,6 +67,7 @@ async function setup(t, options = {}) {
       cost_items: [{ id: 1001, count: count * price }] };
   });
   t.mock.method(store, 'getPlantingStrategy', () => 'level');
+  t.mock.method(store, 'getPlantDelaySeconds', () => options.delay ?? 0);
   t.mock.method(store, 'getPreferredSeed', () => options.preferred ?? SEED);
   t.mock.method(analytics, 'getPlantRankings', () => options.rankings ?? []);
   const target = require.resolve('../src/services/planting-service');
@@ -75,6 +76,36 @@ async function setup(t, options = {}) {
   const planting = require(target);
   return { ...planting, state, purchases, planted, events, warnings };
 }
+
+test('automatic pacing yields after one planting without shopping or reporting a false rejection', async t => {
+  const env = await setup(t, { delay: 5, bag: [{ seedId: SEED, count: 5 }] });
+  const pacing = { lastPlantAt: null, defer: true };
+  const result = await env.plantFromShop([1, 2, 3], env.state, 'level', env.state.accountId, pacing);
+  assert.equal(result.plantedCount, 1);
+  assert.equal(result.blockedReason, undefined);
+  assert.equal(pacing.deferred, true);
+  assert.ok(env.getRemainingPlantDelayMs(pacing) > 4000);
+  assert.equal(env.purchases.length, 0);
+  pacing.deferred = false;
+  await env.plantFromShop([2, 3], env.state, 'level', env.state.accountId, pacing);
+  assert.equal(env.planted.length, 1, 'not due yet: no second Plant');
+  assert.equal(env.purchases.length, 0);
+  pacing.lastPlantAt -= 5001;
+  pacing.deferred = false;
+  const next = await env.plantFromShop([2, 3], env.state, 'level', env.state.accountId, pacing);
+  assert.equal(next.plantedCount, 1);
+  assert.equal(env.planted[1].landId, 2);
+});
+
+test('zero delay supports a complete batch and cancelled pacing prevents further purchases', async t => {
+  const env = await setup(t, { delay: 0 });
+  const pacing = { lastPlantAt: null, defer: true };
+  const result = await env.plantFromShop([1, 2, 3], env.state, 'level', env.state.accountId, pacing);
+  assert.equal(result.plantedCount, 3);
+  const count = env.purchases.length;
+  await env.plantFromShop([4], env.state, 'level', env.state.accountId, { lastPlantAt: null, defer: true, canContinue: () => false });
+  assert.equal(env.purchases.length, count);
+});
 
 test('库存足够、零金币：不购买，同种库存直接种植', async (t) => {
   const env = await setup(t, { gold: 0, bag: [{ seedId: SEED, count: 5 }] });

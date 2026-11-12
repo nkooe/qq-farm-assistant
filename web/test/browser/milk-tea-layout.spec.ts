@@ -51,3 +51,17 @@ test('long detail lists scroll to their last entry and close normally', async ({
   await dialog.getByRole('button', { name: '关闭', exact: true }).click()
   await expect(dialog).not.toBeVisible()
 })
+
+test('leaving an open detail panel and returning renders the shop again', async ({ page }) => {
+  await page.getByRole('button', { name: '店铺升级', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: '店铺升级', exact: true }).last()).toBeVisible()
+  // Trigger the fixture route change while the detail overlay is still mounted.
+  await page.getByTestId('toggle-page').evaluate((el: HTMLButtonElement) => el.click())
+  await expect(page.locator('.tea-page')).toHaveCount(0)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.getByTestId('toggle-page').click()
+  await expect(page.getByRole('heading', { name: '海风奶茶小铺' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '制作奶茶', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '店铺升级', exact: true }).click()
+  await expect(page.getByRole('dialog', { name: '店铺升级', exact: true }).last()).toBeVisible()
+})

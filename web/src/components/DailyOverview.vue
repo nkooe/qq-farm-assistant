@@ -22,11 +22,17 @@ const gifts = computed(() => props.dailyGifts?.gifts || [])
 function formatTime(timestamp: number) {
   if (!timestamp) return '未领取'
   const d = new Date(timestamp)
+  if (props.dailyGifts?.timeZone)
+    return new Intl.DateTimeFormat('zh-CN', { timeZone: props.dailyGifts.timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).format(d)
   return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
 }
 
 function getGiftStatusText(gift: any) {
   if (!gift) return '未知'
+  if (gift.result === 'running') return '检查中'
+  if (gift.result === 'error') return '检查失败'
+  if (gift.result === 'partial') return '部分失败'
+  if (gift.key === 'email_rewards' && gift.result === 'none') return '暂无奖励'
   if (gift.key === 'vip_daily_gift' && gift.hasGift === false) return '未开通'
   if (gift.key === 'month_card_gift' && gift.hasCard === false) return '未开通'
   if (gift.doneToday) return '今日已完成'
@@ -36,6 +42,10 @@ function getGiftStatusText(gift: any) {
 
 function formatGiftSubText(gift: any) {
   if (!gift) return ''
+  if (gift.key === 'email_rewards') {
+    if (gift.result === 'error' || gift.result === 'partial') return '明日再检查'
+    if (!gift.doneToday) return `每天 ${String(gift.scheduledHour ?? 10).padStart(2, '0')}:00`
+  }
   if (gift.key === 'vip_daily_gift' && gift.hasGift === false) return '未开通QQ会员或无每日礼包'
   if (gift.key === 'month_card_gift' && gift.hasCard === false) return '未购买月卡或已过期'
   const ts = Number(gift.lastAt || 0)
@@ -72,14 +82,14 @@ function formatGiftProgress(gift: any) {
         v-for="gift in gifts"
         :key="gift.key"
         class="daily-item"
-        :class="{ 'item-done': gift.doneToday, 'item-waiting': !gift.doneToday && gift.enabled, 'item-off': !gift.doneToday && !gift.enabled }"
+        :class="{ 'item-error': gift.result === 'error' || gift.result === 'partial', 'item-done': gift.doneToday && !['error', 'partial'].includes(gift.result), 'item-waiting': !gift.doneToday && gift.enabled, 'item-off': !gift.doneToday && !gift.enabled }"
       >
         <div class="item-icon-wrap">
           <div class="item-icon" :class="[getGiftIcon(gift.key)]" />
         </div>
         <div class="item-body">
           <span class="item-label">{{ gift.label }}</span>
-          <span class="item-status" :class="gift.doneToday ? 'status-done' : (gift.enabled ? 'status-wait' : 'status-off')">
+          <span class="item-status" :class="['error', 'partial'].includes(gift.result) ? 'status-error' : gift.doneToday ? 'status-done' : (gift.enabled ? 'status-wait' : 'status-off')">
             {{ getGiftStatusText(gift) }}
           </span>
         </div>
@@ -172,6 +182,8 @@ function formatGiftProgress(gift: any) {
 
 .item-label { font-size: 13px; font-weight: 600; }
 .item-status { font-size: 11px; }
+.status-error { color: var(--ui-danger, #dc2626); }
+.item-error { border-color: color-mix(in srgb, #dc2626 25%, transparent); }
 .status-done { color: var(--theme-primary); }
 .status-wait { color: #3b82f6; }
 .status-off { color: var(--theme-text-secondary); opacity: 0.6; }

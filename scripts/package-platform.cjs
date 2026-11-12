@@ -3,6 +3,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const { copyProductionDependencies } = require('./copy-production-deps.cjs');
+const { isReleaseSourceAllowed } = require('./release-copy-filter.cjs');
 const root = path.resolve(__dirname, '..');
 const target = process.argv[2];
 if (!['win32-x64', 'linux-docker'].includes(target)) throw new Error('Target must be win32-x64 or linux-docker');
@@ -16,8 +17,7 @@ const copy = (relative, destination = relative, options = {}) => {
   if (!fs.existsSync(source)) { if (options.required !== false) throw new Error('Missing release input: ' + relative); return; }
   fs.mkdirSync(path.dirname(path.join(staging, destination)), { recursive: true });
   fs.cpSync(source, path.join(staging, destination), { recursive: true, dereference: true,
-    filter: file => !path.relative(source, file).split(path.sep).some(part => ['node_modules', '.git', 'data', 'db', 'logs', 'avatars', 'qr', 'native', 'test-results', 'playwright-report', 'coverage', '.cache'].includes(part))
-      && !/^(\.env(?:\..*)?|.*\.(log|db|sqlite|dmp))$/.test(path.basename(file)), ...options });
+    filter: file => isReleaseSourceAllowed(path.relative(root, file)), ...options });
 };
 try {
   for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'UPDATE_README.md', 'docker-compose.yml', '.dockerignore', 'start.bat', 'tingzhi.bat', 'start.sh', 'stop.sh']) copy(file);

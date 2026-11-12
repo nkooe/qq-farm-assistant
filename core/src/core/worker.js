@@ -6,6 +6,7 @@ if (parentPort && workerData && workerData.accountId && !process.env.FARM_ACCOUN
     process.env.FARM_ACCOUNT_ID = String(workerData.accountId);
 }
 
+const { runExclusiveAutomationTask } = require('../services/automation-lock');
 const { CONFIG } = require('../config/config');
 const { getLevelExpProgress } = require('../config/gameConfig');
 const {
@@ -16,7 +17,8 @@ const {
 } = require('../models/store');
 const {
     checkAndClaimEmails,
-    getEmailDailyState
+    getEmailDailyState,
+    configureEmailClaim
 } = require('../services/email');
 const {
     checkFarm,
@@ -110,7 +112,7 @@ const {
     sendMsgAsync
 } = require('../utils/network');
 const { loadProto } = require('../utils/proto');
-const { setLogHook, log, toNum, isTransientNetworkError, formatLocalDateTime24 } = require('../utils/utils');
+const { setLogHook, log, toNum, isTransientNetworkError, formatLocalDateTime24, getSystemDateKey, getSystemTimeZone } = require('../utils/utils');
 const { startMysteryAutoBuyTimer, stopMysteryAutoBuyTimer } = require('../services/mystery-scheduler');
 const { runWithRequestClass } = require('../utils/request-context');
 const { isGatewayHealthyForBusiness } = require('../utils/request-queue');
@@ -175,6 +177,7 @@ let isRunning = false;
 let loginReady = false;
 let appliedConfigRevision = 0;
 let unifiedSchedulerRunning = false;
+let schedulerGeneration = 0;
 
 // ==================== 工具函数 ====================
 
@@ -200,20 +203,14 @@ const milkTeaAutomation = require('../services/milk-tea-automation').automation;
 function isDailyRoutineEnabled() { return true; }
 
 /** 获取当天日期键 */
-function getLocalDateKey() {
-    const d = new Date();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y  }-${  m  }-${  day}`;
-}
+function getLocalDateKey() { return getSystemDateKey(); }
 
 // ==================== 每日任务 ====================
 
 async function runDailyRoutines(force = false) {
     if (!loginReady || friendSyncPaused) return;
     try {
-        await checkAndClaimEmails(force);
+        await checkAndClaimEmails();
         await performDailyShare(force);
         await performDailyMonthCardGift(force);
         await buyFreeGifts(force);
@@ -240,7 +237,10 @@ function startDailyRoutineTimer() {
     workerScheduler.setIntervalTask('daily_routine_interval', 60000, () => {
         if (!loginReady) return;
         const today = getLocalDateKey();
-        if (today === lastDailyRunDate) return;
+        if (today === lastDailyRunDate) {
+            if (!friendSyncPaused) checkAndClaimEmails().catch(() => null);
+            return;
+        }
         lastDailyRunDate = today;
         runDailyRoutines(true)
             .then(() => runBadOnceOnStartup(true))
@@ -309,6 +309,7 @@ function resetUnifiedSchedule() {
 async function runFarmTick(autoConfig) {
     if (farmTaskRunning || friendSyncPaused) return;
     farmTaskRunning = true;
+    const generation = schedulerGeneration;
 
     const nextDelay = randomIntervalMs(
         CONFIG.farmCheckIntervalMin || CONFIG.farmCheckInterval || 3000,
@@ -316,13 +317,18 @@ async function runFarmTick(autoConfig) {
     );
 
     try {
-        if (autoConfig.farm) await checkFarm();
-        if (autoConfig.task) await checkAndClaimTasks();
-        if (autoConfig.email) await checkAndClaimEmails();
-        if (autoConfig.fertilizer_gift) await openFertilizerGiftPacksSilently();
+        await runExclusiveAutomationTask('farm_tick', async () => {
+            if (!loginReady || friendSyncPaused || generation !== schedulerGeneration) return;
+            if (autoConfig.farm) await checkFarm();
+            if (!loginReady || generation !== schedulerGeneration) return;
+            if (autoConfig.task) await checkAndClaimTasks();
+            await checkAndClaimEmails();
+            if (autoConfig.fertilizer_gift) await openFertilizerGiftPacksSilently();
+        }, { detached: true });
     } catch { } finally {
-        nextFarmRunAt = Date.now() + nextDelay;
+        if (generation === schedulerGeneration) nextFarmRunAt = Date.now() + nextDelay;
         farmTaskRunning = false;
+        if (unifiedSchedulerRunning) scheduleUnifiedNextTick();
     }
 }
 
@@ -332,9 +338,10 @@ let helpTaskRunning = false;
 let nextHelpRunAt = 0;
 
 async function runHelpTick(autoConfig) {
-    if (helpTaskRunning || friendSyncPaused || isPetSyncVisiting()) return;
+    if (helpTaskRunning || stealTaskRunning || friendSyncPaused || isPetSyncVisiting()) return;
     if (!autoConfig.friend_help && !autoConfig.friend_golden_bug) return;
     helpTaskRunning = true;
+    const generation = schedulerGeneration;
 
     const nextDelay = randomIntervalMs(
         CONFIG.helpCheckIntervalMin || 30000,
@@ -342,8 +349,8 @@ async function runHelpTick(autoConfig) {
     );
 
     try {
-        if (autoConfig.friend_help) await checkFriends({ onlyHelp: true });
-        if (autoConfig.friend_golden_bug) await runGoldenBugPlacement();
+        if (autoConfig.friend_help) await checkFriends({ onlyHelp: true, canContinue: () => loginReady && !friendSyncPaused && generation === schedulerGeneration });
+        if (autoConfig.friend_golden_bug && loginReady && generation === schedulerGeneration) await runExclusiveAutomationTask('golden_bug', runGoldenBugPlacement);
     } catch (err) {
         if (!isTransientNetworkError(err)) {
             log('系统', `帮助巡查执行失败: ${  err.message}`, {
@@ -353,8 +360,9 @@ async function runHelpTick(autoConfig) {
             });
         }
     } finally {
-        nextHelpRunAt = Date.now() + nextDelay;
+        if (generation === schedulerGeneration) nextHelpRunAt = Date.now() + nextDelay;
         helpTaskRunning = false;
+        if (unifiedSchedulerRunning) scheduleUnifiedNextTick();
     }
 }
 
@@ -364,11 +372,12 @@ let stealTaskRunning = false;
 let nextStealRunAt = 0;
 
 async function runStealTick(autoConfig) {
-    if (stealTaskRunning || friendSyncPaused || isPetSyncVisiting()) return;
+    if (stealTaskRunning || helpTaskRunning || friendSyncPaused || isPetSyncVisiting()) return;
     if (!autoConfig.friend_steal) return;
     // 【2026-08-15】极速务农生效时完全停偷菜（onlySteal 会绕过 checkFriends 的 !turboMode 保护）
     if (computeEffectiveTurbo()) return;
     stealTaskRunning = true;
+    const generation = schedulerGeneration;
 
     const nextDelay = randomIntervalMs(
         CONFIG.stealCheckIntervalMin || 25000,
@@ -376,7 +385,7 @@ async function runStealTick(autoConfig) {
     );
 
     try {
-        await checkFriends({ onlySteal: true });
+        await checkFriends({ onlySteal: true, canContinue: () => loginReady && !friendSyncPaused && generation === schedulerGeneration });
     } catch (err) {
         if (!isTransientNetworkError(err)) {
             log('系统', `偷菜巡查执行失败: ${  err.message}`, {
@@ -386,8 +395,9 @@ async function runStealTick(autoConfig) {
             });
         }
     } finally {
-        nextStealRunAt = Date.now() + nextDelay;
+        if (generation === schedulerGeneration) nextStealRunAt = Date.now() + nextDelay;
         stealTaskRunning = false;
+        if (unifiedSchedulerRunning) scheduleUnifiedNextTick();
     }
 }
 
@@ -410,16 +420,17 @@ async function runUnifiedTick() {
     if (!shouldFarm && !shouldHelp && !shouldSteal) return;
 
     const autoConfig = getAutomation();
-    if (shouldFarm) await runWithRequestClass('farm', () => runFarmTick(autoConfig));
-    if (shouldHelp && loginReady && isGatewayHealthyForBusiness(getGatewayLoad())) await runWithRequestClass('friend', () => runHelpTick(autoConfig));
-    if (shouldSteal && loginReady && isGatewayHealthyForBusiness(getGatewayLoad())) await runWithRequestClass('friend', () => runStealTick(autoConfig));
+    // 每类任务自行防重入；等待好友间隔时，农场仍可调度。
+    if (shouldFarm) runWithRequestClass('farm', () => runFarmTick(autoConfig)).catch(() => null);
+    if (shouldHelp) runWithRequestClass('friend', () => runHelpTick(autoConfig)).catch(() => null);
+    if (shouldSteal) runWithRequestClass('friend', () => runStealTick(autoConfig)).catch(() => null);
 }
 
 function scheduleUnifiedNextTick() {
     if (!unifiedSchedulerRunning) return;
     workerScheduler.clear('unified_next_tick');
 
-    if (!loginReady) {
+    if (!loginReady || friendSyncPaused) {
         workerScheduler.setTimeoutTask('unified_next_tick', 500, async () => {
             try { await runUnifiedTick(); } finally { scheduleUnifiedNextTick(); }
         });
@@ -427,11 +438,14 @@ function scheduleUnifiedNextTick() {
     }
 
     const now = Date.now();
-    const nearest = Math.min(
-        Number(nextFarmRunAt) || now + 3000,
-        Number(nextHelpRunAt) || now + 30000,
-        Number(nextStealRunAt) || now + 25000
-    );
+    const auto = getAutomation();
+    const deadlines = [now + 30000];
+    if (!farmTaskRunning) deadlines.push(Number(nextFarmRunAt) || now + 3000);
+    if (!helpTaskRunning && !stealTaskRunning && !isPetSyncVisiting() && auto.friend) {
+        if (auto.friend_help || auto.friend_golden_bug) deadlines.push(Number(nextHelpRunAt) || now + 30000);
+        if (auto.friend_steal && !computeEffectiveTurbo()) deadlines.push(Number(nextStealRunAt) || now + 25000);
+    }
+    const nearest = Math.min(...deadlines);
     const waitMs = Math.max(100, nearest - now);
 
     workerScheduler.setTimeoutTask('unified_next_tick', waitMs, async () => {
@@ -442,15 +456,14 @@ function scheduleUnifiedNextTick() {
 function startUnifiedScheduler() {
     if (unifiedSchedulerRunning) return;
     unifiedSchedulerRunning = true;
+    schedulerGeneration++;
     resetUnifiedSchedule();
     scheduleUnifiedNextTick();
 }
 
 function stopUnifiedScheduler() {
     unifiedSchedulerRunning = false;
-    farmTaskRunning = false;
-    helpTaskRunning = false;
-    stealTaskRunning = false;
+    schedulerGeneration++; // 旧任务结束前保留运行标记，防止重连后重复调度。
     workerScheduler.clear('unified_next_tick');
 }
 
@@ -464,6 +477,8 @@ function applyRuntimeConfig(config, syncStatusAfter = false) {
         persist: false,
         accountId
     });
+
+    configureEmailClaim({ accountId, hour: getConfigSnapshot(accountId).emailClaimHour });
 
     const revision = Number((config || {}).__revision || 0);
     if (revision > 0) appliedConfigRevision = revision;
@@ -825,6 +840,10 @@ function onReconnectFailed(info) {
 // ==================== API 调用处理 ====================
 
 async function handleApiCall(msg) {
+    return runExclusiveAutomationTask('manual_api', () => performApiCall(msg));
+}
+
+async function performApiCall(msg) {
     const { id, method, args } = msg;
     let result = null;
     let error = null;
@@ -1247,7 +1266,8 @@ async function getDailyGiftOverview() {
         : { doneToday: false, lastClaimAt: 0 };
 
     return {
-        date: new Date().toISOString().slice(0, 10),
+        date: getSystemDateKey(),
+        timeZone: getSystemTimeZone(),
         growth: {
             key: 'growth_task',
             label: '成长任务',
@@ -1271,7 +1291,11 @@ async function getDailyGiftOverview() {
                 label: '邮箱奖励',
                 enabled: true,
                 doneToday: !!emailState.doneToday,
-                lastAt: Number(emailState.lastCheckAt || 0)
+                lastAt: Number(emailState.lastCheckAt || 0),
+                nextAt: Number(emailState.nextCheckAt || 0),
+                scheduledHour: emailState.scheduledHour,
+                result: emailState.result,
+                lastError: emailState.lastError
             },
             {
                 key: 'mall_free_gifts',

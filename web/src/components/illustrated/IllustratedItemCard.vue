@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
+import { vLazySrc } from '@/directives/lazy-src'
 import { formatGoldAmount } from '@/utils/number-format'
 
 const props = defineProps<{
@@ -57,7 +58,7 @@ watch(() => props.item?.image, () => {
       </span>
       <img
         v-if="item.image && !imageError"
-        :src="item.image"
+        v-lazy-src="item.image"
         :alt="item.name"
         class="max-h-14 max-w-14 object-contain"
         @error="imageError = true"

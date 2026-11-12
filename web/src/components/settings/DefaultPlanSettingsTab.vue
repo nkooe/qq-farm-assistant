@@ -129,6 +129,7 @@ function createAutomationSettings() {
       fertilizer_land_types: ['purple', 'gold', 'black', 'red', 'normal'],
       fertilizer_smart_seconds: 300,
     },
+    emailClaimHour: 10 as number | string,
     autoAcceptFriendMinLevel: 0,
     fertilizerBuyOrganicCount: 1,
     fertilizerBuyOrganicThresholdHours: 10,
@@ -165,6 +166,7 @@ function applyPlan(data: any) {
   automationSettings.value = {
     ...automationDefaults,
     automation: { ...automationDefaults.automation, ...(config.automation || {}) },
+    emailClaimHour: config.emailClaimHour ?? 10,
     autoAcceptFriendMinLevel: config.autoAcceptFriendMinLevel ?? 0,
     fertilizerBuyOrganicCount: config.fertilizerBuyOrganicCount ?? 1,
     fertilizerBuyOrganicThresholdHours: config.fertilizerBuyOrganicThresholdHours ?? 10,
@@ -218,6 +220,7 @@ function buildConfig() {
     intervals: strategySettings.value.intervals,
     friendQuietHours: strategySettings.value.friendQuietHours,
     automation: automationSettings.value.automation,
+    emailClaimHour: automationSettings.value.emailClaimHour,
     autoAcceptFriendMinLevel: automationSettings.value.autoAcceptFriendMinLevel,
     fertilizerBuyOrganicCount: automationSettings.value.fertilizerBuyOrganicCount,
     fertilizerBuyOrganicThresholdHours: automationSettings.value.fertilizerBuyOrganicThresholdHours,

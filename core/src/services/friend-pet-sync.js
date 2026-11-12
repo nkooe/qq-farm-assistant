@@ -1,3 +1,4 @@
+const { runExclusiveAutomationTask } = require('./automation-lock');
 const { setTimeout: delay } = require('node:timers/promises');
 const { runWithRequestClass } = require('../utils/request-context');
 const { isGatewayHealthyForBusiness, isGatewayYieldError } = require('../utils/request-queue');
@@ -48,24 +49,29 @@ function createFriendPetSync(deps, tuning = {}) {
                 // Recheck after waiting: ordinary visits may already have populated this entry.
                 if (deps.known(friend.gid)) continue;
                 if (deps.friendBusy()) return { reason: 'contention', checked, failed };
-                visiting = true;
-                let entered = false;
-                try {
-                    await deps.enter(friend.gid, { signal, requestClass: 'background' });
-                    entered = true;
-                    if (deps.known(friend.gid)) checked++; else failed++;
-                } catch (err) {
-                    if (signal.aborted) return { reason: 'stopped', checked, failed };
-                    if (isGatewayYieldError(err)) return { reason: deferReason(), checked, failed };
-                    if (/超时|timeout|ECONN|EOF/i.test(err.message || '')) return { reason: 'gateway_busy', checked, failed };
-                    failed++;
-                    deps.onError?.(friend, err);
-                } finally {
-                    // A successful Enter always gets its Leave, even if stop arrived between them.
+                const outcome = await runExclusiveAutomationTask('pet_sync_visit', async () => {
+                    if (!valid(token, signal) || !canRun()) return { reason: 'stopped', checked, failed };
+                    visiting = true;
+                    let entered = false;
                     try {
-                        if (entered) await runWithRequestClass('friend', () => deps.leave(friend.gid, { requestClass: 'friend' }));
-                    } finally { visiting = false; }
-                }
+                        await deps.enter(friend.gid, { signal, requestClass: 'background' });
+                        entered = true;
+                        if (deps.known(friend.gid)) checked++; else failed++;
+                    } catch (err) {
+                        if (signal.aborted) return { reason: 'stopped', checked, failed };
+                        if (isGatewayYieldError(err)) return { reason: deferReason(), checked, failed };
+                        if (/超时|timeout|ECONN|EOF/i.test(err.message || '')) return { reason: 'gateway_busy', checked, failed };
+                        failed++;
+                        deps.onError?.(friend, err);
+                    } finally {
+                        // A successful Enter always gets its Leave, even if stop arrived between them.
+                        try {
+                            if (entered) await runWithRequestClass('friend', () => deps.leave(friend.gid, { requestClass: 'friend' }));
+                        } finally { visiting = false; }
+                    }
+                    return null;
+                }, { detached: true });
+                if (outcome) return outcome;
                 await pause(t.gap, signal);
                 if ((checked + failed) % 5 === 0) await pause(t.batchGap, signal);
             }

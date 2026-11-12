@@ -39,7 +39,7 @@ message ClaimEmailReply {
 
 message BatchClaimEmailRequest {
     int32 box_type = 1;
-    string email_id = 2;
+    repeated string email_ids = 2;
 }
 
 message BatchClaimEmailReply {

@@ -1,3 +1,4 @@
+const { assertEmailClaimHour } = require('../utils/hour-of-day');
 const { assertUserId, isUserId, parseUserId } = require('./user-id');
 const process = require('node:process');
 const fs = require('node:fs');
@@ -232,6 +233,7 @@ const DEFAULT_ACCOUNT_CONFIG = {
     knownFriendGids: [],
     friendBlacklist: [],
     plantBlacklist: DEFAULT_PLANT_BLACKLIST,
+    emailClaimHour: 10,
     stealDelaySeconds: 1,
     plantOrderRandom: true,
     plantDelaySeconds: 2,
@@ -411,6 +413,12 @@ function normalizeIntervals(raw) {
 
 // ==================== 配置克隆/合并 ====================
 
+function normalizeActionDelay(value, defaultValue) {
+    if (value === undefined || value === null || value === '') return defaultValue;
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.min(60, number)) : defaultValue;
+}
+
 function cloneAccountConfig(config = DEFAULT_ACCOUNT_CONFIG) {
     const srcAuto = config && config.automation && typeof config.automation === 'object'
         ? config.automation : {};
@@ -445,9 +453,10 @@ function cloneAccountConfig(config = DEFAULT_ACCOUNT_CONFIG) {
         preferredSeedId: Math.max(0, Number.parseInt(config.preferredSeedId, 10) || 0),
         prioritize2x2Crops: config.prioritize2x2Crops === true,
         plantBlacklist: plantBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0),
-        stealDelaySeconds: Math.max(0, Math.min(60, Number(config.stealDelaySeconds) || 1)),
+        emailClaimHour: assertEmailClaimHour(config.emailClaimHour ?? 10),
+        stealDelaySeconds: normalizeActionDelay(config.stealDelaySeconds, 1),
         plantOrderRandom: !!config.plantOrderRandom,
-        plantDelaySeconds: Math.max(0, Math.min(60, Number(config.plantDelaySeconds) || 2)),
+        plantDelaySeconds: normalizeActionDelay(config.plantDelaySeconds, 2),
         fertilizerBuyOrganicCount: Math.max(0, Math.min(999, Number(config.fertilizerBuyOrganicCount) || 1)),
         fertilizerBuyOrganicThresholdHours: Math.max(0, Math.min(720, Number(config.fertilizerBuyOrganicThresholdHours) || 10)),
         fertilizerBuyNormalCount: Math.max(0, Math.min(999, Number(config.fertilizerBuyNormalCount) || 1)),
@@ -589,8 +598,10 @@ function normalizeAccountConfig(raw, defaults = accountDefaults) {
     }
 
     // 偷菜延迟
+    if (input.emailClaimHour !== undefined) cfg.emailClaimHour = assertEmailClaimHour(input.emailClaimHour);
+
     if (input.stealDelaySeconds !== undefined && input.stealDelaySeconds !== null) {
-        cfg.stealDelaySeconds = Math.max(0, Math.min(60, Number.parseInt(input.stealDelaySeconds, 10) || 1));
+        cfg.stealDelaySeconds = normalizeActionDelay(input.stealDelaySeconds, 1);
     }
 
     // 种植顺序随机
@@ -600,7 +611,7 @@ function normalizeAccountConfig(raw, defaults = accountDefaults) {
 
     // 种植延迟
     if (input.plantDelaySeconds !== undefined && input.plantDelaySeconds !== null) {
-        cfg.plantDelaySeconds = Math.max(0, Math.min(60, Number(input.plantDelaySeconds) || 2));
+        cfg.plantDelaySeconds = normalizeActionDelay(input.plantDelaySeconds, 2);
     }
 
     // 肥料购买配置
@@ -667,6 +678,7 @@ function pickDefaultPlanConfig(raw) {
         prioritize2x2Crops: cfg.prioritize2x2Crops === true,
         intervals: { ...cfg.intervals },
         friendQuietHours: { ...cfg.friendQuietHours },
+        emailClaimHour: cfg.emailClaimHour,
         stealDelaySeconds: cfg.stealDelaySeconds,
         plantOrderRandom: cfg.plantOrderRandom,
         plantDelaySeconds: cfg.plantDelaySeconds,
@@ -906,9 +918,10 @@ function getConfigSnapshot(accountId) {
         knownFriendGids: [...cfg.knownFriendGids || []],
         friendBlacklist: [...cfg.friendBlacklist || []],
         plantBlacklist: [...cfg.plantBlacklist || []],
-        stealDelaySeconds: Math.max(0, Math.min(60, Number(cfg.stealDelaySeconds) || 1)),
+        emailClaimHour: cfg.emailClaimHour,
+        stealDelaySeconds: normalizeActionDelay(cfg.stealDelaySeconds, 1),
         plantOrderRandom: !!cfg.plantOrderRandom,
-        plantDelaySeconds: Math.max(0, Math.min(60, Number(cfg.plantDelaySeconds) || 2)),
+        plantDelaySeconds: normalizeActionDelay(cfg.plantDelaySeconds, 2),
         fertilizerBuyOrganicCount: Math.max(0, Math.min(999, Number(cfg.fertilizerBuyOrganicCount) || 1)),
         fertilizerBuyOrganicThresholdHours: Math.max(0, Math.min(720, Number(cfg.fertilizerBuyOrganicThresholdHours) || 10)),
         fertilizerBuyNormalCount: Math.max(0, Math.min(999, Number(cfg.fertilizerBuyNormalCount) || 1)),
@@ -923,6 +936,7 @@ function getConfigSnapshot(accountId) {
 }
 
 function applyConfigSnapshot(patch = {}, opts = {}) {
+    if (patch.emailClaimHour !== undefined) assertEmailClaimHour(patch.emailClaimHour);
     const persist = opts.persist !== false;
     const accountId = opts.accountId;
     const base = getAccountConfigSnapshot(accountId);
@@ -993,14 +1007,16 @@ function applyConfigSnapshot(patch = {}, opts = {}) {
     if (Array.isArray(patch.plantBlacklist)) {
         cfg.plantBlacklist = patch.plantBlacklist.map(Number).filter(n => Number.isFinite(n) && n > 0);
     }
+    if (patch.emailClaimHour !== undefined) cfg.emailClaimHour = assertEmailClaimHour(patch.emailClaimHour);
+
     if (patch.stealDelaySeconds !== undefined && patch.stealDelaySeconds !== null) {
-        cfg.stealDelaySeconds = Math.max(0, Math.min(60, Number(patch.stealDelaySeconds) || 1));
+        cfg.stealDelaySeconds = normalizeActionDelay(patch.stealDelaySeconds, 1);
     }
     if (patch.plantOrderRandom !== undefined && patch.plantOrderRandom !== null) {
         cfg.plantOrderRandom = !!patch.plantOrderRandom;
     }
     if (patch.plantDelaySeconds !== undefined && patch.plantDelaySeconds !== null) {
-        cfg.plantDelaySeconds = Math.max(0, Math.min(60, Number(patch.plantDelaySeconds) || 2));
+        cfg.plantDelaySeconds = normalizeActionDelay(patch.plantDelaySeconds, 2);
     }
     if (patch.fertilizerBuyOrganicCount !== undefined && patch.fertilizerBuyOrganicCount !== null) {
         cfg.fertilizerBuyOrganicCount = Math.max(0, Math.min(999, Number(patch.fertilizerBuyOrganicCount) || 1));
@@ -1224,7 +1240,7 @@ function updateBlacklistItem(accountId, gid, opts) {
 }
 
 function getStealDelaySeconds(accountId) {
-    return Math.max(0, Math.min(60, Number(getAccountConfigSnapshot(accountId).stealDelaySeconds) || 1));
+    return normalizeActionDelay(getAccountConfigSnapshot(accountId).stealDelaySeconds, 1);
 }
 
 function getPlantOrderRandom(accountId) {
@@ -1232,7 +1248,7 @@ function getPlantOrderRandom(accountId) {
 }
 
 function getPlantDelaySeconds(accountId) {
-    return Math.max(0, Math.min(60, Number(getAccountConfigSnapshot(accountId).plantDelaySeconds) || 2));
+    return normalizeActionDelay(getAccountConfigSnapshot(accountId).plantDelaySeconds, 2);
 }
 
 function getAutoAcceptFriendMinLevel(accountId) {
@@ -1495,7 +1511,7 @@ function removeAccountArtifacts(accountId) {
     removeAccountConfig(accountId);
     deleteAccountCaches(accountId);
     const digest = require('node:crypto').createHash('sha256').update(String(accountId)).digest('hex');
-    for (const file of [getDataFile(`stats/${accountId}.json`), getDataFile(`activity-center-state-${digest}.json`)]) {
+    for (const file of [getDataFile(`stats/${accountId}.json`), getDataFile(`activity-center-state-${digest}.json`), getDataFile(`email-claim-${digest}.json`)]) {
         if (fs.existsSync(file)) fs.unlinkSync(file);
     }
 }

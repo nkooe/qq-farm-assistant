@@ -92,6 +92,7 @@ export interface SettingsState {
   autoCodeRefresh: AutoCodeRefreshConfig
   ui: UIConfig
   offlineReminder: OfflineConfig
+  emailClaimHour: number
   stealDelaySeconds: number
   plantOrderRandom: boolean
   plantDelaySeconds: number
@@ -153,6 +154,7 @@ export const useSettingStore = defineStore('setting', () => {
     autoCodeRefresh: createDefaultAutoCodeRefresh(),
     ui: {},
     offlineReminder: createDefaultOfflineReminder(),
+    emailClaimHour: 10,
     stealDelaySeconds: 0,
     plantOrderRandom: false,
     plantDelaySeconds: 0,
@@ -189,6 +191,7 @@ export const useSettingStore = defineStore('setting', () => {
       autoCodeRefresh: createDefaultAutoCodeRefresh(),
       ui: {},
       offlineReminder: createDefaultOfflineReminder(),
+      emailClaimHour: 10,
       stealDelaySeconds: 0,
       plantOrderRandom: false,
       plantDelaySeconds: 0,
@@ -231,6 +234,7 @@ export const useSettingStore = defineStore('setting', () => {
         settings.value.ui = d.ui || {}
         settings.value.autoAcceptFriendMinLevel = d.autoAcceptFriendMinLevel ?? 0
         settings.value.offlineReminder = normalizeOfflineReminder(d.offlineReminder)
+        settings.value.emailClaimHour = d.emailClaimHour ?? 10
         settings.value.stealDelaySeconds = d.stealDelaySeconds ?? 0
         settings.value.plantOrderRandom = d.plantOrderRandom ?? false
         settings.value.plantDelaySeconds = d.plantDelaySeconds ?? 0
@@ -273,6 +277,7 @@ export const useSettingStore = defineStore('setting', () => {
         autoCodeRefresh: newSettings.autoCodeRefresh,
         intervals: newSettings.intervals,
         friendQuietHours: newSettings.friendQuietHours,
+        emailClaimHour: newSettings.emailClaimHour ?? settings.value.emailClaimHour,
         stealDelaySeconds: newSettings.stealDelaySeconds ?? 0,
         plantOrderRandom: newSettings.plantOrderRandom ?? false,
         plantDelaySeconds: newSettings.plantDelaySeconds ?? 0,
@@ -298,7 +303,8 @@ export const useSettingStore = defineStore('setting', () => {
         })
       }
 
-      await fetchSettings(accountId)
+      if (isCurrentAccount(accountId))
+        await fetchSettings(accountId)
       return { ok: true }
     }
     finally {

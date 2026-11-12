@@ -16,11 +16,16 @@ interface DailyGift {
   lastAt?: number
   completedCount?: number
   totalCount?: number
+  result?: string
+  lastError?: string
+  scheduledHour?: number
+  nextAt?: number
   tasks?: any[]
 }
 
 interface DailyGiftsResponse {
   date: string
+  timeZone?: string
   growth: DailyGift
   gifts: DailyGift[]
 }

@@ -4,6 +4,7 @@ import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
+import HourInput from '@/components/ui/HourInput.vue'
 
 interface AutomationSettings {
   automation: {
@@ -32,6 +33,7 @@ interface AutomationSettings {
     fertilizer_land_types: string[]
     fertilizer_smart_seconds: number
   }
+  emailClaimHour: number | string
   autoAcceptFriendMinLevel: number
   fertilizerBuyOrganicCount: number
   fertilizerBuyOrganicThresholdHours: number
@@ -100,6 +102,7 @@ function isFastMatureFertilizerMode(mode: string) {
     </div>
 
     <div v-else class="space-y-4">
+      <HourInput v-model="settings.emailClaimHour" label="邮箱领取时间（时）" help="北京时间，每日一次" :disabled="saving" />
       <div class="grid grid-cols-2 gap-2 sm:gap-3">
         <div class="flex items-center justify-between border border-white/40 rounded-full bg-[var(--theme-glass)] px-3 py-2.5 shadow-sm backdrop-blur-md dark:border-white/10">
           <span class="text-[13px] text-gray-800 dark:text-gray-100">自动种植收获</span>

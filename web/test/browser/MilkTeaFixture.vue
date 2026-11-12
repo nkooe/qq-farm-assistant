@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { useAccountStore } from '../../src/stores/account'
 import MilkTeaAutomation from '../../src/views/activity-center/MilkTeaAutomation.vue'
 import MilkTeaPage from '../../src/views/activity-center/MilkTeaPage.vue'
 import '../../src/styles/activities.css'
 
 const fullPage = new URLSearchParams(location.search).has('full')
+const showPage = ref(true)
 
 const account = useAccountStore()
 account.accounts = [{ id: '1', name: '奶茶甲', running: true }, { id: '2', name: '奶茶乙', running: true }]
@@ -19,12 +20,13 @@ const snapshot = computed(() => account.currentAccountId === '2' ? { status: 'pa
       <header class="fixture-heading">
         <h1>活动与节令</h1><p>活动开放时间和奖励进度以当前账号为准</p>
         <button data-testid="switch" @click="account.currentAccountId = account.currentAccountId === '1' ? '2' : '1'">切换账号</button>
+        <button data-testid="toggle-page" @click="showPage = !showPage">切换页面</button>
       </header>
       <nav class="activity-tabs">
         <button>活动大厅</button><button>节令日历</button>
       </nav>
       <div class="activity-stage">
-        <MilkTeaPage />
+        <MilkTeaPage v-if="showPage" />
       </div>
     </section>
   </div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { vLazySrc } from '@/directives/lazy-src'
 import { computed, ref, watch } from 'vue'
 import api, { getApiErrorMessage } from '@/api'
 import { useAccountStore } from '@/stores/account'
@@ -87,7 +88,7 @@ watch(() => [accounts.currentAccountId, accounts.currentAccount?.connected], () 
       </div>
       <div class="grid grid-cols-[repeat(auto-fill,minmax(125px,1fr))] gap-2">
         <div v-for="item in entries" :key="item.seedId" class="flex items-center gap-2 rounded bg-gray-50 p-2 dark:bg-gray-900/40">
-          <img v-if="item.image" :src="item.image" alt="" class="h-9 w-9 object-contain" loading="lazy">
+          <img v-if="item.image" v-lazy-src="item.image" alt="" class="h-9 w-9 object-contain">
           <div class="min-w-0 text-xs"><div class="truncate" :title="item.name">{{ item.name }}</div><div class="mt-1 opacity-65">{{ item.unlocked ? '已收集' : '未收集' }} · {{ item.progress }} 点</div></div>
         </div>
       </div>

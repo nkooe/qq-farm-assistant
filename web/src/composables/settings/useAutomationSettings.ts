@@ -2,6 +2,7 @@ import type { Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ref } from 'vue'
 import api from '@/api'
+import { parseHourOfDay } from '@/utils/hour-of-day'
 import { useSettingStore } from '@/stores/setting'
 
 type AlertType = 'primary' | 'danger'
@@ -51,6 +52,7 @@ export function useAutomationSettings({
       ...defaultAutomation,
       fertilizer: 'normal',
     },
+    emailClaimHour: 10 as number | string,
     autoAcceptFriendMinLevel: 0,
     fertilizerBuyOrganicCount: 10,
     fertilizerBuyOrganicThresholdHours: 10,
@@ -117,6 +119,7 @@ export function useAutomationSettings({
       if (localAutomationSettings.value.automation.fertilizer_smart_seconds === undefined) {
         localAutomationSettings.value.automation.fertilizer_smart_seconds = 300
       }
+      localAutomationSettings.value.emailClaimHour = settings.value.emailClaimHour ?? 10
       localAutomationSettings.value.autoAcceptFriendMinLevel = settings.value.autoAcceptFriendMinLevel ?? 0
       localAutomationSettings.value.fertilizerBuyOrganicCount = settings.value.fertilizerBuyOrganicCount ?? 10
       localAutomationSettings.value.fertilizerBuyOrganicThresholdHours = settings.value.fertilizerBuyOrganicThresholdHours ?? 10
@@ -143,11 +146,17 @@ export function useAutomationSettings({
     if (!currentAccountId.value)
       return
     const accountId = String(currentAccountId.value)
+    const emailClaimHour = parseHourOfDay(localAutomationSettings.value.emailClaimHour)
+    if (emailClaimHour === null) {
+      showAlert('邮箱领取时间须为 0–23 的整数', 'danger')
+      return
+    }
     automationSaving.value = true
     try {
       localAutoCodeRefresh.value.intervalMinutes = normalizeAutoCodeRefreshInterval(localAutoCodeRefresh.value.intervalMinutes)
       const fullSettings = {
         ...settings.value,
+        emailClaimHour,
         automation: localAutomationSettings.value.automation,
         autoCodeRefresh: localAutoCodeRefresh.value,
         autoAcceptFriendMinLevel: localAutomationSettings.value.autoAcceptFriendMinLevel,

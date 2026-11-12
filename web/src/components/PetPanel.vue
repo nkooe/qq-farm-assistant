@@ -330,7 +330,7 @@ onMounted(fetchPanel)
     <!-- 使用说明 -->
     <div class="rounded-lg bg-blue-50 p-3 text-sm text-blue-800 dark:bg-blue-900/20 dark:text-blue-200 sm:p-4">
       <div class="mb-1 flex items-center gap-2 font-medium">
-        <div class="i-carbon-dog-walker" />
+        <div class="i-carbon-dog-walker shrink-0 inline-block align-middle" />
         宠物（护主犬）系统
       </div>
       <ul class="list-disc pl-5 space-y-1 text-blue-700/90 dark:text-blue-200/80">
@@ -345,7 +345,7 @@ onMounted(fetchPanel)
       v-if="!accountRunning"
       class="flex items-center gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-700 dark:bg-amber-900/20 dark:text-amber-300 sm:p-4"
     >
-      <div class="i-carbon-warning-alt" />
+      <div class="i-carbon-warning-alt shrink-0 inline-block align-middle" />
       当前账号未在线，宠物操作前请先到「账号」页启动该账号。
     </div>
 
@@ -374,7 +374,7 @@ onMounted(fetchPanel)
               class="flex h-14 w-14 items-center justify-center rounded-2xl text-white shadow"
               :class="deployedDog ? 'bg-gradient-to-br from-green-400 to-emerald-600' : 'bg-gradient-to-br from-gray-300 to-gray-500'"
             >
-              <div class="i-carbon-dog-walker text-2xl" />
+              <div class="i-carbon-dog-walker text-2xl shrink-0 inline-block align-middle" />
             </div>
             <div>
               <div class="text-sm text-gray-500 dark:text-gray-400">
@@ -410,7 +410,7 @@ onMounted(fetchPanel)
         <div class="mt-4 border-t border-gray-100 pt-3 dark:border-gray-700">
           <div class="flex items-center justify-between text-sm">
             <span class="flex items-center gap-1.5 text-gray-600 dark:text-gray-300">
-              <div class="i-carbon-restaurant text-amber-500" />
+              <div class="i-carbon-restaurant text-amber-500 shrink-0 inline-block align-middle" />
               食物剩余
             </span>
             <span class="font-medium text-gray-800 dark:text-gray-100">
@@ -426,7 +426,7 @@ onMounted(fetchPanel)
             />
           </div>
           <div v-if="deployedDog && foodLastSec <= 0" class="mt-2 flex items-center gap-1.5 text-xs text-red-500">
-            <div class="i-carbon-warning-alt" />
+            <div class="i-carbon-warning-alt shrink-0 inline-block align-middle" />
             食物已耗尽，宠物已停止护农！请投喂狗粮。
           </div>
         </div>
@@ -436,7 +436,7 @@ onMounted(fetchPanel)
       <div class="rounded-lg bg-white p-4 shadow dark:bg-gray-800 sm:p-5">
         <div class="mb-3 flex items-center justify-between">
           <div class="flex items-center gap-2 font-medium text-gray-800 dark:text-gray-100">
-            <div class="i-carbon-catalog" />
+            <div class="i-carbon-catalog shrink-0 inline-block align-middle" />
             我的宠物
             <span class="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-700 dark:text-gray-400">{{ myDogs.length }}</span>
           </div>
@@ -459,7 +459,7 @@ onMounted(fetchPanel)
             <div class="flex items-start justify-between gap-2">
               <div class="flex items-center gap-2">
                 <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-amber-300 to-orange-500 text-white">
-                  <div class="i-carbon-dog-walker text-xl" />
+                  <div class="i-carbon-dog-walker text-xl shrink-0 inline-block align-middle" />
                 </div>
                 <div>
                   <div class="text-sm font-medium text-gray-800 dark:text-gray-100">
@@ -513,7 +513,7 @@ onMounted(fetchPanel)
       <!-- 投喂狗粮 -->
       <div class="rounded-lg bg-white p-4 shadow dark:bg-gray-800 sm:p-5">
         <div class="mb-3 flex items-center gap-2 font-medium text-gray-800 dark:text-gray-100">
-          <div class="i-carbon-restaurant" />
+          <div class="i-carbon-restaurant shrink-0 inline-block align-middle" />
           投喂食物
           <span class="text-xs font-normal text-gray-400">保证宠物持续活动</span>
         </div>
@@ -522,7 +522,7 @@ onMounted(fetchPanel)
           暂无狗粮库存，可在游戏商店购买
         </div>
 
-        <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <div v-else class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
           <div
             v-for="food in foodList"
             :key="food.id"
@@ -531,7 +531,7 @@ onMounted(fetchPanel)
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-2">
                 <div class="flex h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-lime-300 to-green-500 text-white">
-                  <div class="i-carbon-wheat text-lg" />
+                  <div class="i-carbon-wheat text-lg shrink-0 inline-block align-middle" />
                 </div>
                 <div>
                   <div class="text-sm font-medium text-gray-800 dark:text-gray-100">
@@ -574,7 +574,7 @@ onMounted(fetchPanel)
         <div class="flex flex-col items-center gap-4 sm:flex-row sm:justify-between">
           <div class="flex items-center gap-4">
             <div class="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 text-white shadow">
-              <div class="i-carbon-gift text-2xl" />
+              <div class="i-carbon-gift text-2xl shrink-0 inline-block align-middle" />
             </div>
             <div>
               <div class="text-sm text-gray-500 dark:text-gray-400">
@@ -604,18 +604,18 @@ onMounted(fetchPanel)
       <!-- 未拥有的宠物（仅供参考） -->
       <div v-if="lockedDogs.length" class="rounded-lg bg-white p-4 shadow dark:bg-gray-800 sm:p-5">
         <div class="mb-3 flex items-center gap-2 font-medium text-gray-800 dark:text-gray-100">
-          <div class="i-carbon-locked" />
+          <div class="i-carbon-locked shrink-0 inline-block align-middle" />
           可获取的宠物
           <span class="text-xs font-normal text-gray-400">需在游戏中购买/活动获取</span>
         </div>
-        <div class="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
           <div
             v-for="dog in lockedDogs"
             :key="dog.id"
             class="flex items-center gap-2 rounded-lg border border-dashed border-gray-200 p-2 dark:border-gray-700"
           >
             <div class="flex h-8 w-8 items-center justify-center rounded-lg bg-gray-200 text-gray-400 dark:bg-gray-700">
-              <div class="i-carbon-dog-walker" />
+              <div class="i-carbon-dog-walker shrink-0 inline-block align-middle" />
             </div>
             <div class="min-w-0">
               <div class="truncate text-xs font-medium text-gray-600 dark:text-gray-300">

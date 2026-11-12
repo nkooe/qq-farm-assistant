@@ -303,182 +303,183 @@ async function visitFriend(friend, tally, myGid, accountId) {
     return { acted: false, entered: false };
   }
 
-  const lands = enterReply.lands || [];
-  if (lands.length === 0) {
-    await leaveFriendFarm(gid);
-    return { acted: false, entered: true };
-  }
+  try {
+    const lands = enterReply.lands || [];
+    if (lands.length === 0) {
+      return { acted: false, entered: true };
+    }
 
+    const plantBlacklist = getPlantBlacklist(accountId);
+    const analysis = analyzeFriendLands(lands, myGid, name, { plantBlacklist });
+    const actionLogs = [];
 
-  const plantBlacklist = getPlantBlacklist(accountId);
-  const analysis = analyzeFriendLands(lands, myGid, name, { plantBlacklist });
-  const actionLogs = [];
+    // ---- Help (weed / bug / water) ----
+    const helpEnabled = !!isAutomationOn('friend_help');
+    const expLimitEnabled = !!isAutomationOn('friend_help_exp_limit');
 
-  // ---- Help (weed / bug / water) ----
-  const helpEnabled = !!isAutomationOn('friend_help');
-  const expLimitEnabled = !!isAutomationOn('friend_help_exp_limit');
+    // 护主犬(90021)判定：与巡查主流程一致，优先用传入字段，否则查本地狗信息缓存
+    const friendGidNum = toNum(gid);
+    const dogCache = readFriendDogInfoCache(accountId);
+    const hasGuardDog = !!(dogCache && dogCache[friendGidNum] && toNum(dogCache[friendGidNum].dogId) === 90021);
 
-  // 护主犬(90021)判定：与巡查主流程一致，优先用传入字段，否则查本地狗信息缓存
-  const friendGidNum = toNum(gid);
-  const dogCache = readFriendDogInfoCache(accountId);
-  const hasGuardDog = !!(dogCache && dogCache[friendGidNum] && toNum(dogCache[friendGidNum].dogId) === 90021);
+    if (!expLimitEnabled) setCanGetHelpExp(true);
 
-  if (!expLimitEnabled) setCanGetHelpExp(true);
+    if (helpEnabled) {
+      // 经验满时仍帮助护主犬好友，仅跳过普通好友（与 visitFriendForHelp 行为一致）
+      if (!expLimitEnabled || getCanGetHelpExp() || hasGuardDog) {
+        const helpOptions = [
+          {
+            id: 0x2715,             // 10005 = 放虫（占位，未直接使用）
+            expIds: [0x2713],       // [10003 = 帮好友除草]
+            list: analysis.needWeed,
+            fn: helpWeed,
+            key: 'weed',
+            name: '草',
+            record: 'helpWeed',
+          },
+          {
+            id: 0x2716,             // 10006 = 放草（占位，未直接使用）
+            expIds: [0x2712],       // [10002 = 帮好友除虫]
+            list: analysis.needBug,
+            fn: helpInsecticide,
+            key: 'bug',
+            name: '虫',
+            record: 'helpBug',
+          },
+          {
+            id: 0x2717,             // 10007 = 帮好友复活（占位，未直接使用）
+            expIds: [0x2711],       // [10001 = 帮好友浇水]
+            list: analysis.needWater,
+            fn: helpWater,
+            key: 'water',
+            name: '水',
+            record: 'helpWater',
+          },
+        ];
 
-  if (helpEnabled) {
-    // 经验满时仍帮助护主犬好友，仅跳过普通好友（与 visitFriendForHelp 行为一致）
-    if (!expLimitEnabled || getCanGetHelpExp() || hasGuardDog) {
-      const helpOptions = [
-        {
-          id: 0x2715,             // 10005 = 放虫（占位，未直接使用）
-          expIds: [0x2713],       // [10003 = 帮好友除草]
-          list: analysis.needWeed,
-          fn: helpWeed,
-          key: 'weed',
-          name: '草',
-          record: 'helpWeed',
-        },
-        {
-          id: 0x2716,             // 10006 = 放草（占位，未直接使用）
-          expIds: [0x2712],       // [10002 = 帮好友除虫]
-          list: analysis.needBug,
-          fn: helpInsecticide,
-          key: 'bug',
-          name: '虫',
-          record: 'helpBug',
-        },
-        {
-          id: 0x2717,             // 10007 = 帮好友复活（占位，未直接使用）
-          expIds: [0x2711],       // [10001 = 帮好友浇水]
-          list: analysis.needWater,
-          fn: helpWater,
-          key: 'water',
-          name: '水',
-          record: 'helpWater',
-        },
-      ];
+        for (const opt of helpOptions) {
+          const useExpCheck = hasGuardDog ? false : expLimitEnabled;
+          const canGetExp = !expLimitEnabled ||
+            hasGuardDog ||
+            (canGetExpByCandidates(opt.expIds) && getCanGetHelpExp());
 
-      for (const opt of helpOptions) {
-        const useExpCheck = hasGuardDog ? false : expLimitEnabled;
-        const canGetExp = !expLimitEnabled ||
-          hasGuardDog ||
-          (canGetExpByCandidates(opt.expIds) && getCanGetHelpExp());
-
-        if (opt.list.length > 0 && canGetExp) {
-          // 去掉 checkCanOperateRemote 预检查，直接发起帮忙操作
-          try {
-            const okCount = await runBatch(
-              opt.list,
-              ids => opt.fn(gid, ids, useExpCheck)
-            );
-            if (okCount > 0) {
-              actionLogs.push(`${opt.name}${okCount}`);
-              tally[opt.key] += okCount;
-              recordOperation(opt.record, okCount);
-              await randomDelay(50, 100);
+          if (opt.list.length > 0 && canGetExp) {
+            // 去掉 checkCanOperateRemote 预检查，直接发起帮忙操作
+            try {
+              const okCount = await runBatch(
+                opt.list,
+                ids => opt.fn(gid, ids, useExpCheck)
+              );
+              if (okCount > 0) {
+                actionLogs.push(`${opt.name}${okCount}`);
+                tally[opt.key] += okCount;
+                recordOperation(opt.record, okCount);
+                await randomDelay(50, 100);
+              }
+            } catch (_) {
+              // 帮忙操作整体失败，跳过该类操作
             }
-          } catch (_) {
-            // 帮忙操作整体失败，跳过该类操作
           }
         }
       }
     }
-  }
 
-  // ---- Steal ----
-  if (isAutomationOn('friend_steal') && analysis.stealable.length > 0) {
+    // ---- Steal ----
+    if (isAutomationOn('friend_steal') && analysis.stealable.length > 0) {
 
-    let stolen = 0;
-    const stolenNames = [];
+      let stolen = 0;
+      const stolenNames = [];
 
-    try {
-      await stealHarvest(gid, analysis.stealable);
-      stolen = analysis.stealable.length;
-      analysis.stealable.forEach(landId => {
-        const info = analysis.stealableInfo.find(s => s.landId === landId);
-        if (info) stolenNames.push(info.name);
+      try {
+        await stealHarvest(gid, analysis.stealable);
+        stolen = analysis.stealable.length;
+        analysis.stealable.forEach(landId => {
+          const info = analysis.stealableInfo.find(s => s.landId === landId);
+          if (info) stolenNames.push(info.name);
+        });
+      } catch (error) {
+        throw error;
+      }
+
+      if (stolen > 0) {
+        const namesStr = [...new Set(stolenNames)].join('/');
+        actionLogs.push(`偷${stolen}${namesStr ? `(${namesStr})` : ''}`);
+        tally.steal += stolen;
+        recordOperation('steal', stolen);
+      }
+    }
+
+    // ---- Bad (put weeds & insects) ----
+    const badEnabled = isAutomationOn('friend_bad');
+    let badCount = 0;
+    let putBugCount = 0;
+    let putWeedCount = 0;
+    const badFailedMsgs = [];
+
+    if (badEnabled) {
+      // Put insects（去掉 checkCanOperateRemote 预检查）
+      if (analysis.canPutBug.length > 0 && getBadRemainingTimes() > 0) {
+        const remainingBug = Math.min(
+          getRemainingTimes(PUT_BUG_OPERATION_ID, BAD_DAILY_LIMIT),
+          getBadRemainingTimes()
+        );
+        const targets = analysis.canPutBug.slice(0, remainingBug);
+        const result = await putInsectsDetailed(gid, targets);
+        const okCount = result.ok;
+        badFailedMsgs.push(...(result.failed || []).map(f => `放虫#${f.landId}:${f.reason}`));
+        if (okCount > 0) {
+          actionLogs.push(`放虫${okCount}`);
+          tally.putBug += okCount;
+          putBugCount += okCount;
+          badCount += okCount;
+        }
+        await randomDelay(50, 100);
+      }
+
+      // Put weeds（去掉 checkCanOperateRemote 预检查）
+      if (analysis.canPutWeed.length > 0 && getBadRemainingTimes() > 0) {
+        const remainingWeed = Math.min(
+          getRemainingTimes(PUT_WEED_OPERATION_ID, BAD_DAILY_LIMIT),
+          getBadRemainingTimes()
+        );
+        const targets = analysis.canPutWeed.slice(0, remainingWeed);
+        const result = await putWeedsDetailed(gid, targets);
+        const okCount = result.ok;
+        badFailedMsgs.push(...(result.failed || []).map(f => `放草#${f.landId}:${f.reason}`));
+        if (okCount > 0) {
+          actionLogs.push(`放草${okCount}`);
+          tally.putWeed += okCount;
+          putWeedCount += okCount;
+          badCount += okCount;
+        }
+        await randomDelay(50, 100);
+      }
+    }
+
+    if (actionLogs.length > 0) {
+      log('好友', `${name}: ${actionLogs.join('/')}`, {
+        module: 'friend',
+        event: '照顾好友',
+        result: 'ok',
+        friendName: name,
+        friendGid: gid,
+        actions: actionLogs,
       });
-    } catch (error) {
-      throw error;
     }
 
-    if (stolen > 0) {
-      const namesStr = [...new Set(stolenNames)].join('/');
-      actionLogs.push(`偷${stolen}${namesStr ? `(${namesStr})` : ''}`);
-      tally.steal += stolen;
-      recordOperation('steal', stolen);
-    }
+    return {
+      acted: actionLogs.length > 0,
+      entered: true,
+      count: badCount,
+      bugCount: putBugCount,
+      weedCount: putWeedCount,
+      message: badCount > 0
+        ? `捣乱完成 虫${putBugCount}/草${putWeedCount}`
+        : badFailedMsgs.slice(-3).join(' | '),
+    };
+  } finally {
+    await leaveFriendFarm(gid);
   }
-
-  // ---- Bad (put weeds & insects) ----
-  const badEnabled = isAutomationOn('friend_bad');
-  let badCount = 0;
-  let putBugCount = 0;
-  let putWeedCount = 0;
-  const badFailedMsgs = [];
-
-  if (badEnabled) {
-    // Put insects（去掉 checkCanOperateRemote 预检查）
-    if (analysis.canPutBug.length > 0 && getBadRemainingTimes() > 0) {
-      const remainingBug = Math.min(
-        getRemainingTimes(PUT_BUG_OPERATION_ID, BAD_DAILY_LIMIT),
-        getBadRemainingTimes()
-      );
-      const targets = analysis.canPutBug.slice(0, remainingBug);
-      const result = await putInsectsDetailed(gid, targets);
-      const okCount = result.ok;
-      badFailedMsgs.push(...(result.failed || []).map(f => `放虫#${f.landId}:${f.reason}`));
-      if (okCount > 0) {
-        actionLogs.push(`放虫${okCount}`);
-        tally.putBug += okCount;
-        putBugCount += okCount;
-        badCount += okCount;
-      }
-      await randomDelay(50, 100);
-    }
-
-    // Put weeds（去掉 checkCanOperateRemote 预检查）
-    if (analysis.canPutWeed.length > 0 && getBadRemainingTimes() > 0) {
-      const remainingWeed = Math.min(
-        getRemainingTimes(PUT_WEED_OPERATION_ID, BAD_DAILY_LIMIT),
-        getBadRemainingTimes()
-      );
-      const targets = analysis.canPutWeed.slice(0, remainingWeed);
-      const result = await putWeedsDetailed(gid, targets);
-      const okCount = result.ok;
-      badFailedMsgs.push(...(result.failed || []).map(f => `放草#${f.landId}:${f.reason}`));
-      if (okCount > 0) {
-        actionLogs.push(`放草${okCount}`);
-        tally.putWeed += okCount;
-        putWeedCount += okCount;
-        badCount += okCount;
-      }
-      await randomDelay(50, 100);
-    }
-  }
-
-  if (actionLogs.length > 0) {
-    log('好友', `${name}: ${actionLogs.join('/')}`, {
-      module: 'friend',
-      event: '照顾好友',
-      result: 'ok',
-      friendName: name,
-      friendGid: gid,
-      actions: actionLogs,
-    });
-  }
-
-  await leaveFriendFarm(gid);
-  return {
-    acted: actionLogs.length > 0,
-    entered: true,
-    count: badCount,
-    bugCount: putBugCount,
-    weedCount: putWeedCount,
-    message: badCount > 0
-      ? `捣乱完成 虫${putBugCount}/草${putWeedCount}`
-      : badFailedMsgs.slice(-3).join(' | '),
-  };
 }
 
 // ===== Visit friend for steal only =====
@@ -507,79 +508,80 @@ async function visitFriendForSteal(friend, tally, myGid, accountId) {
     return { acted: false, entered: false };
   }
 
-  const lands = enterReply.lands || [];
-  if (lands.length === 0) {
-    await leaveFriendFarm(gid);
-    return { acted: false, entered: true };
-  }
-
-
-  const plantBlacklist = getPlantBlacklist(accountId);
-  const analysis = analyzeFriendLands(lands, myGid, name, { plantBlacklist });
-  const actionLogs = [];
-
-  // Check if any stealable land still has remaining steal slots for us
-  const hasStealSlot = lands.some(land => {
-    const plant = land.plant;
-    if (!plant || !plant.phases || plant.phases.length === 0) return false;
-    const phase = getCurrentPhase(plant.phases, false);
-    if (!phase || phase.phase !== PlantPhase.MATURE) return false;
-    if (!plant.stealable) return false;
-
-    const stealPlayers = plant.steal_player;
-    if (!stealPlayers || stealPlayers.length === 0) return true;
-
-    const mySteal = stealPlayers.find(s => toNum(s.gid) === myGid);
-    const myStealCount = mySteal ? toNum(mySteal.num) : 0;
-    const maxSteal = toNum(plant.steal_num, 0);
-    return myStealCount < maxSteal;
-  });
-
-  if (!hasStealSlot && analysis.stealable.length === 0) {
-    await leaveFriendFarm(gid);
-    return { acted: false, entered: true };
-  }
-
-  if (analysis.stealable.length > 0) {
-    let stolen = 0;
-    const stolenNames = [];
-
-    // 先尝试批量偷取（stealHarvest 用 is_all=true，服务端会截断到可偷数量）
-    try {
-      await stealHarvest(gid, analysis.stealable);
-
-      // 但为了效率，直接按 stealable.length 计数（服务端 is_all=true 语义是"尽量偷"）
-
-      stolen = analysis.stealable.length;
-      analysis.stealable.forEach(landId => {
-        const info = analysis.stealableInfo.find(s => s.landId === landId);
-        if (info) stolenNames.push(info.name);
-      });
-    } catch (error) {
-      throw error;
+  try {
+    const lands = enterReply.lands || [];
+    if (lands.length === 0) {
+      return { acted: false, entered: true };
     }
 
-    if (stolen > 0) {
-      const namesStr = [...new Set(stolenNames)].join('/');
-      actionLogs.push(`偷${stolen}${namesStr ? `(${namesStr})` : ''}`);
-      tally.steal += stolen;
-      recordOperation('steal', stolen);
-    }
-  }
+    const plantBlacklist = getPlantBlacklist(accountId);
+    const analysis = analyzeFriendLands(lands, myGid, name, { plantBlacklist });
+    const actionLogs = [];
 
-  if (actionLogs.length > 0) {
-    log('好友', `${name}: ${actionLogs.join('/')}`, {
-      module: 'friend',
-      event: '偷好友菜',
-      result: 'ok',
-      friendName: name,
-      friendGid: gid,
-      actions: actionLogs,
+    // Check if any stealable land still has remaining steal slots for us
+    const hasStealSlot = lands.some(land => {
+      const plant = land.plant;
+      if (!plant || !plant.phases || plant.phases.length === 0) return false;
+      const phase = getCurrentPhase(plant.phases, false);
+      if (!phase || phase.phase !== PlantPhase.MATURE) return false;
+      if (!plant.stealable) return false;
+
+      const stealPlayers = plant.steal_player;
+      if (!stealPlayers || stealPlayers.length === 0) return true;
+
+      const mySteal = stealPlayers.find(s => toNum(s.gid) === myGid);
+      const myStealCount = mySteal ? toNum(mySteal.num) : 0;
+      const maxSteal = toNum(plant.steal_num, 0);
+      return myStealCount < maxSteal;
     });
-  }
 
-  await leaveFriendFarm(gid);
-  return { acted: actionLogs.length > 0, entered: true };
+    if (!hasStealSlot && analysis.stealable.length === 0) {
+
+      return { acted: false, entered: true };
+    }
+
+    if (analysis.stealable.length > 0) {
+      let stolen = 0;
+      const stolenNames = [];
+
+      // 先尝试批量偷取（stealHarvest 用 is_all=true，服务端会截断到可偷数量）
+      try {
+        await stealHarvest(gid, analysis.stealable);
+
+        // 但为了效率，直接按 stealable.length 计数（服务端 is_all=true 语义是"尽量偷"）
+
+        stolen = analysis.stealable.length;
+        analysis.stealable.forEach(landId => {
+          const info = analysis.stealableInfo.find(s => s.landId === landId);
+          if (info) stolenNames.push(info.name);
+        });
+      } catch (error) {
+        throw error;
+      }
+
+      if (stolen > 0) {
+        const namesStr = [...new Set(stolenNames)].join('/');
+        actionLogs.push(`偷${stolen}${namesStr ? `(${namesStr})` : ''}`);
+        tally.steal += stolen;
+        recordOperation('steal', stolen);
+      }
+    }
+
+    if (actionLogs.length > 0) {
+      log('好友', `${name}: ${actionLogs.join('/')}`, {
+        module: 'friend',
+        event: '偷好友菜',
+        result: 'ok',
+        friendName: name,
+        friendGid: gid,
+        actions: actionLogs,
+      });
+    }
+
+    return { acted: actionLogs.length > 0, entered: true };
+  } finally {
+    await leaveFriendFarm(gid);
+  }
 }
 
 // ===== Visit friend for help only =====
@@ -719,115 +721,116 @@ async function visitFriendForHelp(friend, tally, myGid, accountId, ignoreExpLimi
     return { acted: false, entered: false };
   }
 
-  // 【2026-08-15】对齐纯 Go 版 enterHasGuardDog：进农场后用 enter 实时 brief_dog_info 判定护主犬，
-  // 不再只信磁盘缓存（缓存可能滞后/为空导致误判）。
-  hasGuardDog = require('./friend-pet-cache').getState(gid, accountId || process.env.FARM_ACCOUNT_ID || '') === 'protect';
-  friend.hasGuardDog = hasGuardDog;
+  try {
+    // 【2026-08-15】对齐纯 Go 版 enterHasGuardDog：进农场后用 enter 实时 brief_dog_info 判定护主犬，
+    // 不再只信磁盘缓存（缓存可能滞后/为空导致误判）。
+    hasGuardDog = require('./friend-pet-cache').getState(gid, accountId || process.env.FARM_ACCOUNT_ID || '') === 'protect';
+    friend.hasGuardDog = hasGuardDog;
 
-  const lands = enterReply.lands || [];
-  if (lands.length === 0) {
-    await leaveFriendFarm(gid);
-    return { acted: false, entered: true };
-  }
+    const lands = enterReply.lands || [];
+    if (lands.length === 0) {
+      return { acted: false, entered: true };
+    }
 
+    const analysis = analyzeFriendLands(lands, myGid, name, {});
+    const actionLogs = [];
 
-  const analysis = analyzeFriendLands(lands, myGid, name, {});
-  const actionLogs = [];
+    const useExpCheck = hasGuardDog ? false : checkExpLimit;
 
-  const useExpCheck = hasGuardDog ? false : checkExpLimit;
-
-  // 【2026-08-15】完整对齐参考仓库：帮好友用 PlantService.Farming 一键务农
-  // （FarmingRequest{land_ids, host_gid, field_3:0, field_4:2}，回包 FarmingReply.results 逐地块确认，
-  //  code=1001057 静默），带 recent-help 去重，失败直接上报，不再拆三个独立 RPC。
-  const allHelpLandIds = [...new Set([...analysis.needWeed, ...analysis.needBug, ...analysis.needWater])];
-  if (allHelpLandIds.length > 0) {
-    const allowByExp = !checkExpLimit ||
-      hasGuardDog ||
-      (canGetExpByCandidates([0x2713, 0x2712, 0x2711]) && getCanGetHelpExp());
-    if (allowByExp) {
-      try {
-        const outcome = await runFarmingBatch(gid, allHelpLandIds, useExpCheck, _getHelpSnapshotKey(lands));
-        if (outcome.landCount > 0) {
-          const parts = [];
-          if (analysis.needWeed.length) parts.push(`草${analysis.needWeed.length}`);
-          if (analysis.needBug.length) parts.push(`虫${analysis.needBug.length}`);
-          if (analysis.needWater.length) parts.push(`水${analysis.needWater.length}`);
-          actionLogs.push(`一键务农${outcome.landCount}块/${outcome.operationCount}项(${parts.join('/')})`);
-          tally.weed += Math.min(analysis.needWeed.length, outcome.landCount);
-          tally.bug += Math.min(analysis.needBug.length, outcome.landCount);
-          tally.water += Math.min(analysis.needWater.length, outcome.landCount);
-          recordOperation('helpFarming', outcome.operationCount);
-          if (expLimitMode && hasGuardDog) {
-            log('好友', `[护主犬好友] ✅ ${name}: 一键务农${outcome.landCount}块(${parts.join('/')})`, {
+    // 【2026-08-15】完整对齐参考仓库：帮好友用 PlantService.Farming 一键务农
+    // （FarmingRequest{land_ids, host_gid, field_3:0, field_4:2}，回包 FarmingReply.results 逐地块确认，
+    //  code=1001057 静默），带 recent-help 去重，失败直接上报，不再拆三个独立 RPC。
+    const allHelpLandIds = [...new Set([...analysis.needWeed, ...analysis.needBug, ...analysis.needWater])];
+    if (allHelpLandIds.length > 0) {
+      const allowByExp = !checkExpLimit ||
+        hasGuardDog ||
+        (canGetExpByCandidates([0x2713, 0x2712, 0x2711]) && getCanGetHelpExp());
+      if (allowByExp) {
+        try {
+          const outcome = await runFarmingBatch(gid, allHelpLandIds, useExpCheck, _getHelpSnapshotKey(lands));
+          if (outcome.landCount > 0) {
+            const parts = [];
+            if (analysis.needWeed.length) parts.push(`草${analysis.needWeed.length}`);
+            if (analysis.needBug.length) parts.push(`虫${analysis.needBug.length}`);
+            if (analysis.needWater.length) parts.push(`水${analysis.needWater.length}`);
+            actionLogs.push(`一键务农${outcome.landCount}块/${outcome.operationCount}项(${parts.join('/')})`);
+            tally.weed += Math.min(analysis.needWeed.length, outcome.landCount);
+            tally.bug += Math.min(analysis.needBug.length, outcome.landCount);
+            tally.water += Math.min(analysis.needWater.length, outcome.landCount);
+            recordOperation('helpFarming', outcome.operationCount);
+            if (expLimitMode && hasGuardDog) {
+              log('好友', `[护主犬好友] ✅ ${name}: 一键务农${outcome.landCount}块(${parts.join('/')})`, {
+                module: 'friend',
+                event: '护主犬好友帮助成功',
+                friendName: name,
+                operation: 'farming',
+                count: outcome.landCount,
+              });
+            }
+          } else {
+            log('好友', `[护主犬好友] ${name}: 一键务农无效果（need ${allHelpLandIds.length} 块, 服务端确认 0）`, {
               module: 'friend',
-              event: '护主犬好友帮助成功',
+              event: '护主犬好友帮助无效果',
               friendName: name,
-              operation: 'farming',
-              count: outcome.landCount,
+              need: allHelpLandIds.length,
+              outcomeEffect: outcome.effect,
+              outcomeCode: outcome.code,
             });
           }
-        } else {
-          log('好友', `[护主犬好友] ${name}: 一键务农无效果（need ${allHelpLandIds.length} 块, 服务端确认 0）`, {
+        } catch (err) {
+          logWarn('好友', `${name} 一键务农异常: ${err.message}`, {
             module: 'friend',
-            event: '护主犬好友帮助无效果',
+            event: '帮助好友',
+            result: 'error',
             friendName: name,
-            need: allHelpLandIds.length,
-            outcomeEffect: outcome.effect,
-            outcomeCode: outcome.code,
+            friendGid: gid,
+            error: err.message,
+            code: err.code || 0,
           });
         }
-      } catch (err) {
-        logWarn('好友', `${name} 一键务农异常: ${err.message}`, {
-          module: 'friend',
-          event: '帮助好友',
-          result: 'error',
-          friendName: name,
-          friendGid: gid,
-          error: err.message,
-          code: err.code || 0,
-        });
       }
     }
-  }
 
-  if (actionLogs.length > 0) {
-    log('好友', `${name}: ${actionLogs.join('/')}`, {
-      module: 'friend',
-      event: '帮助好友',
-      result: 'ok',
-      friendName: name,
-      friendGid: gid,
-      actions: actionLogs,
-    });
-  } else if (expLimitMode && hasGuardDog && (analysis.needWater.length + analysis.needWeed.length + analysis.needBug.length) > 0) {
-    // 护主犬好友但所有操作都没成功，记录原因方便排查
-    // 调试：对比 列表快照(friend.dryNum/weedNum/insectNum) 与 进农场实测土地合计，
-    // 用于判断是"快照滞后"还是"分析漏判"。
-    const freshDry = lands.reduce((s, l) => s + toNum(l.plant && l.plant.dry_num), 0);
-    const freshWeed = lands.reduce((s, l) => s + toNum(l.plant && l.plant.weed_num), 0);
-    const freshInsect = lands.reduce((s, l) => s + toNum(l.plant && l.plant.insect_num), 0);
-    const weedOwners = lands.reduce((s, l) => s + ((l.plant && l.plant.weed_owners) ? l.plant.weed_owners.length : 0), 0);
-    logWarn('好友', `[护主犬好友] ${name}: 进入农场但无有效操作（可能土地状态已变或次数用完）`, {
-      module: 'friend',
-      event: '护主犬好友帮助无效果',
-      friendName: name,
-      friendGid: gid,
-      needWater: analysis.needWater.length,
-      needWeed: analysis.needWeed.length,
-      needBug: analysis.needBug.length,
-      lands: lands.length,
-      snapDry: toNum(friend.dryNum),
-      snapWeed: toNum(friend.weedNum),
-      snapInsect: toNum(friend.insectNum),
-      freshDry,
-      freshWeed,
-      freshInsect,
-      freshWeedOwners: weedOwners,
-    });
-  }
+    if (actionLogs.length > 0) {
+      log('好友', `${name}: ${actionLogs.join('/')}`, {
+        module: 'friend',
+        event: '帮助好友',
+        result: 'ok',
+        friendName: name,
+        friendGid: gid,
+        actions: actionLogs,
+      });
+    } else if (expLimitMode && hasGuardDog && (analysis.needWater.length + analysis.needWeed.length + analysis.needBug.length) > 0) {
+      // 护主犬好友但所有操作都没成功，记录原因方便排查
+      // 调试：对比 列表快照(friend.dryNum/weedNum/insectNum) 与 进农场实测土地合计，
+      // 用于判断是"快照滞后"还是"分析漏判"。
+      const freshDry = lands.reduce((s, l) => s + toNum(l.plant && l.plant.dry_num), 0);
+      const freshWeed = lands.reduce((s, l) => s + toNum(l.plant && l.plant.weed_num), 0);
+      const freshInsect = lands.reduce((s, l) => s + toNum(l.plant && l.plant.insect_num), 0);
+      const weedOwners = lands.reduce((s, l) => s + ((l.plant && l.plant.weed_owners) ? l.plant.weed_owners.length : 0), 0);
+      logWarn('好友', `[护主犬好友] ${name}: 进入农场但无有效操作（可能土地状态已变或次数用完）`, {
+        module: 'friend',
+        event: '护主犬好友帮助无效果',
+        friendName: name,
+        friendGid: gid,
+        needWater: analysis.needWater.length,
+        needWeed: analysis.needWeed.length,
+        needBug: analysis.needBug.length,
+        lands: lands.length,
+        snapDry: toNum(friend.dryNum),
+        snapWeed: toNum(friend.weedNum),
+        snapInsect: toNum(friend.insectNum),
+        freshDry,
+        freshWeed,
+        freshInsect,
+        freshWeedOwners: weedOwners,
+      });
+    }
 
-  await leaveFriendFarm(gid);
-  return { acted: actionLogs.length > 0, entered: true };
+    return { acted: actionLogs.length > 0, entered: true };
+  } finally {
+    await leaveFriendFarm(gid);
+  }
 }
 
 // ===== Exports =====

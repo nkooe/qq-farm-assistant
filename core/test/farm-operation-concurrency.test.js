@@ -12,10 +12,14 @@ function harness(t) {
   const analysis = { harvestable: [], needWeed: [], needBug: [], needGoldenBug: [], needWater: [],
     dead: [], empty: [1], unlockable: [], upgradable: [], growing: [] };
   let release; const reads = []; const mutations = [];
+  let markFirstRead;
+  const firstRead = new Promise(resolve => { markFirstRead = resolve; });
   const context = { module: { exports: {} }, require(name) {
     if (name === './farm-api') return { getAllLands: async () => {
       reads.push('read');
-      if (reads.length === 1) await new Promise(resolve => { release = resolve; });
+      if (reads.length === 1) {
+        await new Promise(resolve => { release = resolve; markFirstRead(); });
+      }
       return { lands: [{ id: 1 }] };
     } };
     if (name === '../models/store') return { isAutomationOn: key => key === 'farm',
@@ -33,7 +37,7 @@ function harness(t) {
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), context, { filename });
   const api = context.module.exports;
   t.after(() => api.stopFarmCheckLoop());
-  return { ...api, reads, mutations, release: () => release() };
+  return { ...api, reads, mutations, firstRead, release: () => release() };
 }
 
 test('automatic farm work excludes manual whole-farm mutations until its snapshot is consumed', async t => {
@@ -69,4 +73,15 @@ test('manual farm work excludes automatic checks and independent account guards 
   assert.equal(await createFarmOperationGuard().run(async () => 'other account'), 'other account');
   h.release(); await manual;
   assert.equal(await h.checkFarm(), true);
+});
+
+test('stopping while a land snapshot is pending prevents later automatic writes', async t => {
+  const h = harness(t);
+  const pending = h.checkFarm();
+  await h.firstRead;
+  assert.equal(h.reads.length, 1);
+  h.stopFarmCheckLoop();
+  h.release();
+  assert.equal(await pending, false);
+  assert.deepEqual(h.mutations, []);
 });

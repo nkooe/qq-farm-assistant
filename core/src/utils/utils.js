@@ -151,6 +151,24 @@ function formatLocalDateTime24(date = new Date()) {
     return `${yyyy}-${mm}-${dd} ${hh}:${min}:${ss}`;
 }
 
+// 日常调度统一按游戏时钟和指定时区计算，容器默认使用北京时间。
+function getSystemTimeZone() { return process.env.TZ || 'Asia/Shanghai'; }
+function getSystemDateParts(nowMs = getServerTimeSec() * 1000) {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: getSystemTimeZone(), year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+    }).formatToParts(new Date(nowMs));
+    return Object.fromEntries(parts.map(part => [part.type, part.value]));
+}
+function getSystemDateKey(nowMs) {
+    const p = getSystemDateParts(nowMs);
+    return `${p.year}-${p.month}-${p.day}`;
+}
+function getSystemClockMinutes(nowMs) {
+    const p = getSystemDateParts(nowMs);
+    return Number(p.hour) * 60 + Number(p.minute);
+}
+
 // ============ 错误判定 ============
 /** 判断是否是瞬时网络错误（可忽略/可重试）。统一实现，避免各模块漂移导致误判。 */
 function isTransientNetworkError(err) {
@@ -167,6 +185,7 @@ module.exports = {
     toLong, toNum, now,
     setLogHook,
     getServerTimeSec, syncServerTime, toTimeSec,
+    getSystemDateKey, getSystemClockMinutes, getSystemTimeZone,
     log, logWarn, sleep, randomDelay,
     pad2, formatLocalDateTime24, isTransientNetworkError,
 };

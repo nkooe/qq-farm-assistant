@@ -1,8 +1,12 @@
+const { setTimeout: pause } = require('node:timers/promises');
+const { performance } = require('node:perf_hooks');
+const { runExclusiveAutomationTask } = require('./automation-lock');
 const { CONFIG } = require('../config/config');
 const {
   isAutomationOn,
   getFriendBlacklist,
   getFriendBlacklistDetails,
+  getStealDelaySeconds,
   getAutoAcceptFriendMinLevel,
   getKnownFriendGids,
   applyConfigSnapshot,
@@ -57,6 +61,8 @@ const {
 
 // ===== State =====
 let isCheckingFriends = false;
+let friendGeneration = 0;
+let delayController = new AbortController();
 let friendLoopRunning = false;
 let externalSchedulerMode = false;
 
@@ -328,8 +334,6 @@ async function checkFriends(options = {}) {
   const userState = getUserState();
   if (!isAutomationOn('friend') || !isConnected()) return false;
 
-  await bootstrapFriendDogInfoCacheIfNeeded();
-
   const accountId = userState.accountId || process.env.FARM_ACCOUNT_ID || '';
   currentAccountId = accountId;
   // 极速务农独占模式：依据开关/定时同步其它巡查的暂停与恢复（幂等，仅状态翻转时动作）
@@ -356,6 +360,13 @@ async function checkFriends(options = {}) {
   if (inFriendQuietHours()) return false;
 
   isCheckingFriends = true;
+  const generation = friendGeneration;
+  const signal = delayController.signal;
+  const canContinue = () => generation === friendGeneration && !signal.aborted && isConnected()
+    && isAutomationOn('friend') && !inFriendQuietHours() && (!options.canContinue || options.canContinue());
+  const allowedTarget = (target, type) => canContinue() && isAutomationOn(`friend_${type}`)
+    && !(type === 'steal' && computeEffectiveTurbo())
+    && !getFriendBlacklistDetails(accountId).some(item => Number(item.gid) === Number(target.gid) && item[type === 'steal' ? 'skipSteal' : 'skipHelp']);
   checkDailyReset();
   ensureExpLimitCallback();
 
@@ -370,7 +381,11 @@ async function checkFriends(options = {}) {
   }
 
   try {
-    const allFriendsReply = await getCachedFriendsList();
+    await runExclusiveAutomationTask('friend_bootstrap', async () => {
+      if (canContinue()) await bootstrapFriendDogInfoCacheIfNeeded();
+    });
+    if (!canContinue()) return false;
+    const allFriendsReply = await runExclusiveAutomationTask('friend_list', () => canContinue() ? getCachedFriendsList() : { game_friends: [] });
     const rawFriends = extractReplyFriends(allFriendsReply);
 
     if (rawFriends.length === 0) {
@@ -522,22 +537,34 @@ async function checkFriends(options = {}) {
 
     // Steal
     if (stealTargets.length > 0 && doSteal) {
+      let lastVisitAt = null;
       for (const target of stealTargets) {
+        // 等待在事务锁外；修改开关、黑名单或停止账号会取消后续访问。
+        while (lastVisitAt !== null && allowedTarget(target, 'steal')) {
+          const remaining = Math.max(50, getStealDelaySeconds(accountId) * 1000) - (performance.now() - lastVisitAt);
+          if (remaining <= 0) break;
+          await pause(Math.min(250, remaining), undefined, { signal });
+        }
+        if (!canContinue() || !isAutomationOn('friend_steal') || computeEffectiveTurbo()) break;
+        if (!allowedTarget(target, 'steal')) continue;
         if (!canOperate(0x2714)) break; // 10004 = steal
         try {
-          await visitFriendForSteal(target, tally, userState.gid, userState.accountId);
+          await runExclusiveAutomationTask('friend_steal', async () => {
+            if (!allowedTarget(target, 'steal')) return;
+            try { await visitFriendForSteal(target, tally, userState.gid, accountId); }
+            finally { lastVisitAt = performance.now(); }
+          });
         } catch {
           // Skip individual failures
         }
-        // 放慢访问节奏，降低单账号短时请求密度，避免触发游戏风控导致断连
-        await randomDelay(100, 200);
+
       }
     }
 
     // Auto-sell after stealing
-    if (tally.steal > 0) {
+    if (tally.steal > 0 && canContinue()) {
       try {
-        await sellAllFruits();
+        await runExclusiveAutomationTask('friend_sell', () => canContinue() ? sellAllFruits() : null);
       } catch {
         // Ignore sell errors
       }
@@ -556,6 +583,8 @@ async function checkFriends(options = {}) {
       let gapMax = turboMode ? 150 : 200;
       const roundFailedGids = new Set();
       for (const target of helpTargets) {
+        if (!canContinue()) break;
+        if (!turboMode && !allowedTarget(target, 'help')) continue;
         const tgid = toNum(target.gid);
         if (turboMode && roundFailedGids.has(tgid)) continue;
         // A) 连接已断开（ws 关闭）直接结束本轮，交还应用宝离线重连
@@ -572,10 +601,11 @@ async function checkFriends(options = {}) {
           continue;
         }
         try {
-          const result = await visitFriendForHelp(
-            target, tally, userState.gid, userState.accountId,
-            ignoreExpLimit, helpExpReached || turboMode, turboMode
-          );
+          const result = await runExclusiveAutomationTask('friend_help', () => {
+            if (!canContinue() || (!turboMode && !allowedTarget(target, 'help'))) return null;
+            return visitFriendForHelp(target, tally, userState.gid, accountId,
+              ignoreExpLimit, helpExpReached || turboMode, turboMode);
+          });
           // 帮助成功才输出日志；失败（无有效操作/异常）不打日志
           if (result && result.acted) {
             log('好友', `成功帮助${target.hasGuardDog ? '护主犬' : '好友'} ${target.name}`, {
@@ -618,7 +648,7 @@ async function checkFriends(options = {}) {
     }
 
     // Bad (put weeds/insects)
-    if (doBad && !isFriendBadPaused()) {
+    if (doBad && canContinue() && !isFriendBadPaused()) {
       log('好友', '开始自动放虫放草', {
         module: 'friend',
         event: '开始自动放虫放草',
@@ -665,6 +695,7 @@ async function checkFriends(options = {}) {
         );
 
         for (let i = 0; i < topTargets.length; i++) {
+          if (!canContinue() || !isAutomationOn('friend_bad')) break;
           const target = topTargets[i];
           if (!canOperateBad()) {
             log('好友', '放虫放草次数已用完，停止执行', {
@@ -675,7 +706,7 @@ async function checkFriends(options = {}) {
           }
 
           try {
-            const result = await visitFriend(target, tally, userState.gid, userState.accountId);
+            const result = await runExclusiveAutomationTask('friend_visit', () => canContinue() && isAutomationOn('friend_bad') ? visitFriend(target, tally, userState.gid, accountId) : null);
             if (trackBadVisitResult(result, target, { source: 'friend_check' })) {
               break;
             }
@@ -716,7 +747,7 @@ async function checkFriends(options = {}) {
 
     return summary.length > 0;
   } catch (err) {
-    if (!isTransientNetworkError(err)) {
+    if (!signal.aborted && !isTransientNetworkError(err)) {
       logWarn('好友', `巡查异常: ${err.message}`);
     }
     return false;
@@ -781,6 +812,9 @@ function startFriendCheckLoop(opts = {}) {
 }
 
 function stopFriendCheckLoop() {
+  friendGeneration++;
+  delayController.abort();
+  delayController = new AbortController();
   friendLoopRunning = false;
   externalSchedulerMode = false;
   lastFullDogInfoRefreshAt = 0;
@@ -967,7 +1001,11 @@ async function runBadOnceOnStartup(force = false) {
   });
 
   try {
-    const allFriendsReply = await getCachedFriendsList();
+    await runExclusiveAutomationTask('friend_bootstrap', async () => {
+      if (canContinue()) await bootstrapFriendDogInfoCacheIfNeeded();
+    });
+    if (!canContinue()) return false;
+    const allFriendsReply = await runExclusiveAutomationTask('friend_list', () => canContinue() ? getCachedFriendsList() : { game_friends: [] });
     const rawFriends = extractReplyFriends(allFriendsReply);
 
     if (rawFriends.length === 0) {
@@ -1044,7 +1082,7 @@ async function runBadOnceOnStartup(force = false) {
       );
 
       try {
-        const result = await visitFriend(target, tally, userState.gid, accountId);
+        const result = await runExclusiveAutomationTask('friend_visit', () => visitFriend(target, tally, userState.gid, accountId));
         processedCount++;
         if (trackBadVisitResult(result, target, { source: 'startup_bad' })) {
           break;

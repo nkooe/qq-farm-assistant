@@ -43,6 +43,30 @@ test('milk tea exchange quantity respects the wallet and craft costs use fruit s
   await expect(craft).toContainText('草莓')
 })
 
+test('a long batch craft confirmation keeps its title and buttons visible', async ({ page }) => {
+  const state: any = structuredClone(baseline)
+  state.fruits = Array.from({ length: 40 }, (_, index) => ({
+    id: 40525, uid: String(index + 1), count: 12, name: `测试果实${index + 1}`,
+    image: '', locked: false, mutations: [],
+  }))
+  state.recipes[1].fruitId = 40525
+  await page.route('**/api/activities/milk-tea?**', route => route.fulfill({ json: { ok: true, data: state } }))
+  await page.goto('/test/browser/milk-tea.html?full')
+  await page.getByRole('button', { name: '制作奶茶', exact: true }).click()
+  await page.getByRole('button', { name: '全部制作', exact: true }).click()
+  const craft = page.getByRole('dialog', { name: '确认制作', exact: true }).last()
+  const confirm = craft.getByRole('button', { name: '确认', exact: true })
+  await expect(craft.getByRole('heading', { name: '确认制作', exact: true })).toBeInViewport()
+  await expect(confirm).toBeInViewport()
+  await expect(confirm).toBeEnabled()
+  const lastFruit = craft.getByText('测试果实40', { exact: true })
+  await lastFruit.scrollIntoViewIfNeeded()
+  await expect(lastFruit).toBeInViewport()
+  await expect(confirm).toBeInViewport()
+  await craft.getByRole('button', { name: '取消', exact: true }).click()
+  await expect(craft).not.toBeVisible()
+})
+
 test('late milk tea responses and dialogs cannot cross accounts', async ({ page }) => {
   let release = () => {}
   const held = new Promise<void>(resolve => { release = resolve })
