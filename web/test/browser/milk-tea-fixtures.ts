@@ -11,6 +11,7 @@ export const state = {
   id: '2026110101',
   active: true,
   settling: false,
+  actionAvailability: { craft: true, exchange: true, hire: true },
   startTime: 1792029600,
   endTime: 1794844799,
   serverTime: 1792530000,

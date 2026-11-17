@@ -4,7 +4,7 @@ const { getResourcePath } = require('./runtime-paths');
 /** 公共表只从主资源目录读取；读取/校验全部成功后加载器才更新缓存。 */
 function loadSharedGameTables() {
     const tables = {};
-    for (const name of ['RoleLevel', 'Plant', 'ItemInfo']) {
+    for (const name of ['RoleLevel', 'Plant', 'ItemInfo', 'Goods']) {
         const rows = JSON.parse(fs.readFileSync(getResourcePath('gameConfig', `${name}.json`), 'utf8'));
         if (!Array.isArray(rows) || rows.length === 0 || rows.some(row => !row || typeof row !== 'object')) {
             throw new Error(`${name}.json 不是有效的非空配置列表`);

@@ -25,7 +25,7 @@ function routesHarness() {
 test('every new activity and inventory route checks ownership and connection before dispatch', async () => {
   const h = routesHarness();
   assert.ok(h.routes.length >= 40);
-  for (const route of h.routes.filter(route => route.path !== '/api/illustrated/mutations')) {
+  for (const route of h.routes.filter(route => !['/api/illustrated/mutations', '/api/ranch/automation-options'].includes(route.path))) {
     assert.equal((await h.invoke(route, '')).statusCode, 400, route.path);
     assert.equal((await h.invoke(route, 'other-user')).statusCode, 403, route.path);
     assert.equal((await h.invoke(route, 'offline')).body.ok, false, route.path);
@@ -52,6 +52,15 @@ test('static mutation catalog contains definitions without dispatching account d
   const response = await h.invoke(catalog, '');
   assert.equal(response.body.ok, true);
   assert.ok(response.body.data.collections.length > 0);
+  assert.equal(h.calls.length, 0);
+});
+
+test('ranch options expose definitions without account data', async () => {
+  const h = routesHarness();
+  const response = await h.invoke(h.routes.find(route => route.path === '/api/ranch/automation-options'), '');
+  assert.equal(response.body.ok, true);
+  assert.ok(response.body.data.length > 0);
+  assert.ok(response.body.data.every(row => Object.keys(row).sort().join(',') === 'kind,label,value'));
   assert.equal(h.calls.length, 0);
 });
 

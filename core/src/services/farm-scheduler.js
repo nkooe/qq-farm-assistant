@@ -14,6 +14,7 @@ const {
 const { checkAndBuyFertilizerBoth } = require('./mall');
 const { createScheduler } = require('./scheduler');
 const { runWithRequestClass } = require('../utils/request-context');
+const { runExclusiveAutomationTask } = require('./automation-lock');
 
 const scheduler = createScheduler('farm_fertilizer_buy');
 let timerSignature = '';
@@ -80,7 +81,10 @@ async function checkFertilizerBuyOnce() {
       normalCount: getFertilizerBuyNormalCount(),
       normalThresholdHours: getFertilizerBuyNormalThresholdHours()
     };
-    await runWithRequestClass('farm', () => checkAndBuyFertilizerBoth(config), { signal: controller.signal });
+    await runExclusiveAutomationTask('fertilizer_buy', () => {
+      if (controller.signal.aborted) return;
+      return runWithRequestClass('farm', () => checkAndBuyFertilizerBoth(config), { signal: controller.signal });
+    }, { detached: true });
   } catch (err) {
     logWarn('农场', `化肥自动购买检测失败: ${err.message}`, {
       module: 'farm',

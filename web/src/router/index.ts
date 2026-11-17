@@ -53,7 +53,7 @@ const router = createRouter({
         path: route.path,
         name: route.name,
         component: route.component,
-        meta: { adminOnly: route.adminOnly === true },
+        meta: { adminOnly: route.adminOnly === true, ranchSection: route.ranchSection },
       })),
     },
     {

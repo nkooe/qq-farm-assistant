@@ -71,11 +71,11 @@ function confirm() {
         </button>
       </header>
 
-      <div class="purchase-body">
+      <div class="purchase-body dialog-scroll">
         <div class="purchase-section-label">
           每份包含<span v-if="goods.rewards.length > 1"> · {{ goods.rewards.length }} 件</span>
         </div>
-        <ul class="purchase-rewards">
+        <ul class="purchase-rewards dialog-scroll">
           <li v-for="reward in goods.rewards" :key="reward.id">
             <CommerceItemImage :src="reward.image" :alt="reward.name" size="sm" />
             <span class="purchase-rewards__name">{{ reward.name }}</span>
@@ -235,7 +235,8 @@ function confirm() {
   min-height: 0;
   flex-direction: column;
   gap: 14px;
-  padding: 16px 20px 4px;
+  margin-inline: var(--ui-dialog-scroll-inset);
+  padding: 16px calc(20px - var(--ui-dialog-scroll-inset)) 4px;
   overflow-y: auto;
 }
 
@@ -250,7 +251,8 @@ function confirm() {
   max-height: 232px;
   gap: 2px;
   margin: -6px 0 0;
-  padding: 6px;
+  padding-block: 6px;
+  padding-inline-start: 6px;
   overflow-y: auto;
   border-radius: var(--ui-radius-control);
   background: var(--ui-surface-soft);

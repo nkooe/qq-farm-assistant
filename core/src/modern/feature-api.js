@@ -1,6 +1,6 @@
 // Explicit RPC allowlist shared by worker dispatch and the authorized HTTP routes.
 const groups = {
-  'activity-center': ['getActivityDirectorySnapshot', 'getActivityCenterSnapshot', 'getCurrentSeasonEvent',
+  'activity-center': ['getActivityDirectorySnapshot', 'getRanchActivityDirectorySnapshot', 'getActivityCenterSnapshot', 'getCurrentSeasonEvent',
     'getCurrentStellarActivity', 'getCurrentStarSandShop', 'getCurrentSolarTerms', 'getCurrentQixiActivity',
     'getCurrentQingMeiActivity', 'getCurrentCharityRedFlowerActivity', 'getCurrentWeatherActivity',
     'getWeatherFriends', 'claimBattlePassRewards', 'lightConstellation', 'exchangeStarSandGoods', 'claimSolarTerm',
@@ -10,6 +10,8 @@ const groups = {
     'getPetDiaryFriend', 'operatePetDiary', 'lightWeatherResearch', 'buyWeatherBottle', 'collectWeatherBottle',
     'summonWeatherRain', 'exchangeWeatherCollectorBottle', 'scanWeatherFriends', 'useWeatherCollectorBottle',
     'useWeatherSummonBottle', 'useWeatherFrogBottle', 'useWeatherCloudBottle', 'advanceWeatherResearch'],
+  'ranch': ['getRanchState', 'prepareRanchAction', 'operateRanch'],
+  'muge-activity': ['getMugeActivity', 'operateMugeActivity'],
   'solar-calendar': ['getSolarCalendar', 'operateSolarCalendar'],
   'milk-tea': ['getMilkTeaActivity', 'operateMilkTeaActivity'],
   'share-reward-activity': ['getShareRewardActivity', 'operateShareRewardActivity'],

@@ -5,6 +5,7 @@ const {
 } = require('../models/store');
 const { getActiveMysteryShop, buyMysteryShopGoods } = require('./mystery-shop');
 const { runWithRequestClass } = require('../utils/request-context');
+const { runExclusiveAutomationTask } = require('./automation-lock');
 
 const MYSTERY_AUTO_BUY_INTERVAL_MS = 60 * 60 * 1000;
 const MYSTERY_AUTO_BUY_MAX_PER_CYCLE = 20;
@@ -64,7 +65,7 @@ async function checkMysteryAutoBuyOnce(maxPurchases = MYSTERY_AUTO_BUY_MAX_PER_C
   const controller = new AbortController();
   pendingController = controller;
   try {
-    await runWithRequestClass('farm', async () => {
+    await runExclusiveAutomationTask('mystery_buy', () => runWithRequestClass('farm', async () => {
       for (let i = 0; i < maxPurchases; i++) {
         if (currentGeneration !== generation || !isMysteryAutoBuyOn()) break;
         const offer = await getActiveMysteryShop();
@@ -86,7 +87,7 @@ async function checkMysteryAutoBuyOnce(maxPurchases = MYSTERY_AUTO_BUY_MAX_PER_C
           module: 'mystery', event: 'auto_buy', result: 'done', bought
         });
       }
-    }, { signal: controller.signal });
+    }, { signal: controller.signal }), { detached: true });
   } catch (err) {
     logWarn('神秘商人', `自动购买检测失败: ${err.message}`, {
       module: 'mystery', event: 'auto_buy', result: 'error', error: err.message

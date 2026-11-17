@@ -14,12 +14,14 @@ const { toLong, toNum, log, logWarn, sleep } = require('../utils/utils');
 const { createScheduler } = require('./scheduler');
 const { recordOperation } = require('./stats');
 const { getItemById } = require('../config/gameConfig');
+const { runExclusiveAutomationTask } = require('./automation-lock');
 
 // ---- 状态 ----
 
 let checking = false;
 let taskClaimDoneDateKey = '';
 let taskClaimLastAt = 0;
+let generation = 0;
 
 const taskScheduler = createScheduler('task');
 
@@ -73,6 +75,28 @@ async function claimTaskReward(taskId, doShared = false) {
   ).finish();
   const { body } = await sendMsgAsync('gamepb.taskpb.TaskService', 'ClaimTaskReward', request);
   return types.ClaimTaskRewardReply.decode(body);
+}
+
+async function completeClientReportedTasks(tasks, canContinue) {
+  let changed = false;
+  for (const task of tasks) {
+    if (!canContinue()) break;
+    const id = toNum(task.id), total = toNum(task.total_progress);
+    if (id <= 0 || toNum(task.cond_type) !== 15 || !task.is_unlocked || task.is_claimed
+      || total <= 0 || toNum(task.progress) >= total || [4, 5].includes(toNum(task.task_type))) continue;
+    try {
+      const request = types.ClientReportProgressRequest.encode(types.ClientReportProgressRequest.create({
+        task_id: toLong(id), progress: toLong(total),
+      })).finish();
+      const { body } = await sendMsgAsync('gamepb.taskpb.TaskService', 'ClientReportProgress', request);
+      const reply = types.ClientReportProgressReply.decode(body);
+      const updated = buildGrowthTasks(reply.task_info).find(row => toNum(row.id) === id);
+      if (updated && toNum(updated.progress) >= total) changed = true;
+    } catch (err) {
+      if (canContinue() && !isTransientError(err)) logWarn('任务', `成长任务上报失败: ${err.message}`);
+    }
+  }
+  return changed;
 }
 
 /**
@@ -179,6 +203,7 @@ function formatTask(task, category = 'main') {
 function analyzeTaskList(tasks, category = 'main') {
   const claimable = [];
   for (const task of tasks) {
+    if ([4, 5].includes(toNum(task.task_type))) continue;
     const formatted = formatTask(task, category);
     if (formatted.canClaim) claimable.push(formatted);
   }
@@ -322,16 +347,16 @@ async function doClaim(task) {
   }
 }
 
-async function claimTasksFromList(tasks) {
-  if (!isAutomationOn('task')) return;
-  for (const task of tasks) {
-    await doClaim(task);
-  }
-}
-
 // ---- 主检查流程 ----
 
-async function checkAndClaimTasks() {
+function checkAndClaimTasks() {
+  const token = generation;
+  return runExclusiveAutomationTask('farm_tasks', () => performCheckAndClaimTasks(token));
+}
+
+async function performCheckAndClaimTasks(token) {
+  const canContinue = () => token === generation && isConnected() && isAutomationOn('task');
+  if (!canContinue()) return;
   if (checking) return;
   if (!isAutomationOn('task')) return;
   if (!isConnected()) return;
@@ -345,14 +370,22 @@ async function checkAndClaimTasks() {
       return;
     }
 
-    const taskInfo = reply.task_info;
+    if (!canContinue()) return;
+    let taskInfo = reply.task_info;
+    if (await completeClientReportedTasks(buildGrowthTasks(taskInfo), canContinue)) {
+      if (!canContinue()) return;
+      const refreshed = await getTaskInfo();
+      if (!refreshed.task_info) return;
+      taskInfo = refreshed.task_info;
+    }
+    if (!canContinue()) return;
 
     // 收集可领取任务
     const dailyTasks = buildDailyTasksForDebug(taskInfo);
     const dailyClaimable = analyzeTaskList(dailyTasks, 'daily');
     const growthClaimable = analyzeTaskList(buildGrowthTasks(taskInfo), 'growth');
     const mainClaimable = analyzeTaskList(taskInfo.tasks || [], 'main');
-    const allClaimable = [...dailyClaimable, ...growthClaimable, ...mainClaimable];
+    const allClaimable = [...new Map([...dailyClaimable, ...growthClaimable, ...mainClaimable].map(task => [task.id, task])).values()];
 
     if (allClaimable.length > 0) {
       log('任务', `发现 ${allClaimable.length} 个可领取任务`, {
@@ -367,6 +400,7 @@ async function checkAndClaimTasks() {
 
       let dailyClaimed = 0;
       for (const task of allClaimable) {
+        if (!canContinue()) return;
         const success = await doClaim(task);
         if (task.category === 'daily' && success) dailyClaimed += 1;
       }
@@ -379,6 +413,7 @@ async function checkAndClaimTasks() {
     }
 
     // 活跃奖励
+    if (!canContinue()) return;
     await checkAndClaimActives(taskInfo.actives || []);
     // 图鉴奖励
     await checkAndClaimIllustratedRewards();
@@ -397,7 +432,8 @@ async function checkAndClaimTasks() {
 /**
  * 响应服务端推送的任务信息通知
  */
-function onTaskInfoNotify(payload) {
+function onTaskInfoNotify(payload, context) {
+  if (context?.globalSceneId === 2) return;
   if (!payload) return;
   if (!isAutomationOn('task')) return;
 
@@ -419,9 +455,7 @@ function onTaskInfoNotify(payload) {
   }
 
   taskScheduler.setTimeoutTask('task_claim_debounce', 5000, async () => {
-    if (hasClaimable) await claimTasksFromList(claimable);
-    await checkAndClaimActives(actives);
-    await checkAndClaimIllustratedRewards();
+    await checkAndClaimTasks();
   });
 }
 
@@ -436,6 +470,7 @@ function initTaskSystem() {
 }
 
 function cleanupTaskSystem() {
+  generation++;
   networkEvents.off('taskInfoNotify', onTaskInfoNotify);
   taskScheduler.clearAll();
   checking = false;

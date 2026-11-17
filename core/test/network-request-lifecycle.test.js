@@ -108,3 +108,17 @@ test('socket write errors reject immediately and diagnose the sending phase', as
     assert.equal(diagnostic.responseMs, null);
     assert.equal(h.api.fixture.count(), 0);
 });
+
+test('packet guards recheck after encryption and mark writes only when sent', async t => {
+    const h = harness(); t.after(() => h.api.stopNetwork());
+    let complete, disabled = false, sent = 0;
+    h.crypto.encryptBuffer = () => new Promise(resolve => { complete = resolve; });
+    const blocked = h.api.sendMsgAsync('fixture', 'Write', Buffer.from([1]), {
+        beforeSend: () => disabled ? new Error('automation stopped') : null, onSent: () => sent++,
+    });
+    await tick(); disabled = true; complete(Buffer.from([1]));
+    await assert.rejects(blocked, /automation stopped/);
+    assert.equal(h.frames.length, 0); assert.equal(sent, 0);
+    const request = h.api.sendMsgAsync('fixture', 'Write', Buffer.alloc(0), { onSent: () => sent++ });
+    await tick(); assert.equal(sent, 1); h.reply(h.frames[0]); await request;
+});

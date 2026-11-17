@@ -14,7 +14,7 @@ function harness() {
   const bag = [{ id: 1005, count: 1000 }, { id: 1002, count: 100 }]; const writes = []; const reads = [];
   let corrupt = false; let failed = false;
   const mocks = {
-    '../config/gameConfig': { getItemById: id => ({ name: `物品${id}` }), getItemImageById: () => '' },
+    '../config/gameConfig': { getItemById: id => ({ name: `物品${id}` }), getItemImageById: () => '', getShopGoodsById: id => id === 41 ? { shop_id: 4, item_id: 20040, price_id: 1005 } : undefined },
     '../utils/utils': { getServerTimeSec: () => 1000, toNum: value => Number(value) || 0 },
     './warehouse': { getBag: async () => { if (failed) throw new Error('offline'); return { items: bag }; },
       getBagItems: reply => reply.items, isItemLocked: item => !!item.locked },

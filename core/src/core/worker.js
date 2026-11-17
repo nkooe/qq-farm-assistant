@@ -198,6 +198,11 @@ let friendSyncPaused = false;
 
 const workerScheduler = createScheduler('worker');
 const milkTeaAutomation = require('../services/milk-tea-automation').automation;
+const ranchAutomation = require('../modern/services/ranch/automation');
+const { runWithSendContext } = require('../modern/services/ranch/context');
+let ranchTaskRunning = false;
+let ranchDeferredUntil = 0;
+let ranchConfigGeneration = 0;
 
 /** 每日任务是否启用 */
 function isDailyRoutineEnabled() { return true; }
@@ -207,7 +212,10 @@ function getLocalDateKey() { return getSystemDateKey(); }
 
 // ==================== 每日任务 ====================
 
-async function runDailyRoutines(force = false) {
+function runDailyRoutines(force = false) {
+    return runExclusiveAutomationTask('daily_routines', () => performDailyRoutines(force), { detached: true });
+}
+async function performDailyRoutines(force = false) {
     if (!loginReady || friendSyncPaused) return;
     try {
         await checkAndClaimEmails();
@@ -238,7 +246,7 @@ function startDailyRoutineTimer() {
         if (!loginReady) return;
         const today = getLocalDateKey();
         if (today === lastDailyRunDate) {
-            if (!friendSyncPaused) checkAndClaimEmails().catch(() => null);
+            if (!friendSyncPaused) runExclusiveAutomationTask('daily_email', () => loginReady && checkAndClaimEmails(), { detached: true }).catch(() => null);
             return;
         }
         lastDailyRunDate = today;
@@ -403,6 +411,45 @@ async function runStealTick(autoConfig) {
 
 // ==================== 统一调度器 ====================
 
+function ranchNextRunAt() {
+    if (!unifiedSchedulerRunning || !loginReady || friendSyncPaused || ranchTaskRunning || farmTaskRunning || isPetSyncVisiting()) return Infinity;
+    const state = ranchAutomation.getRoutineState();
+    return state.doneToday ? Infinity : Math.max(Number(state.nextCheckAt) || 0, ranchDeferredUntil);
+}
+async function runRanchRoutine() {
+    if (Date.now() < ranchNextRunAt()) return;
+    ranchTaskRunning = true;
+    const generation = schedulerGeneration;
+    const configGeneration = ranchConfigGeneration;
+    const canContinue = () => loginReady && !friendSyncPaused && generation === schedulerGeneration && configGeneration === ranchConfigGeneration;
+    try {
+        await runExclusiveAutomationTask('ranch_routine', async () => {
+            if (!canContinue()) return;
+            if (farmTaskRunning || Date.now() >= nextFarmRunAt) { ranchDeferredUntil = Date.now() + 1000; return; }
+            await runWithSendContext({
+                check: () => canContinue() ? null : Object.assign(new Error('请求已中断: 牧场任务已停止'), { code: 'RANCH_AUTOMATION_DISABLED' }),
+                onSent: () => {},
+            }, () => runWithRequestClass('friend', () => ranchAutomation.run({ farmDeadline: () => nextFarmRunAt, canContinue })));
+        }, { detached: true });
+    } catch (error) {
+        if (canContinue() && !isTransientNetworkError(error)) log('牧场', `自动巡查失败：${error.message}`, { module: 'ranch', event: 'ranch_patrol', result: 'error' });
+        if (generation === schedulerGeneration) ranchDeferredUntil = Date.now() + 60000;
+    } finally {
+        ranchTaskRunning = false;
+        if (configGeneration !== ranchConfigGeneration) ranchAutomation.resetSchedule();
+        if (unifiedSchedulerRunning) scheduleUnifiedNextTick();
+    }
+}
+function wakeRanchMarket() {
+    ranchAutomation.resetMarketSchedule();
+    ranchDeferredUntil = 0;
+    if (unifiedSchedulerRunning) scheduleUnifiedNextTick();
+}
+function onRanchTaskInfo(_info, context) {
+    if (context?.globalSceneId === 2) require('../modern/services/ranch/daily').markTasksChanged();
+}
+
+
 async function runUnifiedTick() {
     if (!unifiedSchedulerRunning || !loginReady || friendSyncPaused) return;
 
@@ -417,13 +464,14 @@ async function runUnifiedTick() {
     const shouldHelp = now >= nextHelpRunAt;
     const shouldSteal = now >= nextStealRunAt;
 
-    if (!shouldFarm && !shouldHelp && !shouldSteal) return;
+    if (!shouldFarm && !shouldHelp && !shouldSteal && now < ranchNextRunAt()) return;
 
     const autoConfig = getAutomation();
     // 每类任务自行防重入；等待好友间隔时，农场仍可调度。
     if (shouldFarm) runWithRequestClass('farm', () => runFarmTick(autoConfig)).catch(() => null);
     if (shouldHelp) runWithRequestClass('friend', () => runHelpTick(autoConfig)).catch(() => null);
     if (shouldSteal) runWithRequestClass('friend', () => runStealTick(autoConfig)).catch(() => null);
+    runRanchRoutine().catch(() => null);
 }
 
 function scheduleUnifiedNextTick() {
@@ -439,7 +487,7 @@ function scheduleUnifiedNextTick() {
 
     const now = Date.now();
     const auto = getAutomation();
-    const deadlines = [now + 30000];
+    const deadlines = [now + 30000, ranchNextRunAt()];
     if (!farmTaskRunning) deadlines.push(Number(nextFarmRunAt) || now + 3000);
     if (!helpTaskRunning && !stealTaskRunning && !isPetSyncVisiting() && auto.friend) {
         if (auto.friend_help || auto.friend_golden_bug) deadlines.push(Number(nextHelpRunAt) || now + 30000);
@@ -458,6 +506,8 @@ function startUnifiedScheduler() {
     unifiedSchedulerRunning = true;
     schedulerGeneration++;
     resetUnifiedSchedule();
+    ranchAutomation.resetSchedule();
+    ranchDeferredUntil = 0;
     scheduleUnifiedNextTick();
 }
 
@@ -479,6 +529,11 @@ function applyRuntimeConfig(config, syncStatusAfter = false) {
     });
 
     configureEmailClaim({ accountId, hour: getConfigSnapshot(accountId).emailClaimHour });
+    const nextAuto = getAutomation();
+    if (Object.keys(nextAuto).some(key => key.startsWith('ranch_') && nextAuto[key] !== prevAuto[key])) {
+        ranchConfigGeneration++;
+        ranchAutomation.resetSchedule();
+    }
 
     const revision = Number((config || {}).__revision || 0);
     if (revision > 0) appliedConfigRevision = revision;
@@ -536,7 +591,7 @@ function applyRuntimeConfig(config, syncStatusAfter = false) {
                 workerScheduler.setTimeoutTask('fertilizer_immediate_after_save', 1000, async () => {
                     if (!loginReady) return;
                     try {
-                        await farmOperationGuard.run(() => runFertilizerByConfig([], { skipNormal: true }));
+                        await runExclusiveAutomationTask('fertilizer_now', () => loginReady && farmOperationGuard.run(() => runFertilizerByConfig([], { skipNormal: true })), { detached: true });
                     } catch (err) {
                         log('施肥', `保存配置后立即施肥失败: ${  err.message}`, {
                             module: 'farm', event: '施肥', result: 'error'
@@ -653,6 +708,9 @@ async function startBot(config) {
     networkEvents.on('ws_error', onWsError);
     networkEvents.on('reconnect_failed', onReconnectFailed);
     networkEvents.on('kickout', onKickout);
+    networkEvents.on('ranchMarketStockReady', wakeRanchMarket);
+    networkEvents.on('ranchUnlocked', wakeRanchMarket);
+    networkEvents.on('taskInfoNotify', onRanchTaskInfo);
 
     // 断线监听
     if (onDisconnectHandler) networkEvents.off('disconnect', onDisconnectHandler);
@@ -737,7 +795,7 @@ async function startBot(config) {
         // 延迟执行放虫放草
         workerScheduler.setTimeoutTask('bad_startup_once', 15000, async () => {
             try {
-                await runBadOnceOnStartup();
+                if (loginReady) await runBadOnceOnStartup();
             } catch (err) {
                 log('好友', `启动时放虫放草执行失败: ${  err.message}`, {
                     module: 'friend', event: '启动放虫放草失败', error: err.message
@@ -787,6 +845,9 @@ async function stopBot() {
     require('../services/friend-pet-cache').flushAll();
 
     networkEvents.off('kickout', onKickout);
+    networkEvents.off('ranchMarketStockReady', wakeRanchMarket);
+    networkEvents.off('ranchUnlocked', wakeRanchMarket);
+    networkEvents.off('taskInfoNotify', onRanchTaskInfo);
     networkEvents.off('reconnect_failed', onReconnectFailed);
 
     if (onDisconnectHandler) {
@@ -1268,6 +1329,7 @@ async function getDailyGiftOverview() {
     return {
         date: getSystemDateKey(),
         timeZone: getSystemTimeZone(),
+        ranch: require('../modern/services/ranch/daily').getOverview(auto.ranch_task, auto.ranch_share, auto.ranch_daily_benefit),
         growth: {
             key: 'growth_task',
             label: '成长任务',

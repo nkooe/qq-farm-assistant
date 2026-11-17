@@ -144,9 +144,47 @@ const userState = {
     goldBean: 0, // 金豆豆(ID:1005)
     openId: '',
     avatar: '',
+    globalSceneId: 1,
+    unlockedSceneIds: [],
 };
 
 function getUserState() { return userState; }
+const shareInfoState = new Map();
+function shareDateKey() {
+    return new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' })
+        .format(new Date(require('./utils').getServerTimeSec() * 1000));
+}
+function applyShareInfos(infos = {}) {
+    const dateKey = shareDateKey();
+    for (const [key, info] of Object.entries(infos || {})) {
+        const id = /^\d+$/.test(key) ? key : require('protobufjs').util.longFromHash(key, false).toString();
+        const count = String(info.share_count ?? '0');
+        if (!/^\d+$/.test(count)) continue;
+        shareInfoState.set(id, { shareCount: count, claimed: info.is_claimed === true, dateKey });
+    }
+}
+function getDailyShareInfo(id) {
+    const dateKey = shareDateKey();
+    const state = shareInfoState.get(String(id));
+    return state?.dateKey === dateKey ? { ...state } : { shareCount: '0', claimed: false, dateKey };
+}
+async function loginGameScene(globalSceneId, options = {}) {
+    if (![1, 2].includes(globalSceneId)) throw new Error('游戏场景无效');
+    const session = currentSession;
+    const response = await sendMsgAsync('gamepb.globalscenepb.GlobalSceneService', 'PlayerSceneLogin',
+        types.PlayerSceneLoginRequest.encode({ global_scene_id: globalSceneId }).finish(), options);
+    if (session !== currentSession || !isCurrentSession(session)) throw new Error('请求已中断: 游戏场景会话已切换');
+    const scene = types.PlayerSceneLoginReply.decode(response.body);
+    const data = globalSceneId === 2 ? scene.big_farm_scene_ext_data : scene.farm_scene_ext_data;
+    if (scene.global_scene_id !== globalSceneId || !data?.length) throw new Error('游戏场景登录回包不完整');
+    userState.globalSceneId = globalSceneId;
+    const time = toNum(scene.server_time);
+    if (time > 0) syncServerTime(time > 1e12 ? time : time * 1000);
+    return scene;
+}
+function invalidateGameScene(reason = '游戏场景状态未确认，需要重新登录') {
+    if (currentSession) finishSession(currentSession, reason, 'game_scene_unknown');
+}
 function getWsErrorState() { return { ...wsErrorState }; }
 function setWsErrorState(code, message) {
     wsErrorState = { code: Number(code) || 0, at: Date.now(), message: message || '' };
@@ -212,7 +250,7 @@ function encodeMsg(serviceName, methodName, encryptedBody, clientSeqValue) {
     return types.GateMessage.encode(msg).finish();
 }
 
-async function sendMsg(serviceName, methodName, bodyBytes, callback, signal) {
+async function sendMsg(serviceName, methodName, bodyBytes, callback, signal, hooks = {}) {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         log('系统', '[WS] 连接未打开');
         return false;
@@ -257,6 +295,8 @@ async function sendMsg(serviceName, methodName, bodyBytes, callback, signal) {
         }
         // Assign the sequence and send without yielding: a ready empty request
         // must not put a higher sequence on the wire ahead of a slow encoder.
+        const blocked = hooks.beforeSend?.();
+        if (blocked) throw blocked;
         const wireSeq = clientSeq++;
         if (callback) {
             pendingCallbacks.delete(seq);
@@ -267,6 +307,7 @@ async function sendMsg(serviceName, methodName, bodyBytes, callback, signal) {
         diagnostic.encodeMs = Math.round(performance.now() - startedAt);
         diagnostic.phase = 'sending';
         socket.send(encoded, error => { if (error) done(error); });
+        hooks.onSent?.();
         sentAt = performance.now();
         diagnostic.phase = 'awaiting_response';
     } catch (err) {
@@ -285,6 +326,9 @@ class GatewayError extends Error {
     this.name = 'GatewayError';
     this.code = code;
     this.meta = meta;
+    this.serviceName = meta?.service_name;
+    this.methodName = meta?.method_name;
+    this.errorMessage = meta?.error_message || '';
   }
 }
 
@@ -317,7 +361,7 @@ function sendMsgAsync(serviceName, methodName, bodyBytes, timeout = 20000, opts 
             else resolve({ body, meta });
         };
         _cb.expectedErrorCodes = expectedErrorCodes;
-        sendMsg(serviceName, methodName, bodyBytes, _cb, signal)
+        sendMsg(serviceName, methodName, bodyBytes, _cb, signal, opts)
             .then(sent => { if (!sent) reject(new Error(`发送失败: ${methodName}`)); }, reject);
         });
     }, { ...opts, signal: opts.signal || getAmbientRequestSignal(), timeoutMs: timeout, label: methodName });
@@ -326,7 +370,7 @@ function sendMsgAsync(serviceName, methodName, bodyBytes, timeout = 20000, opts 
 function sendMsgNoReply(serviceName, methodName, bodyBytes, opts = {}) {
     if (!isConnected()) return Promise.reject(new Error(`连接未打开: ${methodName}`));
     return requestQueue.enqueue(async signal => {
-        if (!await sendMsg(serviceName, methodName, bodyBytes, undefined, signal)) throw new Error(`发送失败: ${methodName}`);
+        if (!await sendMsg(serviceName, methodName, bodyBytes, undefined, signal, opts)) throw new Error(`发送失败: ${methodName}`);
     }, { ...opts, signal: opts.signal || getAmbientRequestSignal(), timeoutMs: opts.timeoutMs || 20000, label: methodName });
 }
 
@@ -462,6 +506,8 @@ function handleNotify(msg) {
                         } else if (delta !== 0) {
                             userState.coupon = Math.max(0, Number(userState.coupon || 0) + delta);
                         }
+                    } else if (id === 7002 && delta > 0) {
+                        networkEvents.emit('ranchMarketStockReady', { id, count, delta });
                     } else if (id === 1005) {
                         // 金豆豆
                         if (count > 0) {
@@ -494,6 +540,7 @@ function handleNotify(msg) {
             try {
                 const notify = types.BasicNotify.decode(eventBody);
                 if (notify.basic) {
+                    if (hasOwn(notify.basic, 'share_infos')) applyShareInfos(notify.basic.share_infos);
                     const oldLevel = userState.level;
                     if (hasOwn(notify.basic, 'level')) {
                         const nextLevel = toNum(notify.basic.level);
@@ -550,6 +597,13 @@ function handleNotify(msg) {
             return;
         }
 
+        if (type.includes('GlobalSceneUnlockNotify')) {
+            const notify = types.GlobalSceneUnlockNotify.decode(eventBody);
+            userState.unlockedSceneIds = [...new Set([...userState.unlockedSceneIds, ...notify.unlocked_scenes])];
+            networkEvents.emit('ranchUnlocked');
+            return;
+        }
+
         // 商品解锁通知 (升级后解锁新种子等)
         if (type.includes('GoodsUnlockNotify')) {
             try {
@@ -567,7 +621,7 @@ function handleNotify(msg) {
             try {
                 const notify = types.TaskInfoNotify.decode(eventBody);
                 if (notify.task_info) {
-                    networkEvents.emit('taskInfoNotify', notify.task_info);
+                    networkEvents.emit('taskInfoNotify', notify.task_info, { globalSceneId: userState.globalSceneId });
                 }
             } catch { }
 
@@ -618,13 +672,8 @@ async function sendLogin(session, onLoginSuccess) {
     }
     if (modern) {
         session.phase = 'scene_login';
-        const sceneResponse = await sendMsgAsync('gamepb.globalscenepb.GlobalSceneService', 'PlayerSceneLogin',
-            types.PlayerSceneLoginRequest.encode({ global_scene_id: 1 }).finish(), 20000, { requestClass: 'critical' });
+        await loginGameScene(1, { requestClass: 'critical' });
         if (!isCurrentSession(session)) return;
-        const scene = types.PlayerSceneLoginReply.decode(sceneResponse.body);
-        if (scene.global_scene_id !== 1 || !scene.farm_scene_ext_data?.length) {
-            throw new Error('农场场景登录失败：缺少有效场景数据');
-        }
         log('登录', '农场场景登录成功 (global_scene_id=1)');
     }
     if (!isCurrentSession(session)) return;
@@ -633,6 +682,7 @@ async function sendLogin(session, onLoginSuccess) {
         gid: toNum(reply.basic.gid), name: reply.basic.name || '未知',
         level: toNum(reply.basic.level), gold: toNum(reply.basic.gold), exp: toNum(reply.basic.exp),
         openId, avatar: String(reply.basic.avatar_url || '').trim(),
+        unlockedSceneIds: modern ? (reply.unlocked_scene_ids || []).map(toNum) : [1],
     });
     updateStatusFromLogin({ ...userState });
     let loginTimeMs = 0;
@@ -641,6 +691,8 @@ async function sendLogin(session, onLoginSuccess) {
         loginTimeMs = time > 1e12 ? time : time * 1000;
         syncServerTime(loginTimeMs);
     }
+    shareInfoState.clear();
+    applyShareInfos(reply.basic.share_infos);
     session.phase = 'ready';
     session.readyAt = performance.now();
     networkScheduler.clear('connection_login_timeout');
@@ -761,6 +813,9 @@ function connect(code, onLoginSuccess, options = {}) {
     savedCode = String(code).trim();
     savedConnectionOptions = { ...options };
     userState.gid = 0;
+    userState.globalSceneId = 1;
+    userState.unlockedSceneIds = [];
+    shareInfoState.clear();
     heartbeatMissCount = 0;
     clientSeq = 1;
     serverSeq = 0;
@@ -883,7 +938,7 @@ module.exports = {
     connect, reconnect, cleanup, stopNetwork, getWs, isConnected,
     sendMsg, sendMsgAsync, sendMsgNoReply, GatewayError,
     getGatewayLoad, waitForGatewayIdle, getRequestDiagnostics,
-    getUserState,
+    getUserState, loginGameScene, invalidateGameScene, applyShareInfos, getDailyShareInfo,
     getWsErrorState,
     getAceStatus, getConnectionDiagnostics,
     networkEvents,

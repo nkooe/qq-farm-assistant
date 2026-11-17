@@ -28,6 +28,7 @@ const updateCodeAccount = ref<any>(null)
 
 const navItems = [
   { key: 'dashboard', path: '/', label: '首页', icon: 'i-carbon-home' },
+  { key: 'ranch', path: '/ranch', label: '牧场', icon: 'i-carbon-pet-image-o' },
   { key: 'shop', path: '/shop', label: '商城', icon: 'i-carbon-shopping-cart' },
   { key: 'activity', path: '/activity', label: '活动', icon: 'i-carbon-gift' },
   { key: 'account', label: '账号', icon: 'i-carbon-user' },
@@ -547,8 +548,8 @@ async function handleAccountRefreshed(accountId?: string) {
 }
 
 @media (max-width: 640px) {
-  .floating-nav { gap: 4px; padding: 6px 8px; margin-bottom: 16px; border-radius: 24px; }
-  .nav-item { width: 56px; height: 50px; border-radius: 18px; }
+  .floating-nav { max-width: calc(100vw - 16px); gap: 4px; padding: 6px 8px; margin-bottom: 16px; border-radius: 24px; }
+  .nav-item { flex: 0 1 56px; min-width: 44px; height: 50px; border-radius: 18px; }
   .nav-item-icon { font-size: 22px; }
 }
 

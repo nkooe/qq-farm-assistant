@@ -4,11 +4,18 @@ export interface MenuItem {
   label: string
   icon: string
   component: () => Promise<any>
+  ranchSection?: string
   adminOnly?: boolean
   showInNav?: boolean
 }
 
 export const menuRoutes: MenuItem[] = [
+  ...[
+    ['ranch', '', '总览'], ['ranch/personal', 'personal', '我的牧场'], ['ranch/illustrated', 'illustrated', '牧场图鉴'],
+    ['ranch/mall', 'mall', '牧场商城'], ['ranch/friends', 'friends', '牧场好友'], ['ranch/activity', 'activity', '牧场活动'],
+    ['ranch/strategy', '', '牧场策略'],
+  ].map(([path, ranchSection, label]) => ({ path: path!, name: path!.replace(/\//g, '-'), ranchSection, label: label!,
+    icon: 'i-carbon-pet-image-o', showInNav: false, component: () => import('@/views/RanchWorkspace.vue') })),
   {
     path: 'game-mall',
     name: 'game-mall',

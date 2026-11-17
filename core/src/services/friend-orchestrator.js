@@ -14,7 +14,8 @@ const {
   getFriendBadRetryDate,
   readFriendDogInfoCache,
 } = require('../models/store');
-const { getUserState, isConnected, networkEvents } = require('../utils/network');
+const { getUserState, isConnected, networkEvents, getGatewayLoad } = require('../utils/network');
+const { isGatewayHealthyForBusiness, isGatewayYieldError } = require('../utils/request-queue');
 const { toNum, log, logWarn, randomDelay, isTransientNetworkError } = require('../utils/utils');
 const {
   setOperationLimitsCallback,
@@ -362,7 +363,7 @@ async function checkFriends(options = {}) {
   isCheckingFriends = true;
   const generation = friendGeneration;
   const signal = delayController.signal;
-  const canContinue = () => generation === friendGeneration && !signal.aborted && isConnected()
+  const canContinue = () => generation === friendGeneration && !signal.aborted && isConnected() && isGatewayHealthyForBusiness(getGatewayLoad())
     && isAutomationOn('friend') && !inFriendQuietHours() && (!options.canContinue || options.canContinue());
   const allowedTarget = (target, type) => canContinue() && isAutomationOn(`friend_${type}`)
     && !(type === 'steal' && computeEffectiveTurbo())
@@ -554,7 +555,8 @@ async function checkFriends(options = {}) {
             try { await visitFriendForSteal(target, tally, userState.gid, accountId); }
             finally { lastVisitAt = performance.now(); }
           });
-        } catch {
+        } catch (err) {
+          if (isGatewayYieldError(err)) throw err;
           // Skip individual failures
         }
 
@@ -622,6 +624,7 @@ async function checkFriends(options = {}) {
             gapMax = Math.max(150, Math.floor(gapMax / 2));
           }
         } catch (err) {
+          if (isGatewayYieldError(err)) throw err;
           // A/B) 失败：累加计数 + 本轮临时黑名单 + 指数退避，连续 3 次直接终止本轮
           if (turboMode) {
             consecutiveEnterFailures++;
@@ -711,6 +714,7 @@ async function checkFriends(options = {}) {
               break;
             }
           } catch (err) {
+            if (isGatewayYieldError(err)) throw err;
             if (recordBadFailure(err && err.message, {
               friendName: target.name,
               friendGid: target.gid,
@@ -747,7 +751,7 @@ async function checkFriends(options = {}) {
 
     return summary.length > 0;
   } catch (err) {
-    if (!signal.aborted && !isTransientNetworkError(err)) {
+    if (!signal.aborted && !isGatewayYieldError(err) && !isTransientNetworkError(err)) {
       logWarn('好友', `巡查异常: ${err.message}`);
     }
     return false;
@@ -977,6 +981,9 @@ async function acceptFriendsWithRetry(gids) {
  * Run a one-time "bad" operation on startup to put weeds/insects on friends' farms.
  */
 async function runBadOnceOnStartup(force = false) {
+  const generation = friendGeneration;
+  const canContinue = () => generation === friendGeneration && isConnected() && isGatewayHealthyForBusiness(getGatewayLoad())
+    && isAutomationOn('friend_bad') && !isFriendBadPaused() && !inFriendQuietHours();
   if (!force && badExecutedOnStartup) return;
 
   const badEnabled = isAutomationOn('friend_bad');
@@ -1059,6 +1066,7 @@ async function runBadOnceOnStartup(force = false) {
     let processedCount = 0;
 
     for (let i = 0; i < topTargets.length; i++) {
+      if (!canContinue()) break;
       const target = topTargets[i];
       if (!canOperateBad()) {
         log('好友', `放虫放草次数已用完，停止执行。已处理 ${processedCount} 个好友`, {
@@ -1082,12 +1090,14 @@ async function runBadOnceOnStartup(force = false) {
       );
 
       try {
-        const result = await runExclusiveAutomationTask('friend_visit', () => visitFriend(target, tally, userState.gid, accountId));
+        const result = await runExclusiveAutomationTask('friend_visit', () => canContinue() ? visitFriend(target, tally, userState.gid, accountId) : null);
+        if (!result) break;
         processedCount++;
         if (trackBadVisitResult(result, target, { source: 'startup_bad' })) {
           break;
         }
       } catch (err) {
+        if (isGatewayYieldError(err)) throw err;
         log('好友', `放虫放草失败: ${target.name}, 错误: ${err.message}`, {
           module: 'friend',
           event: '放虫放草失败',
@@ -1122,7 +1132,7 @@ async function runBadOnceOnStartup(force = false) {
       }
     );
   } catch (err) {
-    if (!isTransientNetworkError(err)) {
+    if (!isGatewayYieldError(err) && !isTransientNetworkError(err)) {
       logWarn('好友', `${label}异常: ${err.message}`);
     }
   }

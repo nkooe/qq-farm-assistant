@@ -24,7 +24,7 @@ test('both shop protocol roots preserve existing type numbers and decode ownersh
     for (const dir of ['proto', 'modern/proto']) {
         const root = new protobuf.Root().loadSync(path.join(__dirname, '../src', dir, 'shoppb.proto'), { keepCase: true });
         assert.deepEqual({ ...root.lookupEnum('gamepb.shoppb.ShopType').values }, {
-            SHOP_TYPE_UNKNOWN: 0, ITEM: 1, SEED: 2, PET: 3, SKIN: 4, CUB: 5, FEED: 6,
+            SHOP_TYPE_UNKNOWN: 0, ITEM: 1, SEED: 2, PET: 3, SKIN: 4, CUB: 5, FEED: 6, ROTATION_SHOP: 7, TRAVEL_SHOP: 8,
         });
         const goods = root.lookupType('gamepb.shoppb.GoodsInfo');
         assert.equal(goods.fields.owned.id, 15);

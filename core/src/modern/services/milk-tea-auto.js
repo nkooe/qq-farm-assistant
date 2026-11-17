@@ -115,7 +115,6 @@ async function runAutomaticMilkTea({ group, rpc, inventory, serializeInventory, 
             if (summary.hire_disabled) await write('hireSetting', '允许雇佣', { hire_disabled: false }, true);
         });
         await step('制作奶茶', async () => {
-            if (settling()) return;
             const recipes = (await read('workshop')).recipes || [];
             const fruitIds = new Set(recipes.filter(value => value.unlocked)
                 .map(value => config.MilkTeaRecipeConfig.find(row => row.recipe_id === number(value.recipe_id)))
@@ -124,7 +123,6 @@ async function runAutomaticMilkTea({ group, rpc, inventory, serializeInventory, 
             await serializeInventory(async () => {
                 const used = new Set();
                 for (let batch = 0; batch < 10; batch++) {
-                    if (settling()) return;
                     const { bag } = await bagState(false);
                     const fruits = bag.filter(value => fruitIds.has(number(value.id)) && validId(value.uid)
                         && positive(value.count) && !isItemLocked(value) && !used.has(String(value.uid))
@@ -132,7 +130,7 @@ async function runAutomaticMilkTea({ group, rpc, inventory, serializeInventory, 
                             || toTimeSec(value.expire_time ?? value.expireTime) > now())).slice(0, 200);
                     if (!fruits.length) return;
                     const uids = [...new Set(fruits.map(value => String(value.uid)))];
-                    const reply = await write('craft', '制作奶茶', { fruit_uids: uids }, true);
+                    const reply = await write('craft', '制作奶茶', { fruit_uids: uids });
                     if (!reply) return;
                     uids.forEach(uid => used.add(uid));
                 }
@@ -237,8 +235,7 @@ async function runAutomaticMilkTea({ group, rpc, inventory, serializeInventory, 
                 const current = entries.find(value => String(value.head?.activity_id) === SHOP);
                 const value = current?.shop?.goods?.find(row => String(row.id) === String(candidate.id));
                 if (!isOpen(current?.head) || !value || !positive(value.id) || !(value.item || []).some(reward => positive(reward.count))
-                    || (value.cond_hints || []).some(condition => !condition.satisfied)
-                    || (settling() && value.category_tag === 'seed')) return;
+                    || (value.cond_hints || []).some(condition => !condition.satisfied)) return;
                 const costs = value.cost || [];
                 const remaining = number(value.purchase_limit) > 0 ? Math.max(0, number(value.purchase_limit) - number(value.purchased_count)) : 9999;
                 // Unlimited free goods have no finite stopping condition.

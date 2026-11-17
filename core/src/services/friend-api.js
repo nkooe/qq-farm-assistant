@@ -8,7 +8,8 @@ const {
   getFriendBlacklist,
   removeFriendFromCache,
 } = require('../models/store');
-const { sendMsgAsync } = require('../utils/network');
+const { sendMsgAsync, getGatewayLoad } = require('../utils/network');
+const { isGatewayYieldError, isGatewayHealthyForBusiness, GatewayBusyError } = require('../utils/request-queue');
 const { types } = require('../utils/proto');
 const { toLong, toNum, log, logWarn, randomDelay, isTransientNetworkError } = require('../utils/utils');
 const { getInteractRecords } = require('./interact');
@@ -501,6 +502,7 @@ async function fetchQqFriendsByKnownGids() {
 
   const allFriends = [];
   for (let i = 0; i < gids.length; i += QQ_FRIEND_LIST_BATCH_SIZE) {
+    if (!isGatewayHealthyForBusiness(getGatewayLoad())) throw new GatewayBusyError('好友列表暂缓：网关繁忙');
     const batch = gids.slice(i, i + QQ_FRIEND_LIST_BATCH_SIZE);
     const payload = types.GetGameFriendsRequest.encode(
       types.GetGameFriendsRequest.create({ gids: batch.map(g => toLong(g)) })
@@ -515,6 +517,7 @@ async function fetchQqFriendsByKnownGids() {
       const reply = types.GetAllFriendsReply.decode(body);
       allFriends.push(...extractReplyFriends(reply));
     } catch (err) {
+      if (isGatewayYieldError(err) || err.stage === 'pending' || !isGatewayHealthyForBusiness(getGatewayLoad())) throw err;
       logWarn('好友',
         `QQ 新好友接口分批请求失败(${i + 1}-${i + batch.length}/${gids.length}): ${err.message}`,
         {
@@ -525,6 +528,7 @@ async function fetchQqFriendsByKnownGids() {
           batchSize: batch.length,
         }
       );
+      throw err;
     }
 
     if (i + QQ_FRIEND_LIST_BATCH_SIZE < gids.length) {

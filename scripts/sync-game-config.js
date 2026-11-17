@@ -68,6 +68,7 @@ const XOR_KEY = Buffer.from('NQF_SHANGXIANDAMAI_#2026_SECURE', 'latin1');
 //   preserveLocalFields: 除「仅本地字段」外，额外强制保留的字段
 const SYNC_TABLES = [
   { file: 'ItemInfo.json', bundle: 'mainscene', table: 'ItemInfo', idKey: 'id' },
+  { file: 'Goods.json', bundle: 'mainscene', table: 'Goods', idKey: 'id' },
   { file: 'Plant.json', bundle: 'mainscene', table: 'Plant', idKey: 'id' },
   { file: 'RoleLevel.json', bundle: 'mainscene', table: 'RoleLevel', idKey: 'level' },
 ];

@@ -13,6 +13,12 @@ function registerModernFeatureRoutes(context) {
   const { withAccount } = createActivityRouteContext(app, ctx);
   const get = (path, method, args = () => []) => app.get(path, withAccount((id, req) => featureProvider[method](id, ...args(req))));
   const post = (path, method, args) => app.post(path, withAccount((id, req) => featureProvider[method](id, ...args(req))));
+  get('/api/ranch', 'getRanchState', req => [req.query.view || 'animals', req.query.shopId, req.query.hostGid]);
+  post('/api/ranch/:action/quote', 'prepareRanchAction', req => [req.params.action, req.body]);
+  post('/api/ranch/:action', 'operateRanch', req => [req.params.action, req.body]);
+  get('/api/activities/muge', 'getMugeActivity');
+  post('/api/activities/muge/:action', 'operateMugeActivity', req => [req.params.action, req.body]);
+  app.get('/api/ranch/automation-options', (_req, res) => res.json({ ok: true, data: require('../modern/config/ranch-automation').RANCH_ANIMAL_OPTIONS }));
   get('/api/solar-calendar', 'getSolarCalendar');
   post('/api/solar-calendar/:action', 'operateSolarCalendar', req => [req.params.action, req.body]);
   get('/api/illustrated/snapshot', 'getIllustratedSnapshot');

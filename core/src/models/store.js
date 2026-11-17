@@ -168,7 +168,9 @@ const DEFAULT_FERTILIZER_LAND_TYPES = ['purple', 'gold', 'black', 'red', 'normal
 const FERTILIZER_LAND_TYPE_SET = new Set(['blue', ...DEFAULT_FERTILIZER_LAND_TYPES]);
 
 /** 默认自动化配置 */
+const { RANCH_AUTOMATION_DEFAULTS, normalizeRanchSetting } = require('../modern/config/ranch-automation');
 const DEFAULT_AUTOMATION = {
+    ...RANCH_AUTOMATION_DEFAULTS,
     farm: true,
     farm_harvest_tiangong: true,
     farm_push: true,
@@ -521,7 +523,9 @@ function normalizeAccountConfig(raw, defaults = accountDefaults) {
         for (const [key, value] of Object.entries(input.automation)) {
             if (!ALLOWED_AUTOMATION_KEYS.has(key)) continue;
 
-            if (key === 'fertilizer') {
+            if (key.startsWith('ranch_')) {
+                cfg.automation[key] = normalizeRanchSetting(key, value);
+            } else if (key === 'fertilizer') {
                 const allowed = ['both', 'normal', 'organic', 'smart', 'smart_only', 'smart_normal', 'final_normal', 'final_organic', 'none'];
                 cfg.automation[key] = allowed.includes(value) ? value : cfg.automation[key];
             } else if (key === 'fertilizer_land_types') {
@@ -945,7 +949,9 @@ function applyConfigSnapshot(patch = {}, opts = {}) {
     if (patch.automation && typeof patch.automation === 'object') {
         for (const [key, value] of Object.entries(patch.automation)) {
             if (cfg.automation[key] === undefined) continue;
-            if (key === 'fertilizer') {
+            if (key.startsWith('ranch_')) {
+                cfg.automation[key] = normalizeRanchSetting(key, value);
+            } else if (key === 'fertilizer') {
                 const allowed = ['both', 'normal', 'organic', 'smart', 'smart_only', 'smart_normal', 'final_normal', 'final_organic', 'none'];
                 cfg.automation[key] = allowed.includes(value) ? value : cfg.automation[key];
             } else if (key === 'fertilizer_land_types') {
@@ -1511,7 +1517,7 @@ function removeAccountArtifacts(accountId) {
     removeAccountConfig(accountId);
     deleteAccountCaches(accountId);
     const digest = require('node:crypto').createHash('sha256').update(String(accountId)).digest('hex');
-    for (const file of [getDataFile(`stats/${accountId}.json`), getDataFile(`activity-center-state-${digest}.json`), getDataFile(`email-claim-${digest}.json`)]) {
+    for (const file of [getDataFile(`stats/${accountId}.json`), getDataFile(`activity-center-state-${digest}.json`), getDataFile(`email-claim-${digest}.json`), getDataFile(`ranch-operations/${digest}.json`)]) {
         if (fs.existsSync(file)) fs.unlinkSync(file);
     }
 }

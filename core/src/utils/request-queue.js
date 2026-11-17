@@ -122,6 +122,6 @@ function isGatewayIdleForBackground(load) {
     return isGatewayHealthyForBusiness(load) && !load.blockingQueued && !load.businessPending && !load.backgroundPending;
 }
 function isGatewayYieldError(error) {
-    return error?.name === 'GatewayBusyError' || /stage=queued|连接未打开|请求已中断|尚未登录/.test(error?.message || '');
+    return error?.name === 'GatewayBusyError' || /stage=(?:queued|pending)|连接未打开|请求已中断|尚未登录/.test(error?.message || '');
 }
 module.exports = { GatewayRequestQueue, GatewayBusyError, isGatewayHealthyForBusiness, isGatewayIdleForBackground, isGatewayYieldError };

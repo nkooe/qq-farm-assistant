@@ -1,28 +1,35 @@
 export interface PurchaseCost {
   id?: number | string
-  count: number
-  balance?: number | null
+  count: number | string
+  balance?: number | string | null
 }
 
 // Missing or invalid balances cannot authorize a purchase. Repeated currencies
 // share one balance, so aggregate their unit costs before calculating the cap.
 export function affordableCount(costs: PurchaseCost[]): number {
-  const totals = new Map<string, { price: number, balance: number }>()
+  const totals = new Map<string, { price: bigint, balance: bigint }>()
+  const amount = (value: unknown): bigint | null => {
+    if (typeof value === 'number' && (!Number.isSafeInteger(value) || value < 0)) return null
+    if (!/^(0|[1-9]\d*)$/.test(String(value))) return null
+    return BigInt(String(value))
+  }
   for (const [index, cost] of costs.entries()) {
-    if (!Number.isSafeInteger(cost.count) || cost.count < 0)
-      return 0
-    if (cost.count === 0)
-      continue
-    if (cost.balance == null || !Number.isSafeInteger(cost.balance) || cost.balance < 0)
-      return 0
+    const price = amount(cost.count)
+    if (price === null) return 0
+    if (price === 0n) continue
+    const balance = amount(cost.balance)
+    if (balance === null) return 0
     const key = cost.id == null ? `row:${index}` : `id:${cost.id}`
     const previous = totals.get(key)
-    const price = (previous?.price ?? 0) + cost.count
-    if (!Number.isSafeInteger(price))
-      return 0
-    totals.set(key, { price, balance: Math.min(previous?.balance ?? cost.balance, cost.balance) })
+    totals.set(key, { price: (previous?.price ?? 0n) + price,
+      balance: previous && previous.balance < balance ? previous.balance : balance })
   }
-  return Math.min(Number.POSITIVE_INFINITY, ...[...totals.values()].map(cost => Math.floor(cost.balance / cost.price)))
+  let maximum = BigInt(Number.MAX_SAFE_INTEGER)
+  for (const { price, balance } of totals.values()) {
+    const count = balance / price
+    if (count < maximum) maximum = count
+  }
+  return totals.size ? Number(maximum) : Number.POSITIVE_INFINITY
 }
 
 export function purchaseMaxCount(options: { limitRemaining?: number | null, costs?: PurchaseCost[], cap?: number }): number {

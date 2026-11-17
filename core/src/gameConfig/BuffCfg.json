@@ -175,27 +175,6 @@
     "attr_value": 300
   },
   {
-    "id": 2001,
-    "source_type": "活动加成",
-    "source_param": 2026070101,
-    "attr_id": "活动收获经验加成",
-    "attr_value": 2000
-  },
-  {
-    "id": 4002,
-    "source_type": "活动加成",
-    "source_param": 2026070302,
-    "attr_id": "闪电变异概率提升",
-    "attr_value": 60
-  },
-  {
-    "id": 4003,
-    "source_type": "活动加成",
-    "source_param": 2026070302,
-    "attr_id": "闪电变异概率提升",
-    "attr_value": 60
-  },
-  {
     "id": 1005,
     "source_type": "活动加成",
     "source_param": 2026092201,
@@ -238,11 +217,39 @@
     "attr_value": 10000
   },
   {
+    "id": 2001,
+    "source_type": "活动加成",
+    "source_param": 2026070101,
+    "attr_id": "活动收获经验加成",
+    "attr_value": 2000
+  },
+  {
+    "id": 2002,
+    "source_type": "活动加成",
+    "source_param": 2026111801,
+    "attr_id": "活动收获经验加成",
+    "attr_value": 2000
+  },
+  {
     "id": 2101,
     "source_type": "活动加成",
     "source_param": 2026092201,
     "attr_id": "活动收获经验加成",
     "attr_value": 10000
+  },
+  {
+    "id": 4002,
+    "source_type": "活动加成",
+    "source_param": 2026070302,
+    "attr_id": "闪电变异概率提升",
+    "attr_value": 60
+  },
+  {
+    "id": 4003,
+    "source_type": "活动加成",
+    "source_param": 2026070302,
+    "attr_id": "闪电变异概率提升",
+    "attr_value": 60
   },
   {
     "id": 10001,

@@ -20,6 +20,7 @@ const seedToPlant = new Map();
 const fruitToPlant = new Map();
 let itemInfoConfig = null;
 const itemInfoMap = new Map();
+const shopGoodsMap = new Map();
 const seedItemMap = new Map();
 const itemImageIds = new Set();
 const iconImageIds = new Map();
@@ -53,6 +54,8 @@ function loadConfigs() {
     catch (e) {
         throw e;
     }
+    shopGoodsMap.clear();
+    for (const goods of sharedTables.Goods) shopGoodsMap.set(goods.id, goods);
     // 加载等级经验配置
     try {
         roleLevelConfig = sharedTables.RoleLevel;
@@ -549,7 +552,9 @@ function getMutantDisplayPlantId(plantId, mutantIds) {
 }
 // 启动时加载配置
 loadConfigs();
+function getShopGoodsById(id) { return shopGoodsMap.get(id); }
 module.exports = {
+    getShopGoodsById,
     loadConfigs,
     getAllPlants,
     getAllSeeds,

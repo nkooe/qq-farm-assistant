@@ -7,7 +7,7 @@ const { createRequire } = require('node:module');
 const { EventEmitter } = require('node:events');
 const lock = require('../src/services/automation-lock');
 
-function harness(onWait) {
+function harness(onWait, configure) {
   let clock = 0, waits = 0;
   const events = [], blacklist = [];
   const auto = { friend: true, friend_steal: true };
@@ -25,7 +25,7 @@ function harness(onWait) {
     '../models/store': { isAutomationOn: key => !!auto[key], getStealDelaySeconds: () => 2,
       getConfigSnapshot: () => ({ automation: {} }), readFriendDogInfoCache: () => ({}),
       getFriendBlacklistDetails: () => blacklist },
-    '../utils/network': { getUserState: () => ({ gid: 1, accountId: 'A' }), isConnected: () => true, networkEvents: new EventEmitter() },
+    '../utils/network': { getUserState: () => ({ gid: 1, accountId: 'A' }), isConnected: () => true, getGatewayLoad: () => ({ oldestPendingAgeMs: 0 }), networkEvents: new EventEmitter() },
     '../utils/utils': { toNum: Number, log() {}, logWarn() {}, randomDelay: async () => {}, isTransientNetworkError: () => false },
     './friend-operation-limits': limits,
     './friend-api': { inFriendQuietHours: () => false, clearAllInvalidKnownFriendGidCooldown() {},
@@ -34,9 +34,10 @@ function harness(onWait) {
     './friend-pet-sync': { isPetSyncVisiting: () => false },
     './scheduler': { createScheduler: () => ({ clearAll() {} }) },
   };
+  configure?.({ mocks, events });
   vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, process, AbortController,
     require: name => Object.hasOwn(mocks, name) ? mocks[name] : local(name) }, { filename });
-  return { ...module.exports, events, auto, get waits() { return waits; }, get clock() { return clock; } };
+  return { ...module.exports, events, auto, mocks, get waits() { return waits; }, get clock() { return clock; } };
 }
 
 test('steal delay releases the transaction lock so farm work runs between visits', async () => {
@@ -58,4 +59,17 @@ for (const change of ['disable', 'blacklist', 'stop']) test(`steal delay recheck
   await h.checkFriends({ onlySteal: true });
   assert.deepEqual(h.events.filter(e => e.startsWith('visit')), ['visit:2']);
   assert.equal(h.isCheckingFriendsRunning(), false);
+});
+
+test('startup bad patrol defines and rechecks its connection guard', async () => {
+  const h = harness(undefined, ({ mocks, events }) => {
+    mocks['../models/store'].getFriendBlacklist = () => [];
+    mocks['../models/store'].getFriendBadRetryDate = () => '';
+    mocks['./friend-api'].getAllFriends = async () => ({ friends: [{ gid: 2, level: 1 }] });
+    mocks['./friend-operation-limits'].canOperateBad = () => true;
+    mocks['./friend-visit'].visitFriend = async target => { events.push(`bad:${target.gid}`); return { acted: false }; };
+  });
+  h.auto.friend_bad = true;
+  await h.runBadOnceOnStartup(true);
+  assert.deepEqual(h.events, ['bad:2']);
 });

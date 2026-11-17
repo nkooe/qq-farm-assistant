@@ -15,6 +15,10 @@ async function loadProto() {
     root = new protobufModule.Root();
     await root.load([
         getResourcePath('proto', 'game.proto'),
+        getResourcePath('proto', 'muge.proto'),
+        getResourcePath('proto', 'ranchpb.proto'),
+        getResourcePath('proto', 'homesteadpb.proto'),
+        getResourcePath('proto', 'animalpb.proto'),
         getResourcePath('proto', 'userpb.proto'),
         getResourcePath('proto', 'player-login.proto'),
         getResourcePath('proto', 'globalscenepb.proto'),
@@ -67,6 +71,18 @@ async function loadProto() {
     types.PlayerLoginReply = root.lookupType('gamepb.userpb.PlayerLoginReply');
     types.PlayerSceneLoginRequest = root.lookupType('gamepb.globalscenepb.PlayerSceneLoginRequest');
     types.PlayerSceneLoginReply = root.lookupType('gamepb.globalscenepb.PlayerSceneLoginReply');
+    types.GlobalSceneUnlockNotify = root.lookupType('gamepb.globalscenepb.GlobalSceneUnlockNotify');
+    for (const namespace of ['animalpb', 'homesteadpb', 'ranchpb']) {
+        for (const definition of root.lookup(`gamepb.${namespace}`).nestedArray) {
+            if (definition instanceof protobufModule.Type) types[`Ranch${definition.name}`] = definition;
+        }
+    }
+    for (const name of ['MugeListReply', 'MugeOperateRequest', 'MugeOperateReply']) {
+        types[name] = root.lookupType(`gamepb.activitypb.${name}`);
+    }
+    types.ClientReportProgressRequest = root.lookupType('gamepb.taskpb.ClientReportProgressRequest');
+    types.ClientReportProgressReply = root.lookupType('gamepb.taskpb.ClientReportProgressReply');
+
     // 用户
     types.LoginRequest = root.lookupType('gamepb.userpb.LoginRequest');
     types.LoginReply = root.lookupType('gamepb.userpb.LoginReply');

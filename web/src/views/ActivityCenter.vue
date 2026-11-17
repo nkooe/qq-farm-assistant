@@ -14,12 +14,14 @@ import ActivityDirectoryPage from './activity-center/ActivityDirectoryPage.vue'
 import AutumnActivityPage from './activity-center/AutumnActivityPage.vue'
 import CharityActivityPage from './activity-center/CharityActivityPage.vue'
 import MilkTeaPage from './activity-center/MilkTeaPage.vue'
+import MugePage from './activity-center/MugePage.vue'
 import PetDiaryPage from './activity-center/PetDiaryPage.vue'
 import QingMeiActivityPage from './activity-center/QingMeiActivityPage.vue'
 import QixiActivityPage from './activity-center/QixiActivityPage.vue'
 import StellarActivityPage from './activity-center/StellarActivityPage.vue'
 import WeatherActivityPage from './activity-center/WeatherActivityPage.vue'
 
+const props = withDefaults(defineProps<{ space?: 'farm' | 'ranch' }>(), { space: 'farm' })
 const router = useRouter()
 const notification = useNotification()
 const accountStore = useAccountStore()
@@ -45,7 +47,7 @@ async function openActivity(activity: ActivityDirectoryItemDto) {
 
   selectedActivity.value = gameplay.module.key
   selectedInstanceId.value = activity.instanceId || activity.activityIds.find(id => ['2026092501', '2026110104'].includes(id)) || ''
-  if (['pet', 'wish', 'happy', 'milk'].includes(gameplay.module.key))
+  if (['pet', 'wish', 'happy', 'milk', 'muge'].includes(gameplay.module.key))
     return
   const detailsLoaded = await activityStore.loadDetails(accountId(), gameplay.module.key)
   if (gameplay.module.key === 'qixi' && currentAccountId.value) {
@@ -66,7 +68,8 @@ function goBack() {
 
 watch(currentAccountId, () => {
   selectedActivity.value = null
-  activityStore.refresh(accountId())
+  if (props.space === 'farm')
+    activityStore.refresh(accountId())
 }, { flush: 'post' })
 
 watch([notice, actionError], ([successMessage, failureMessage]) => {
@@ -102,16 +105,19 @@ watch(stellarDetailsAvailable, (available) => {
 })
 
 onMounted(() => {
-  activityStore.refresh(accountId())
+  if (props.space === 'farm')
+    activityStore.refresh(accountId())
 })
 </script>
 
 <template>
   <ActivityDirectoryPage
     v-if="!selectedActivity"
+    :space="space"
     @back="goBack"
     @open="openActivity"
   />
+  <MugePage v-else-if="selectedActivity === 'muge'" @back="goBack" />
   <MilkTeaPage v-else-if="selectedActivity === 'milk'" @back="goBack" />
   <ShareRewardActivity v-else-if="selectedActivity === 'happy'" :activity-id="selectedInstanceId" @back="goBack" />
   <AutumnActivityPage

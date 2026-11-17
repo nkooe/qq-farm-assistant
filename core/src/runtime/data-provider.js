@@ -246,6 +246,7 @@ function createDataProvider(deps) {
             if (!id) throw new Error('Missing x-account-id');
             const s = settings && typeof settings === 'object' ? settings : {};
             const patch = {
+                automation: s.automation,
                 plantingStrategy: s.plantingStrategy !== undefined ? s.plantingStrategy : s.strategy,
                 preferredSeedId: s.preferredSeedId !== undefined ? s.preferredSeedId : s.seedId,
                 prioritize2x2Crops: s.prioritize2x2Crops,
@@ -277,6 +278,7 @@ function createDataProvider(deps) {
             }
             return {
                 strategy: store.getPlantingStrategy(id),
+                automation: store.getAutomation(id),
                 preferredSeed: store.getPreferredSeed(id),
                 prioritize2x2Crops: store.getPrioritize2x2Crops(id),
                 intervals: store.getIntervals(id),

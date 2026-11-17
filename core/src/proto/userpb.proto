@@ -73,7 +73,7 @@ message BasicInfo {
     string signature = 9;
     int32 gender = 10;
     // repeated AvatarFrame equip_avatar_frames = 11;
-    // map<int64, ShareInfo> share_infos = 12;
+    map<int64, ShareInfo> share_infos = 12;
     int32 authorized_status = 13;
     bool disable_nudge = 14;
 }
@@ -123,3 +123,5 @@ message ReportArkClickReply {
 message BasicNotify {
     BasicInfo basic = 1;
 }
+
+message ShareInfo { int64 share_count = 1; bool is_claimed = 2; }

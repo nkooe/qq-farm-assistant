@@ -130,7 +130,11 @@ function getRuntime() {
         connected: net.isConnected, quiet: inFriendQuietHours,
         myGid: () => toNum(net.getUserState().gid), load: net.getGatewayLoad,
         idle: signal => net.waitForGatewayIdle(8000, signal),
-        listFriends: async () => (await api.getAllFriends(false)).game_friends || [],
+        listFriends: () => runExclusiveAutomationTask('pet_sync_list', async () => {
+            const analyzer = require('./friend-land-analyzer');
+            const cached = analyzer.getFriendsListCache();
+            return cached?.length ? cached : analyzer.getFriendsList(false, 'normal', true);
+        }, { detached: true }),
         excluded: gid => store.getFriendBlacklist(process.env.FARM_ACCOUNT_ID || '').map(Number).includes(gid) || api.getInvalidKnownFriendGidSet().has(gid),
         known: gid => cache.getState(gid) !== 'unknown',
         friendBusy: () => orchestrator.isCheckingFriendsRunning() || !!runtimeGuards.friendBusy?.(),

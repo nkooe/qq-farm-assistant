@@ -10,11 +10,11 @@ const { ensureDataDir } = require('../config/runtime-paths');
 const { CONFIG } = require('../config/config');
 
 // Matched source assets from qq-farm-bot-master; see docs/game-version-upgrade.md.
-const OFFICIAL_VERSION = 'v3.9.0.1793764291';
-const OFFICIAL_SHA256 = '253033edbfa7bde60de71f198d207cc862b0db479ab843ec61099e1f24360165';
+const OFFICIAL_VERSION = 'v3.9.0.1794737607';
+const OFFICIAL_SHA256 = 'ab6eb0f0ee86ce8984b0c37a481ff51e7722961ff0b50a9f91e2fa9ff351ce74';
 const TSDK_BUILDS = Object.freeze({
     qq: { file: 'tsdk.wasm', version: OFFICIAL_VERSION, sha256: OFFICIAL_SHA256, appId: '1112386029' },
-    wx: { file: 'tsdk-wx.wasm', version: 'v3.9.0.1793763796', sha256: '41e5e9c01e8168e2caeaefcbff346252edfbed4e693b88fcae041f2eb3bffc87', appId: 'wx5306c5978fdb76e4' },
+    wx: { file: 'tsdk-wx.wasm', version: 'v3.9.0.1794837963', sha256: 'd14a4f5d59c8a27128019dbad25fe3cd3d5243dfc389eb9bcbb345efb1cebc9a', appId: 'wx5306c5978fdb76e4' },
 });
 const DEFAULT_GAME_ID = 3167;
 const DEFAULT_APP_KEY = '0';

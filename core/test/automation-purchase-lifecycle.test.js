@@ -42,6 +42,7 @@ test('stopping mystery automation during its lookup prevents a late purchase', a
   });
   t.after(() => api.stopMysteryAutoBuyTimer());
   api.startMysteryAutoBuyTimer();
+  await tick();
   api.stopMysteryAutoBuyTimer();
   assert.equal(signal.aborted, true);
   finish({ active: true, npcId: 7, currencyId: 1001 });
@@ -59,6 +60,7 @@ test('mystery purchase rechecks currency configuration after lookup and blocks o
   });
   t.after(() => api.stopMysteryAutoBuyTimer());
   api.startMysteryAutoBuyTimer();
+  await tick();
   const duplicate = api.checkMysteryAutoBuyOnce();
   assert.equal(reads, 1);
   currencies = [1002];

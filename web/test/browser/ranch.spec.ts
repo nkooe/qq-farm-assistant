@@ -1,0 +1,94 @@
+import { expect, test } from '@playwright/test'
+
+test.beforeEach(async ({ page }) => {
+  page.on('pageerror', error => { throw error })
+  await page.route(url => !['127.0.0.1', 'localhost'].includes(url.hostname), route => route.abort())
+  await page.route(url => url.pathname.startsWith('/api/'), route => route.fulfill({ json: { ok: true, data: {} } }))
+  await page.route('**/game-config/**', route => route.fulfill({ path: '../core/src/modern/gameConfig/seed_images_named/seed_images/7001.png' }))
+})
+
+test('ranch late reads are discarded when the account changes', async ({ page }) => {
+  let release = () => {}
+  const held = new Promise<void>(resolve => { release = resolve })
+  await page.route('**/api/ranch?**', async (route) => {
+    const id = route.request().headers()['x-account-id']
+    if (id === '1') await held
+    await route.fulfill({ json: { ok: true, data: { unlocked: false, reason: id === '1' ? '旧账号的牧场状态' : '新账号的牧场状态' } } })
+  })
+  await page.goto('/test/browser/ranch.html')
+  await page.getByTestId('switch').click()
+  await expect(page.getByText('新账号的牧场状态')).toBeVisible()
+  release()
+  await expect(page.getByText('旧账号的牧场状态')).toHaveCount(0)
+  await expect(page.getByText('新账号的牧场状态')).toBeVisible()
+})
+
+test('ranch strategy saves only ranch fields to the selected account and fits mobile', async ({ page }) => {
+  const writes: any[] = []
+  await page.route('**/api/settings', route => route.fulfill({ json: { ok: true, data: {
+    plantingStrategy: 'bag_priority', automation: { farm: false, milk_tea: true, ranch_check_minutes: 5, ranch_grass_threshold_percent: 20, ranch_strategy: 'level', ranch_harvest: true },
+  } } }))
+  await page.route('**/api/ranch/automation-options', route => route.fulfill({ json: { ok: true, data: [] } }))
+  await page.route('**/api/settings/save', async (route) => {
+    writes.push({ id: route.request().headers()['x-account-id'], ...route.request().postDataJSON() })
+    await route.fulfill({ json: { ok: true } })
+  })
+  await page.goto('/test/browser/ranch.html?page=strategy')
+  await page.getByLabel('巡查间隔（分钟）').fill('9')
+  await page.getByRole('button', { name: '保存策略' }).click()
+  await expect.poll(() => writes.length).toBe(1)
+  expect(writes[0].id).toBe('1')
+  expect(writes[0].automation.ranch_check_minutes).toBe(9)
+  expect(Object.keys(writes[0].automation).every(key => key.startsWith('ranch_'))).toBe(true)
+  expect(Object.keys(writes[0]).sort()).toEqual(['automation', 'id'])
+  await page.getByTestId('switch').click()
+  await page.getByRole('button', { name: '保存策略' }).click()
+  await expect.poll(() => writes.length).toBe(2)
+  expect(writes[1].id).toBe('2')
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await expect(page.locator('[data-floating-dock]')).toBeInViewport()
+  await expect.poll(() => page.locator('[data-floating-dock] button').evaluateAll(buttons => buttons.every(button => {
+    const rect = button.getBoundingClientRect()
+    return rect.left >= 0 && rect.right <= innerWidth && rect.width >= 44
+  }))).toBe(true)
+  await page.screenshot({ path: test.info().outputPath('ranch-strategy.png') })
+})
+
+test('ranch shop cannot buy with unknown or insufficient balances', async ({ page }) => {
+  await page.route('**/api/ranch?**', route => route.fulfill({ json: { ok: true, data: {
+    unlocked: true, level: 1, facilities: [], currencies: [], pendingOperations: [],
+    shop: { goods: [
+      { id: '1', available: true, maxCount: 99, reward: { id: 1, name: '测试幼崽', count: '1', image: '' }, price: { id: 1007, name: '金券', count: '10', balance: '0' } },
+      { id: '2', available: true, maxCount: 99, reward: { id: 2, name: '未知余额幼崽', count: '1', image: '' }, price: { id: 1008, name: '松果', count: '10', balance: null } },
+    ] },
+  } } }))
+  await page.goto('/test/browser/ranch.html?page=mall')
+  await expect(page.getByText('测试幼崽', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '购买', exact: true })).toHaveCount(2)
+  for (const button of await page.getByRole('button', { name: '购买', exact: true }).all()) await expect(button).toBeDisabled()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+test('muge survey restart clears saved answers before continuing', async ({ page }) => {
+  const writes: any[] = []
+  const state: any = { title: '牧歌初启', active: true, startTime: Date.now() - 1000, endTime: Date.now() + 86400000, serverTime: Date.now(), rules: [],
+    celebration: { total: 0, tiers: [] }, friends: { count: 0, tiers: [] }, handbook: { points: 0, tasks: [], tiers: [] },
+    personality: { answers: { 1: 2 }, personalityId: 1, settleCount: 1, image: '', shareRewardClaimed: true },
+    questions: [{ id: 1, title: '测试问题', options: [{ value: 1, label: 'A', text: '测试选项' }] }],
+  }
+  await page.route('**/api/activities/muge', route => route.fulfill({ json: { ok: true, data: state } }))
+  await page.route('**/api/activities/muge/saveAnswers', async (route) => {
+    const input = route.request().postDataJSON(); writes.push(input)
+    if (input.clear) state.personality.answers = {}
+    else Object.assign(state.personality.answers, input.answers)
+    await route.fulfill({ json: { ok: true, data: { activity: state, rewards: [] } } })
+  })
+  await page.goto('/test/browser/ranch.html?muge')
+  await page.getByRole('tab', { name: '牧场人格' }).click()
+  await page.getByRole('button', { name: '重新测试' }).click()
+  await expect(page.getByText('测试问题', { exact: true })).toBeVisible()
+  expect(writes[0]).toEqual({ answers: {}, clear: true })
+  await page.getByRole('radio', { name: /测试选项/ }).click()
+  await expect.poll(() => writes.length).toBe(2)
+  expect(writes[1]).toEqual({ answers: { 1: 1 } })
+})

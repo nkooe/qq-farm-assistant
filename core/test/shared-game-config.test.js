@@ -18,7 +18,7 @@ const EXTRA_IDS = [20113, 20265, 20266, 40113, 40265, 40266];
 
 test('两套实际加载器读取同一公共源，modern 专属表继续可用', () => {
   const tables = shared.loadSharedGameTables();
-  assert.equal(tables.ItemInfo.length, 1072);
+  assert.equal(tables.ItemInfo.length, 1182);
   for (const item of tables.ItemInfo) {
     assert.equal(legacy.getItemById(item.id).name, item.name);
     assert.equal(modern.getItemById(item.id).name, item.name);
@@ -80,6 +80,29 @@ test('公共表缺失/损坏/含无效 ID 时拒绝重载并保留已有字典',
   assert.equal(result.errors.length, 2);
   assert.deepEqual(modern.getItemById(20113), original);
   assert.deepEqual(legacy.getItemById(20113), originalLegacy);
+});
+
+test('商品表热加载同步价格币种，坏表保留原价格，删除的商品不会残留', t => {
+  const tables = shared.loadSharedGameTables();
+  const goods = tables.Goods[0];
+  const original = structuredClone(modern.getShopGoodsById(goods.id));
+  goods.price_id = 1008;
+  const mocked = t.mock.method(shared, 'loadSharedGameTables', () => structuredClone(tables));
+  assert.equal(reloadGameConfig().ok, true);
+  assert.equal(modern.getShopGoodsById(goods.id).price_id, 1008);
+  mocked.mock.restore();
+  const read = fs.readFileSync;
+  const bad = t.mock.method(fs, 'readFileSync', (filename, ...args) => String(filename).endsWith('Goods.json') ? '[{}]' : read(filename, ...args));
+  assert.equal(reloadGameConfig().ok, false);
+  assert.equal(modern.getShopGoodsById(goods.id).price_id, 1008);
+  bad.mock.restore();
+  const reduced = { ...tables, Goods: tables.Goods.filter(row => row.id !== goods.id) };
+  const deleted = t.mock.method(shared, 'loadSharedGameTables', () => structuredClone(reduced));
+  assert.equal(reloadGameConfig().ok, true);
+  assert.equal(modern.getShopGoodsById(goods.id), undefined);
+  deleted.mock.restore();
+  assert.equal(reloadGameConfig().ok, true);
+  assert.deepEqual(modern.getShopGoodsById(goods.id), original);
 });
 
 test('公共源读盘失败和无效结构不会被静态副本掩盖', t => {

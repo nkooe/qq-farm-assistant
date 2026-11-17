@@ -26,6 +26,7 @@ function harness() {
     '../services/automation-lock': lock,
     '../services/scheduler': { createScheduler: () => scheduler },
     '../services/milk-tea-automation': { automation: {} },
+    '../modern/services/ranch/automation': { getRoutineState: () => ({ doneToday: true }), resetSchedule: noop },
     '../services/farm': { checkFarm: async () => { calls.farm++; } },
     '../services/friend': { checkFriends: async () => { calls.friend++; await waiting; }, computeEffectiveTurbo: () => false },
     '../services/friend-pet-sync': { isPetSyncVisiting: () => false },

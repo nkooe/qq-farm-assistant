@@ -135,7 +135,7 @@ test('a lost upgrade reply is not replayed after boosting, and the next cycle re
     assert.equal(h.calls.filter(value => value.action === 'upgrade').length, 2);
 });
 
-test('settlement permits cash, wages, upgrades, fund rewards and non-seed exchange only', async () => {
+test('settlement permits crafting and seed exchange while employment stays blocked', async () => {
     const h = harness();
     h.time(90000);
     h.summary.can_upgrade = true;
@@ -149,16 +149,16 @@ test('settlement permits cash, wages, upgrades, fund rewards and non-seed exchan
     h.goods.push({ id: 1, item: [{ id: 80011, count: 1 }], cost: [{ id: 1041, count: 1 }], purchase_limit: 1 },
         { id: 2, category_tag: 'seed', item: [{ id: 20525, count: 1 }], cost: [{ id: 1041, count: 1 }], purchase_limit: 1 });
     await h.run();
-    assert.deepEqual(h.calls.map(value => value.action), ['claim', 'wages', 'upgrade', 'fundClaim', 'exchange']);
-    assert.equal(h.calls.at(-1).params.goods_id, '1');
+    assert.deepEqual(h.calls.map(value => value.action), ['claim', 'wages', 'upgrade', 'craft', 'fundClaim', 'exchange', 'exchange']);
+    assert.deepEqual(h.calls.filter(call => call.action === 'exchange').map(call => call.params.goods_id), ['1', '2']);
 });
 
-test('crossing settlement during a read prevents crafting with the just-read materials', async () => {
+test('crossing settlement during a read still permits crafting before the event ends', async () => {
     const h = harness();
     h.bag.push({ id: 40525, uid: '7', count: 5 });
     h.state.afterRead = action => { if (action === 'workshop') h.time(90000); };
     await h.run();
-    assert.equal(h.calls.length, 0);
+    assert.deepEqual(h.calls.map(call => call.action), ['craft']);
 });
 
 test('disconnect, expiry and inventory queue cancellation stop the next write', async () => {

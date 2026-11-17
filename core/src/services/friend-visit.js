@@ -1,3 +1,4 @@
+const { isGatewayYieldError } = require('../utils/request-queue');
 const { PlantPhase } = require('../config/config');
 const {
   getPlantBlacklist,
@@ -77,6 +78,7 @@ async function doFriendOperation(gid, opType) {
   try {
     enterReply = await enterFriendFarm(numericGid);
   } catch (err) {
+    if (isGatewayYieldError(err)) throw err;
     const handled = handleFriendEnterError(numericGid, `GID:${numericGid}`, err);
     if (handled.handled && handled.kind === 'blacklist') {
       return { ok: true, opType, count: 0, message: '好友已自动加入黑名单' };
@@ -108,7 +110,8 @@ async function doFriendOperation(gid, opType) {
           analysis.stealable,
           ids => stealHarvest(numericGid, ids)
         );
-      } catch (_) {
+      } catch (cause) {
+          if (isGatewayYieldError(cause)) throw cause;
         return { ok: true, opType, count: 0, message: 'Ta已经被偷的精光了QAQ' };
       }
 
@@ -117,6 +120,7 @@ async function doFriendOperation(gid, opType) {
         try {
           await sellAllFruits();
         } catch (sellErr) {
+    if (isGatewayYieldError(sellErr)) throw sellErr;
           logWarn('仓库', `手动偷取后自动出售失败: ${sellErr.message}`, {
             module: 'warehouse',
             event: '偷菜后出售',
@@ -140,7 +144,8 @@ async function doFriendOperation(gid, opType) {
           analysis.needWater,
           ids => helpWater(numericGid, ids)
         );
-      } catch (_) {
+      } catch (cause) {
+          if (isGatewayYieldError(cause)) throw cause;
         return { ok: true, opType, count: 0, message: '浇水失败，来晚一步，可惜' };
       }
 
@@ -159,7 +164,8 @@ async function doFriendOperation(gid, opType) {
           analysis.needWeed,
           ids => helpWeed(numericGid, ids)
         );
-      } catch (_) {
+      } catch (cause) {
+          if (isGatewayYieldError(cause)) throw cause;
         return { ok: true, opType, count: 0, message: '除草失败，来晚一步，可惜' };
       }
 
@@ -178,7 +184,8 @@ async function doFriendOperation(gid, opType) {
           analysis.needBug,
           ids => helpInsecticide(numericGid, ids)
         );
-      } catch (_) {
+      } catch (cause) {
+          if (isGatewayYieldError(cause)) throw cause;
         return { ok: true, opType, count: 0, message: '除虫失败，来晚一步，可惜' };
       }
 
@@ -264,11 +271,13 @@ async function doFriendOperation(gid, opType) {
 
     return { ok: false, opType, count: 0, message: '未知操作类型' };
   } catch (err) {
+    if (isGatewayYieldError(err)) throw err;
     return { ok: false, opType, count: 0, message: err.message || '操作失败' };
   } finally {
     try {
       await leaveFriendFarm(numericGid);
-    } catch (_) {
+    } catch (cause) {
+          if (isGatewayYieldError(cause)) throw cause;
       // Ignore leave errors
     }
   }
@@ -289,6 +298,7 @@ async function visitFriend(friend, tally, myGid, accountId) {
   try {
     enterReply = await enterFriendFarm(gid);
   } catch (err) {
+    if (isGatewayYieldError(err)) throw err;
     const handled = handleFriendEnterError(gid, name, err);
     if (handled.handled) {
       return { acted: false, entered: false };
@@ -376,7 +386,8 @@ async function visitFriend(friend, tally, myGid, accountId) {
                 recordOperation(opt.record, okCount);
                 await randomDelay(50, 100);
               }
-            } catch (_) {
+            } catch (cause) {
+          if (isGatewayYieldError(cause)) throw cause;
               // 帮忙操作整体失败，跳过该类操作
             }
           }
@@ -398,6 +409,7 @@ async function visitFriend(friend, tally, myGid, accountId) {
           if (info) stolenNames.push(info.name);
         });
       } catch (error) {
+    if (isGatewayYieldError(error)) throw error;
         throw error;
       }
 
@@ -494,6 +506,7 @@ async function visitFriendForSteal(friend, tally, myGid, accountId) {
   try {
     enterReply = await enterFriendFarm(gid);
   } catch (err) {
+    if (isGatewayYieldError(err)) throw err;
     const handled = handleFriendEnterError(gid, name, err);
     if (handled.handled) {
       return { acted: false, entered: false };
@@ -556,6 +569,7 @@ async function visitFriendForSteal(friend, tally, myGid, accountId) {
           if (info) stolenNames.push(info.name);
         });
       } catch (error) {
+    if (isGatewayYieldError(error)) throw error;
         throw error;
       }
 
@@ -678,6 +692,7 @@ async function runFarmingBatch(hostGid, ids, stopWhenExpLimit, snapshotKey) {
     _releaseRecentHelp(hostGid, unconfirmed);
     return batch;
   } catch (error) {
+    if (isGatewayYieldError(error)) throw error;
     _releaseRecentHelp(hostGid, target);
     throw error;
   }
@@ -705,6 +720,7 @@ async function visitFriendForHelp(friend, tally, myGid, accountId, ignoreExpLimi
     // 失败立即跳过（catch 里 return 下一个，不重试不卡）。
     enterReply = await enterFriendFarm(gid);
   } catch (err) {
+    if (isGatewayYieldError(err)) throw err;
     const handled = handleFriendEnterError(gid, name, err);
     if (handled.handled) {
       return { acted: false, entered: false };
@@ -778,6 +794,7 @@ async function visitFriendForHelp(friend, tally, myGid, accountId, ignoreExpLimi
             });
           }
         } catch (err) {
+    if (isGatewayYieldError(err)) throw err;
           logWarn('好友', `${name} 一键务农异常: ${err.message}`, {
             module: 'friend',
             event: '帮助好友',

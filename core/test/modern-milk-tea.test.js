@@ -179,8 +179,8 @@ test('shop retains finite limits and enforces level, price and settlement condit
     h.goods.cond_hints = [];
     await assert.rejects(h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: [{ id: 1001, count: 1 }] }), /费用已变化/);
     h.setTime(1794672000);
-    await assert.rejects(h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: h.goods.cost }), /条件/);
-    assert.equal(h.calls.length, 0);
+    await h.service.operateMilkTeaActivity('exchange', { goodsId: 301, count: 1, expectedCosts: h.goods.cost });
+    assert.equal(h.calls.length, 1, 'seed exchange remains available in settlement');
 });
 test('fund unlock is serialized and claims require paid unlock without duplicate charges', async () => {
     const h = harness();

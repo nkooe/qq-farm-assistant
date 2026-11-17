@@ -6,6 +6,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 const share_reward_instances_json_1 = __importDefault(require("../activity-data/share-reward-instances.json"));
+const pending_content_json_1 = __importDefault(require("../activity-data/pending-content.json"));
 const LongModule = require('long');
 const { sendMsgAsync, GatewayError } = require('../utils/network');
 const { types } = require('../utils/proto');
@@ -335,7 +336,8 @@ function buildActivityDirectory(windows, season, shop, solarTerms, constellation
         if (!id)
             continue;
         const shareInstance = share_reward_instances_json_1.default.find(entry => entry.activityId === id);
-        const name = shareInstance?.title || String(window?.name || '').trim() || `活动 ${id}`;
+        const placeholder = pending_content_json_1.default.activities.find(entry => entry.activityIds.includes(id));
+        const name = shareInstance?.title || String(window?.name || '').trim() || placeholder?.name || `活动 ${id}`;
         const startTime = Number(window?.beginTime) || 0;
         const endTime = Number(window?.endTime) || 0;
         // List includes historical and future windows. Only expose currently open instances.
@@ -465,6 +467,17 @@ function getActivityCenterSnapshot(shopOverride = null) {
     });
     return request;
 }
+async function getRanchActivityDirectorySnapshot() {
+    const body = types.ActivityListRequest.encode({ game_scene_id: 2 }).finish();
+    const response = await sendMsgAsync('gamepb.activitypb.ActivityService', 'List', body);
+    const reply = types.ActivityListReply.decode(response.body);
+    // all_activities 是两边共用的时间目录；牧场只展示场景 2 实际下发的活动组。
+    const windows = reply.activities.flatMap((group) => [group, ...group.children]).map((entry) => ({
+        id: String(entry.activity.activity_id), name: entry.activity.name,
+        beginTime: int64Number(entry.activity.begin_time), endTime: int64Number(entry.activity.end_time),
+    }));
+    return { serverTime: getServerTimeSec(), activities: buildActivityDirectory(windows, null, null, null, null) };
+}
 async function getActivityDirectorySnapshot() {
     const activityWindows = await getActivityWindows();
     return {
@@ -491,6 +504,7 @@ module.exports = {
     reconcileCharityProgressState,
     buildActivityDirectory,
     getActivityDirectorySnapshot,
+    getRanchActivityDirectorySnapshot,
     getActivityCenterSnapshot,
     getCurrentSeasonEvent,
     getCurrentStellarActivity,

@@ -35,3 +35,10 @@ test('quantity clamps on shrinking caps and zero is never turned into one', () =
     assert.equal(clampPurchaseCount(value, 3), 1)
   assert.equal(clampPurchaseCount(2.9, 3), 2)
 })
+
+test('ranch string quantities remain exact beyond the safe integer range', () => {
+  assert.equal(purchaseMaxCount({ costs: [{ id: 1007, count: '3', balance: '9007199254740995' }], cap: 999 }), 999)
+  assert.equal(affordableCount([{ id: 1007, count: '9007199254740993', balance: '18014398509481985' }]), 1)
+  assert.equal(affordableCount([{ id: 1007, count: '5', balance: '11' }, { id: '1007', count: '5', balance: '11' }]), 1)
+  for (const count of ['-1', '1.5', '1e2', 'bad']) assert.equal(purchaseMaxCount({ costs: [{ count, balance: '100' }] }), 0)
+})

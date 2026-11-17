@@ -682,7 +682,7 @@ async function sellAllFruits() {
             const id = toNum(item.id);
             const count = toNum(item.count);
             const expireTime = getItemExpireTime(item);
-            if (isFruitItemId(id) && id !== 41221 && count > 0
+            if (isFruitItemId(id) && ![41221, 7001].includes(id) && count > 0
                 && !isItemLocked(item)
                 && getEffectiveSellInfo(id, { ...baseContext, expireTime }).sellable) {
                 toSell.push(item);

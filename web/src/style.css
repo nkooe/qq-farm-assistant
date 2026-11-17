@@ -174,3 +174,75 @@ body {
   --ui-shadow-sm: 0 1px 4px #0001;
 }
 .dark .book-page, .dark .mall-catalog { --ui-muted: #a3acb6; --ui-warning: #e2ab5f; }
+
+:root { --ui-dialog-scroll-gap: 12px; --ui-dialog-scroll-inset: 8px; }
+.dialog-scroll {
+  --ui-dialog-scroll-thumb: var(--ui-muted);
+  padding-inline-end: var(--ui-dialog-scroll-gap);
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--ui-dialog-scroll-thumb) transparent;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dialog-scroll {
+    --ui-dialog-scroll-thumb: transparent;
+  }
+
+  .dialog-scroll:hover,
+  .dialog-scroll:focus-within {
+    --ui-dialog-scroll-thumb: var(--ui-muted);
+  }
+}
+
+@media (max-width: 640px) {
+  :root {
+    --ui-dialog-scroll-gap: 8px;
+    --ui-dialog-scroll-inset: 6px;
+  }
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.38);
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.62);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.42);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.68);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+@supports not (scrollbar-color: auto) {
+  .dialog-scroll {
+    scrollbar-width: auto;
+  }
+
+  .dialog-scroll::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .dialog-scroll::-webkit-scrollbar-thumb,
+  .dialog-scroll::-webkit-scrollbar-thumb:hover,
+  .dark .dialog-scroll::-webkit-scrollbar-thumb,
+  .dark .dialog-scroll::-webkit-scrollbar-thumb:hover {
+    background: var(--ui-dialog-scroll-thumb);
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+}
