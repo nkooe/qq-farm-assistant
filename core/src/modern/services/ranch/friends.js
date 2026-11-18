@@ -1,5 +1,5 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
+const __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -11,6 +11,7 @@ const { animalDto } = require('./state');
 const reservations = require('./operation-state');
 const { getAmbientSendContext, runWithSendContext } = require('./context');
 const { logWarn } = require('../../utils/utils');
+const { isFarmOnlyFriend } = require('./friend-eligibility');
 function targets(ranches) {
     const gid = quantity(network.getUserState().gid);
     return ranches.flatMap(ranch => ranch.shelves.filter((shelf) => shelf.can_steal && shelf.lots.some((lot) => lot.can_steal && BigInt(quantity(lot.remain_num)) > 0n && !lot.stealers.some((id) => quantity(id) === gid)))
@@ -19,6 +20,8 @@ function targets(ranches) {
 }
 async function visit(hostGid, run) {
     const host = positiveId(hostGid, '好友GID');
+    if (isFarmOnlyFriend(host))
+        throw error('INVALID_ARGUMENT', '该好友仅有农场');
     if (host === quantity(network.getUserState().gid))
         throw error('INVALID_ARGUMENT', '请选择好友牧场');
     return inScene(async () => {
@@ -260,11 +263,21 @@ async function automateFriend(hostGid, enabled, shouldYield = () => false) {
             if (!enabled(action))
                 return null;
             const parent = getAmbientSendContext();
-            const outcome = await runWithSendContext({ ...parent,
-                check: (service, method) => parent?.check(service, method) || (enabled(action) ? null
-                    : error('RANCH_AUTOMATION_DISABLED', '好友互动开关已关闭')),
-                onSent: (service, method) => parent?.onSent(service, method),
-            }, run);
+            let outcome;
+            try {
+                outcome = await runWithSendContext({ ...parent,
+                    check: (service, method) => parent?.check(service, method) || (enabled(action) ? null
+                        : error('RANCH_AUTOMATION_DISABLED', '好友互动开关已关闭')),
+                    onSent: (service, method) => parent?.onSent(service, method),
+                }, run);
+            }
+            catch (cause) {
+                // 仅跳过账本已拦截的重复提交，其它互动和好友继续；新发生的未知结果仍停止本轮。
+                if (cause.code !== 'PENDING_CONFIRMATION')
+                    throw cause;
+                logWarn('牧场', `${host}：${cause.message}`, { module: 'ranch', event: `ranch_${action}`, result: 'skipped' });
+                return null;
+            }
             if (outcome.status === 'confirmed')
                 results.push(outcome);
             return outcome;

@@ -10,6 +10,7 @@ const { getServerTimeSec, log } = require('../../utils/utils');
 const { getShopGoodsById } = require('../../config/gameConfig');
 const reservations = require('./operation-state');
 const { getAmbientSendContext, runWithSendContext } = require('./context');
+const { isFarmOnlyFriend } = require('./friend-eligibility');
 const daily = require('./daily');
 let nextCheckAt = 0;
 let nextFriendIndex = 0;
@@ -67,13 +68,14 @@ async function run(options = {}) {
         cycleStartedAt = Date.now();
     nextCheckAt = cycleStartedAt + auto.ranch_check_minutes * 60_000;
     try {
-        // 名单只用作拜访索引，实际资格由进好友牧场后的回包确认；复用农场已同步的名单。
+        // 复用已同步的好友索引，排除只有农场的系统好友；玩家牧场资格由拜访回包确认。
         let friends = [];
         if (!completedPhases.has('friends') && Object.values(FRIEND_CONTROLS).some(enabled)) {
             const friendService = require('../friend');
             friends = friendService.getFriendsListCacheOnly();
             if (!friends.length)
                 friends = await friendService.getFriendsList(false, 'normal', true);
+            friends = friends.filter(friend => !isFarmOnlyFriend(friend.gid));
         }
         // 首次名单读取可能较久，仍留在农场，等下一次空档再切换。
         if (options.canContinue?.() === false || Date.now() >= (options.farmDeadline?.() ?? Infinity)) {
@@ -297,7 +299,7 @@ async function run(options = {}) {
             await phase('feed-organic', async () => { if (enabled('ranch_feed_organic') && available(7004) > 0n)
                 await act('ranch_feed_organic', 'feed', { all: true, bucketType: 1 }); });
             await phase('friends', async () => {
-                if (Object.values(FRIEND_CONTROLS).some(enabled)) {
+                if (friends.length && Object.values(FRIEND_CONTROLS).some(enabled)) {
                     checkpoint();
                     const interactions = require('./friends');
                     const times = await interactions.getInteractionTimes();

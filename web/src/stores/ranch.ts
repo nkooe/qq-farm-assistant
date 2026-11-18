@@ -28,7 +28,29 @@ export const useRanchStore = defineStore('ranch', () => {
   const notice = ref('')
   const receivedAt = ref(0)
   let generation = 0
+  let session = 0
+  let readRequest = 0
   let owner = ''
+  let operation: { finished: Promise<void>, finish: () => void } | null = null
+
+  function beginOperation() {
+    let finish = () => {}
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const active = { finished, finish }
+    operation = active
+    busy.value = true
+    return active
+  }
+
+  function endOperation(active: NonNullable<typeof operation>) {
+    if (operation === active) {
+      operation = null
+      busy.value = false
+    }
+    active.finish()
+  }
   // 记录最近一次读取的页面参数，操作确认后按原视图刷新。
   let lastQuery: { accountId: string, view: RanchView, shopId?: number, hostGid?: string } | null = null
   const current = (id: string, version: number) => id === owner && version === generation
@@ -36,6 +58,10 @@ export const useRanchStore = defineStore('ranch', () => {
 
   function reset(accountId = '') {
     generation++
+    session++
+    readRequest++
+    operation?.finish()
+    operation = null
     owner = accountId
     lastQuery = null
     state.value = null
@@ -51,6 +77,13 @@ export const useRanchStore = defineStore('ranch', () => {
   async function load(accountId: string, view: RanchView, shopId?: number, hostGid?: string) {
     if (owner !== accountId)
       reset(accountId)
+    const request = ++readRequest
+    const identity = session
+    // 已提交的写入先完成；刷新不能丢弃其结果，也不能提前读到旧库存。
+    if (operation)
+      await operation.finished
+    if (identity !== session || request !== readRequest || String(accounts.currentAccountId || '') !== accountId)
+      return
     const version = ++generation
     lastQuery = { accountId, view, shopId, hostGid }
     loading.value = true
@@ -84,14 +117,15 @@ export const useRanchStore = defineStore('ranch', () => {
     if (busy.value || loading.value || owner !== accountId)
       return null
     const version = generation
-    busy.value = true
+    const request = readRequest
+    const active = beginOperation()
     error.value = ''
     notice.value = ''
     try {
       const response = await api.post(`/api/ranch/${action}/quote`, input, { headers: { 'x-account-id': accountId }, timeout: 45000, skipErrorToast: true } as any)
       if (!response.data?.ok)
         throw new Error(response.data?.error || '操作条件读取失败')
-      return current(accountId, version) ? response.data.data : null
+      return current(accountId, version) && request === readRequest ? response.data.data : null
     }
     catch (cause) {
       if (current(accountId, version))
@@ -99,17 +133,16 @@ export const useRanchStore = defineStore('ranch', () => {
       return null
     }
     finally {
-      if (current(accountId, version))
-        busy.value = false
+      endOperation(active)
     }
   }
 
   /** quiet：后台上报类操作只确认结果，不弹出完成提示。 */
   async function execute(accountId: string, action: string, input: Record<string, unknown>, expected: RanchQuote['expected'], options: { quiet?: boolean } = {}) {
-    if (busy.value || owner !== accountId)
+    if (busy.value || loading.value || owner !== accountId)
       return false
     const version = generation
-    busy.value = true
+    const active = beginOperation()
     error.value = ''
     notice.value = ''
     try {
@@ -133,8 +166,7 @@ export const useRanchStore = defineStore('ranch', () => {
       return false
     }
     finally {
-      if (current(accountId, version))
-        busy.value = false
+      endOperation(active)
     }
   }
 

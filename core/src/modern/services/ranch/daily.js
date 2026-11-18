@@ -88,7 +88,8 @@ async function claimBenefit() {
     const now = Date.now();
     try {
         const outcome = await dailyBenefit.claim();
-        benefit = { ...benefit, doneToday: true, lastAt: outcome.claimed && !outcome.skipped ? now : 0, nextCheckAt: 0, result: outcome.claimed ? 'ok' : 'none', lastError: '' };
+        benefit = { ...benefit, doneToday: outcome.claimed, lastAt: outcome.claimed && !outcome.skipped ? now : 0,
+            nextCheckAt: outcome.claimed ? 0 : now + RETRY_MS, result: outcome.claimed ? 'ok' : 'none', lastError: '' };
         if (!outcome.skipped)
             log('牧场', `每日福利已领取：${rewardText(outcome.rewards)}`, { module: 'ranch', event: 'ranch_daily_benefit', result: 'ok' });
     }

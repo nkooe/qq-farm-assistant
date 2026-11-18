@@ -69,6 +69,39 @@ test('ranch shop cannot buy with unknown or insufficient balances', async ({ pag
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
+test('refresh during a ranch quote releases the buttons and discards the stale confirmation', async ({ page }) => {
+  let release = () => {}
+  const held = new Promise<void>(resolve => { release = resolve })
+  let quotes = 0
+  let reads = 0
+  await page.route('**/api/ranch?**', async (route) => {
+    reads++
+    await route.fulfill({ json: { ok: true, data: {
+      unlocked: true, level: 1, pendingOperations: [], currencies: [],
+      facilities: [{ id: '10', name: '窝', ranch: { capacity: 2, animals: [], hazards: [{ id: '1' }], shelves: [] } }],
+    } } })
+  })
+  await page.route('**/api/ranch/clean/quote', async (route) => {
+    quotes++
+    if (quotes === 1) await held
+    await route.fulfill({ json: { ok: true, data: {
+      action: 'clean', label: '清理牧场', costs: [], costItems: [], rewards: [], count: 1, expected: { signature: 'clean' }, skipped: false,
+    } } })
+  })
+  await page.goto('/test/browser/ranch.html')
+  const clean = page.getByRole('button', { name: '一键清理', exact: true })
+  await expect(clean).toBeEnabled()
+  await clean.click()
+  await expect.poll(() => quotes).toBe(1)
+  await page.getByRole('button', { name: '刷新牧场', exact: true }).click()
+  release()
+  await expect.poll(() => reads).toBe(2)
+  await expect(clean).toBeEnabled()
+  await expect(page.getByRole('button', { name: '确认', exact: true })).toHaveCount(0)
+  await clean.click()
+  await expect(page.getByRole('button', { name: '确认', exact: true })).toBeVisible()
+})
+
 test('muge survey restart clears saved answers before continuing', async ({ page }) => {
   const writes: any[] = []
   const state: any = { title: '牧歌初启', active: true, startTime: Date.now() - 1000, endTime: Date.now() + 86400000, serverTime: Date.now(), rules: [],

@@ -1,8 +1,8 @@
 {
   "name": "qq-farm-bot-web",
   "type": "module",
-  "version": "1.1502.23",
-  "appVersion": "1.15.02.023",
+  "version": "1.1502.24",
+  "appVersion": "1.15.02.024",
   "private": true,
   "scripts": {
     "test": "node --test test/*.test.mjs",

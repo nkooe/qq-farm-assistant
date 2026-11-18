@@ -1,6 +1,7 @@
 const { rpc, inScene, isUnlocked } = require('./transport');
 const { animalMap, mutationMap, cubMap, canMap, facilityMap, itemMap, taskMap, itemDto, pendingOperationView, quantity, levelInfo, error } = require('./model');
 const { getServerTimeSec } = require('../../utils/utils');
+const { isFarmOnlyFriend } = require('./friend-eligibility');
 function bagItems(bag) {
     return [...bag.physical_items, ...bag.virtual_items];
 }
@@ -214,7 +215,9 @@ async function getState(view = 'animals', shopId, hostGid) {
             if (hostGid !== undefined)
                 state.friendRanch = await require('./friends').getFriend(hostGid);
             else
-                state.friends = (await require('../friend').getFriendsList()).map((friend) => ({ gid: String(friend.gid), name: friend.name, avatarUrl: friend.avatarUrl }));
+                state.friends = (await require('../friend').getFriendsList())
+                    .filter(friend => !isFarmOnlyFriend(friend.gid))
+                    .map((friend) => ({ gid: String(friend.gid), name: friend.name, avatarUrl: friend.avatarUrl }));
         }
         return state;
     });
