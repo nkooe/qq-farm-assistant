@@ -34,15 +34,18 @@ async function runAutomaticMilkTea({ group, rpc, inventory, serializeInventory, 
     const settling = () => number(head.settle_start_time) > 0 && now() >= number(head.settle_start_time);
     function check() {
         if (!allowed()) throw Object.assign(new Error('奶茶经营已暂停'), { cancelled: true });
-        if (head && !isOpen(head)) throw Object.assign(new Error('活动已结束'), { cancelled: true });
+        if (head && !isOpen(head)) throw Object.assign(new Error(now() >= number(head.end_time) ? '活动已结束' : '活动未开始'),
+            { cancelled: true, activityInactive: true });
     }
     async function refresh() {
         check();
         entries = await group();
         check();
         const milk = entries.find(value => String(value.head?.activity_id) === MILK);
-        if (!milk?.head || !milk.milk_tea?.summary) throw new Error('奶茶进度未返回');
+        if (!milk?.head) throw new Error('奶茶进度未返回');
         head = milk.head;
+        check();
+        if (!milk.milk_tea?.summary) throw new Error('奶茶进度未返回');
         summary = milk.milk_tea.summary;
     }
     async function read(action, params) {
@@ -93,7 +96,6 @@ async function runAutomaticMilkTea({ group, rpc, inventory, serializeInventory, 
     }
     try {
         await refresh();
-        if (!isOpen(head)) return { status: 'inactive', message: '活动未开放', completed };
         if (!number(summary.shop_open_at)) {
             if (settling()) return { status: 'inactive', message: '活动结算中', completed };
             const name = config.MilkTeaActivityConfig[0].recommend_names.split(';')[0];
@@ -256,6 +258,7 @@ async function runAutomaticMilkTea({ group, rpc, inventory, serializeInventory, 
         return { status: failures.size ? 'error' : 'idle', completed,
             message: failures.size ? `${[...failures].join('、')}待重试` : completed.length ? `已完成${completed.join('、')}` : '自动经营中' };
     } catch (error) {
+        if (error.activityInactive) return { status: 'inactive', message: error.message, completed };
         error.completed = completed;
         throw error;
     }

@@ -27,12 +27,19 @@ function harness(options = {}) {
     mock('config/gameConfig', { getItemById: id => ({ name: `物品${id}` }), getItemImageById: () => '' });
     mock('services/pay', { getDiamondBalance: async () => 767 });
     mock('services/warehouse', { getBag: async () => ({ items: bag }), getBagItems: b => b.items, isItemLocked: v => !!v.locked, serializeInventory: task => task() });
+    mock('services/activity-windows', { getActivityWindows: async () => {
+        reads.push('windows');
+        options.onRead?.('windows');
+        if (options.windowError) throw options.windowError;
+        return options.windows ?? [{ id: '2026110101', beginTime: milk.head.begin_time, endTime: milk.head.end_time }];
+    } });
     mock('utils/network', { sendMsgAsync: async (_service, method, body) => {
         if (method === 'GetGroup') {
             reads.push('group');
             options.onRead?.('group');
             if (failRefresh && writes) throw new Error('offline');
-            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children: [milk, { head: { ...milk.head, activity_id: '2026110102' }, shop: { goods: [goods, ...(options.extraGoods || [])] } }, { head: { ...milk.head, activity_id: '2026110103' }, growth_fund: fund }] } }) };
+            const children = options.omitMilk ? [] : [milk, { head: { ...milk.head, activity_id: '2026110102' }, shop: { goods: [goods, ...(options.extraGoods || [])] } }, { head: { ...milk.head, activity_id: '2026110103' }, growth_fund: fund }];
+            return { body: encode(types.MilkTeaGetGroupReply, { group: { head: { activity_id: '2026110100' }, children } }) };
         }
         const req = types.MilkTeaOperateRequest.toObject(types.MilkTeaOperateRequest.decode(body), { longs: String });
         const cmd = Number(req.operate_type);
@@ -59,8 +66,64 @@ function harness(options = {}) {
         return { body: encode(types.MilkTeaOperateReply, { activity_id: req.activity_id, operate_type: cmd, [fields[cmd]]: result }) };
     } });
     const id = require.resolve('../src/modern/services/milk-tea'); delete require.cache[id];
-    return { service: require(id), calls, reads, bag, shop, fund, goods, work, summary: milk.milk_tea.summary, setTime: v => now = v, failRefresh: () => failRefresh = true };
+    return { service: require(id), calls, reads, bag, shop, fund, goods, work, milk, summary: milk.milk_tea.summary, setTime: v => now = v, failRefresh: () => failRefresh = true };
 }
+
+test('expired, upcoming and delisted milk tea skip GetGroup and all gameplay requests', async () => {
+    for (const [windows, message] of [
+        [[{ id: '2026110101', beginTime: 1792029600, endTime: 1792032000 }], '活动已结束'],
+        [[{ id: '2026110101', beginTime: 1792032001, endTime: 1794844799 }], '活动未开始'],
+        [[], '活动未开放'],
+        [[{ id: '2026110100', beginTime: 1792029600, endTime: 1794844799 }], '活动未开放'],
+    ]) {
+        const h = harness({ windows });
+        for (let cycle = 0; cycle < 2; cycle++)
+            assert.deepEqual(await h.service.runMilkTeaAutomation(() => true), { status: 'inactive', message, completed: [] });
+        assert.deepEqual(h.reads, ['windows', 'windows']);
+        assert.equal(h.calls.length, 0);
+        assert.equal(h.bag[3].count, 20);
+    }
+});
+
+test('milk tea resumes only when its server activity window opens', async () => {
+    const windows = [];
+    const h = harness({ windows });
+    assert.equal((await h.service.runMilkTeaAutomation(() => true)).status, 'inactive');
+    windows.push({ id: '2026110101', beginTime: 1792029600, endTime: 1794844799 });
+    const result = await h.service.runMilkTeaAutomation(() => true);
+    assert.ok(result.completed.includes('制作奶茶'));
+    assert.ok(h.reads.includes('group'));
+});
+
+test('a failed activity lookup or missing open progress remains an error and never sends writes', async () => {
+    const unavailable = harness({ windowError: new Error('activity list offline') });
+    await assert.rejects(unavailable.service.runMilkTeaAutomation(() => true), /activity list offline/);
+    assert.deepEqual(unavailable.reads, ['windows']);
+    assert.equal(unavailable.calls.length, 0);
+    const missing = harness({ omitMilk: true });
+    await assert.rejects(missing.service.runMilkTeaAutomation(() => true), /奶茶进度未返回/);
+    assert.equal(missing.calls.length, 0);
+});
+
+test('disconnecting while checking the activity window prevents gameplay requests', async () => {
+    let allowed = true;
+    const h = harness({ onRead: cmd => { if (cmd === 'windows') allowed = false; } });
+    await assert.rejects(h.service.runMilkTeaAutomation(() => allowed), error => error.cancelled === true);
+    assert.deepEqual(h.reads, ['windows']);
+    assert.equal(h.calls.length, 0);
+});
+
+test('expiry during the group read is inactive even if the server omits expired progress', async () => {
+    const h = harness({ onRead: cmd => {
+        if (cmd === 'group') {
+            h.setTime(1794844799);
+            delete h.milk.milk_tea;
+        }
+    } });
+    assert.deepEqual(await h.service.runMilkTeaAutomation(() => true), { status: 'inactive', message: '活动已结束', completed: [] });
+    assert.deepEqual(h.reads, ['windows', 'group']);
+    assert.equal(h.calls.length, 0);
+});
 
 test('shop and hiring normalize omitted protobuf employee lists to an empty array', async () => {
     const h = harness();

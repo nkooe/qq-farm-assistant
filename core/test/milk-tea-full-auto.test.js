@@ -161,16 +161,30 @@ test('crossing settlement during a read still permits crafting before the event 
     assert.deepEqual(h.calls.map(call => call.action), ['craft']);
 });
 
-test('disconnect, expiry and inventory queue cancellation stop the next write', async () => {
-    for (const mode of ['disconnect', 'expiry', 'inventory']) {
+test('disconnect and inventory queue cancellation stop the next write', async () => {
+    for (const mode of ['disconnect', 'inventory']) {
         const h = harness();
         h.bag.push({ id: 40525, uid: '7', count: 5 });
         if (mode === 'inventory') h.state.lock = task => { h.disconnect(); return task(); };
-        else h.state.afterRead = action => {
-            if (action === 'workshop') { if (mode === 'disconnect') h.disconnect(); else h.time(100000); }
-        };
+        else h.state.afterRead = action => { if (action === 'workshop') h.disconnect(); };
         await assert.rejects(h.run(), error => error.cancelled === true);
         assert.equal(h.calls.length, 0);
+    }
+});
+
+test('expiry during a cycle stops the next write normally and retains confirmed rewards', async () => {
+    for (const afterClaim of [false, true]) {
+        const h = harness();
+        h.bag.push({ id: 40525, uid: '7', count: 5 });
+        if (afterClaim) {
+            h.shop.pending_rewards = [{ count: 5 }];
+            h.state.afterWrite = action => { if (action === 'claim') h.time(100000); };
+        }
+        else h.state.afterRead = action => { if (action === 'workshop') h.time(100000); };
+        const result = await h.run();
+        assert.deepEqual(result, { status: 'inactive', message: '活动已结束', completed: afterClaim ? ['营业收益'] : [] });
+        assert.deepEqual(h.calls.map(value => value.action), afterClaim ? ['claim'] : []);
+        assert.equal(h.bag[0].count, 5);
     }
 });
 

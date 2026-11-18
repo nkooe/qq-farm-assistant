@@ -3,8 +3,11 @@ const assert = require('node:assert/strict');
 const { createMilkTeaAutomation } = require('../src/services/milk-tea-automation');
 const { classForSchedulerNamespace } = require('../src/utils/request-context');
 function harness(execute = async () => ({ status: 'idle', completed: [] })) {
-    let time = 1000, ready = true, paused = false;
-    const tasks = new Map(), errors = [];
+    let time = 1000;
+    let ready = true;
+    let paused = false;
+    const tasks = new Map();
+    const errors = [];
     const scheduler = { clear: name => tasks.delete(name), setTimeoutTask: (name, delay, fn) => tasks.set(name, { delay, fn }) };
     const service = createMilkTeaAutomation({ scheduler, execute, now: () => time, onError: state => errors.push(state) });
     service.start({ ready: () => ready, paused: () => paused });
@@ -25,7 +28,8 @@ test('milk tea always runs in background, waits for login and pauses for sync', 
     assert.equal(h.service.snapshot().status, 'idle');
 });
 test('reconnect invalidates the running cycle and never overlaps or commits a stale result', async () => {
-    let release, valid, runs = 0;
+    let release, valid;
+    let runs = 0;
     const h = harness(async allowed => { runs++; valid = allowed; return new Promise(resolve => release = resolve); });
     const first = h.tick();
     assert.equal(valid(), true);
@@ -57,5 +61,16 @@ test('partial task failures are reported and remain scheduled for a fresh cycle'
     assert.equal(h.errors.length, 1);
     assert.equal(h.service.snapshot().status, 'error');
     assert.equal(h.tasks.get('check').delay, 300000);
+    h.service.stop();
+});
+
+test('ended activities stay inactive across checks without retry error logs', async () => {
+    const h = harness(async () => ({ status: 'inactive', message: '活动已结束', completed: [] }));
+    await h.tick();
+    await h.tick();
+    assert.equal(h.service.snapshot().status, 'inactive');
+    assert.equal(h.service.snapshot().message, '活动已结束');
+    assert.equal(h.errors.length, 0);
+    assert.equal(h.tasks.get('check').delay, 1800000);
     h.service.stop();
 });

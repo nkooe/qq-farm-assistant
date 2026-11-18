@@ -7,6 +7,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const milk_tea_20261015_json_1 = __importDefault(require("../activity-data/milk-tea-20261015.json"));
 const milk_tea_work_1 = require("./milk-tea-work");
 const { runAutomaticMilkTea } = require('./milk-tea-auto');
+const { getActivityWindows } = require('./activity-windows');
 const { types } = require('../utils/proto');
 const { sendMsgAsync } = require('../utils/network');
 const { getServerTimeSec, toNum } = require('../utils/utils');
@@ -372,9 +373,29 @@ function operateMilkTeaActivity(action, input = {}) {
 // Share the manual operation queue. Every mutation checks the current worker
 // generation and eligibility immediately before sending; never replay a write.
 function runMilkTeaAutomation(allowed) {
-    const result = tail.then(() => runAutomaticMilkTea({ group, rpc, inventory,
-        serializeInventory: warehouse.serializeInventory, isItemLocked: warehouse.isItemLocked,
-        now: getServerTimeSec, allowed }));
+    const result = tail.then(async () => {
+        const check = () => {
+            if (!allowed()) throw Object.assign(new Error('奶茶经营已暂停'), { cancelled: true });
+        };
+        check();
+        // The directory outlives GetGroup: expired or removed activities must
+        // not keep calling their unavailable gameplay endpoint every cycle.
+        const windows = await getActivityWindows();
+        check();
+        const window = windows.find(value => String(value.id) === MILK);
+        const inactive = message => ({ status: 'inactive', message, completed: [] });
+        if (!window) return inactive('活动未开放');
+        const start = toNum(window.beginTime);
+        const end = toNum(window.endTime);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start <= 0 || end <= start)
+            throw new Error('奶茶活动时间未确认');
+        const now = getServerTimeSec();
+        if (now >= end) return inactive('活动已结束');
+        if (now < start) return inactive('活动未开始');
+        return runAutomaticMilkTea({ group, rpc, inventory,
+            serializeInventory: warehouse.serializeInventory, isItemLocked: warehouse.isItemLocked,
+            now: getServerTimeSec, allowed });
+    });
     tail = result.catch(() => {});
     return result;
 }
