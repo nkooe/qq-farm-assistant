@@ -1,4 +1,5 @@
 // One worker owns one account. Timers never depend on an open browser page.
+// execute(allowed, onStarted) calls onStarted only after acquiring its lock.
 function createActivityAutomation({ scheduler, execute, now = Date.now, onResult = () => {}, onError = () => {}, runningMessage = '自动执行中' }) {
   let generation = 0;
   let started = false;
@@ -19,10 +20,14 @@ function createActivityAutomation({ scheduler, execute, now = Date.now, onResult
       return;
     }
     running = true;
-    state = { ...state, status: 'running', message: runningMessage, completed: [], nextRunAt: 0 };
+    state = { ...state, status: 'queued', message: '排队中', completed: [], nextRunAt: 0 };
     let delay = 300000;
     try {
-      const result = await execute(() => allowed(token));
+      const result = await execute(() => allowed(token), () => {
+        if (!allowed(token)) return false;
+        state = { ...state, status: 'running', message: runningMessage };
+        return true;
+      });
       if (token !== generation) return;
       state = { ...state, ...result, lastRunAt: now() };
       // Closed / unopened activities need fewer requests.

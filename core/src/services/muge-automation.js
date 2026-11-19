@@ -4,8 +4,9 @@ const { runExclusiveAutomationTask } = require('./automation-lock');
 const automation = createActivityAutomation({
   scheduler: createScheduler('muge'),
   runningMessage: '自动领奖中',
-  execute: allowed => runExclusiveAutomationTask('muge_rewards',
-    () => require('../modern/services/muge-activity').runMugeAutomation(allowed), { detached: true }),
+  execute: (allowed, onStarted) => runExclusiveAutomationTask('muge_rewards',
+    () => onStarted() ? require('../modern/services/muge-activity').runMugeAutomation(allowed)
+      : { status: 'paused', message: '账号已暂停', completed: [] }, { detached: true }),
   onResult: result => require('../utils/utils').log('牧歌', result.message, {
     module: 'activity', event: '牧歌自动领奖', result: 'ok', count: result.completed.length,
   }),

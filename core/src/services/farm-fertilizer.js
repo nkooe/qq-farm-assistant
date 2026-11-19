@@ -1,8 +1,14 @@
-const { sendMsgAsync } = require('../utils/network');
+const { sendMsgAsync, getWs, isConnected } = require('../utils/network');
 const { types } = require('../utils/proto');
 const { PlantPhase } = require('../config/config');
 const { toNum, toTimeSec, getServerTimeSec, log, logWarn, randomDelay, isTransientNetworkError } = require('../utils/utils');
-const { getAutomation } = require('../models/store');
+const store = require('../models/store');
+const { getAutomation } = store;
+const { createFertilizerConfigGuard } = require('./fertilizer-config');
+const { createOrganicFertilizerQueue } = require('./farm-organic-queue');
+const { createScheduler } = require('./scheduler');
+const { runExclusiveAutomationTask } = require('./automation-lock');
+const { farmOperationGuard } = require('./farm-operation-guard');
 const { recordOperation } = require('./stats');
 const { getAllLands, fertilize, NORMAL_FERTILIZER_ID, ORGANIC_FERTILIZER_ID } = require('./farm-api');
 const { getCurrentPhase } = require('./farm-land-analyzer');
@@ -12,8 +18,6 @@ const { getCurrentPhase } = require('./farm-land-analyzer');
 /** 全部可施肥土地类型 */
 const DEFAULT_FERTILIZER_LAND_TYPES = ['purple', 'gold', 'black', 'red', 'normal'];
 const ALL_FERTILIZER_LAND_TYPES = ['blue', 'purple', 'gold', 'black', 'red', 'normal'];
-const MAX_ORGANIC_FERTILIZE_OPERATIONS = 240;
-const MAX_ORGANIC_FERTILIZE_ROUNDS = 20;
 
 /** 土地类型中文标签 */
 const FERTILIZER_LAND_TYPE_LABELS = {
@@ -28,38 +32,63 @@ const FERTILIZER_LAND_TYPE_LABELS = {
 // ─── 辅助函数 ───
 
 /**
- * 有机化肥逐块施肥，遇失败、暂停或本轮上限即停止。
+ * 每批最多施肥四次，其余由后台队列续跑。
  * @param {number[]} landIds - 地块 ID 列表
- * @returns {number} 成功施肥次数
+ * @returns {number} 本批成功次数；后续批次分别记入统计。
  */
 async function fertilizeOrganicLoop(landIds, propagateErrors = false, canContinue = () => true) {
   const ids = [...new Set((Array.isArray(landIds) ? landIds : []).map(toNum).filter(id => Number.isSafeInteger(id) && id > 0))];
   if (ids.length === 0) return 0;
-  const operationLimit = Math.min(MAX_ORGANIC_FERTILIZE_OPERATIONS, ids.length * MAX_ORGANIC_FERTILIZE_ROUNDS);
-
-  let successCount = 0;
-  let index = 0;
-  while (successCount < operationLimit && canContinue()) {
-    const landId = ids[index];
-    try {
-      const payload = types.FertilizeRequest.encode(types.FertilizeRequest.create({
-        land_ids: [toNum(landId)],
-        fertilizer_id: toNum(ORGANIC_FERTILIZER_ID)
-      })).finish();
-      await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload, {
-        beforeSend: () => canContinue() ? null : Object.assign(new Error('施肥任务已暂停'), { code: 'FARM_STOPPED' }),
-      });
-      successCount++;
-    } catch (cause) {
-      if (propagateErrors && isTransientNetworkError(cause)) throw cause;
-      break;
-    }
-    index = (index + 1) % ids.length;
-    if (successCount < operationLimit && canContinue()) await randomDelay(1000, 1500);
+  const connection = getWs();
+  const allowed = createFertilizerConfigGuard(getAutomation(),
+    () => canContinue() && isConnected() && getWs() === connection, store);
+  try { return await organicQueue.enqueue(ids, allowed); }
+  catch (cause) {
+    if (propagateErrors && isTransientNetworkError(cause)) throw cause;
+    return 0;
   }
-  if (successCount === operationLimit) logWarn('施肥', '有机施肥达到本轮上限，等待下次巡田');
-  return successCount;
 }
+
+const organicQueue = createOrganicFertilizerQueue({
+  scheduler: createScheduler('farm_organic'),
+  runExclusive: task => {
+    // Keep the same guard order as patrol and manual farm operations.
+    if (farmOperationGuard.isPending()) return;
+    return farmOperationGuard.run(() => runExclusiveAutomationTask('organic_fertilizer', task, { detached: true }));
+  },
+  prepare: async ids => {
+    const { lands } = await getAllLands();
+    const roots = (lands || []).filter(land => land && (!toNum(land.master_land_id) || toNum(land.master_land_id) === toNum(land.id)));
+    const automation = getAutomation();
+    const mode = automation.fertilizer;
+    let eligible;
+    if (mode === 'organic' || mode === 'both') eligible = getOrganicFertilizerTargetsFromLands(roots);
+    else if (mode === 'final_organic') eligible = getFinalStageLands(roots);
+    else if (mode === 'smart' || mode === 'smart_only') eligible = getFastMatureLands(roots, automation.fertilizer_smart_seconds);
+    else eligible = [];
+    const types = new Map(roots.map(land => [toNum(land.id), getLandTypeByLevel(land.level)]));
+    const selected = new Set(filterLandIdsByTypes(eligible, types, automation.fertilizer_land_types));
+    const requested = new Set(ids);
+    return new Map(roots.filter(land => requested.has(toNum(land.id)) && selected.has(toNum(land.id)))
+      .map(land => [toNum(land.id), `${toNum(land.plant.id)}:${toNum(land.plant.season)}:${toTimeSec(land.plant.phases[0].begin_time)}`]));
+  },
+  send: async (landId, allowed) => {
+    const payload = types.FertilizeRequest.encode(types.FertilizeRequest.create({
+      land_ids: [landId], fertilizer_id: toNum(ORGANIC_FERTILIZER_ID),
+    })).finish();
+    await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload, {
+      beforeSend: () => allowed() ? null : Object.assign(new Error('施肥任务已暂停'), { code: 'FARM_STOPPED' }),
+    });
+  },
+  delay: randomDelay,
+  onProgress: count => {
+    recordOperation('fertilize', count);
+    log('施肥', `有机施肥 ${count} 次`, { module: 'farm', event: '有机施肥', result: 'ok', type: 'organic', count });
+  },
+  onError: error => {
+    if (error.code !== 'FARM_STOPPED') logWarn('施肥', `有机施肥已停止: ${error.message}`);
+  },
+});
 
 /**
  * 从地块列表获取可施有机肥的目标
@@ -79,7 +108,7 @@ function getOrganicFertilizerTargetsFromLands(lands) {
 
     const currentPhase = getCurrentPhase(plant.phases);
     if (!currentPhase) continue;
-    if (currentPhase.phase === PlantPhase.DEAD) continue;
+    if (currentPhase.phase === PlantPhase.DEAD || currentPhase.phase === PlantPhase.MATURE) continue;
 
     targets.push(landId);
   }
@@ -221,16 +250,16 @@ function formatFertilizerLandTypes(types) {
  * 根据配置执行施肥
  * @param {number[]} explicitLandIds - 指定地块 ID（空数组则自动获取）
  * @param {object} options - { reason, skipNormal }
- * @returns {{ normal: number, organic: number }} 实际使用的无机和有机肥数量
+ * @returns {{ normal: number, organic: number }} 本批实际使用的无机和有机肥数量
  */
 async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
-  const canContinue = options.canContinue || (() => true);
+  const automation = getAutomation() || {};
+  const canContinue = createFertilizerConfigGuard(automation, options.canContinue, store);
   const sendOptions = {
     canContinue,
     beforeSend: () => canContinue() ? null : Object.assign(new Error('施肥任务已暂停'), { code: 'FARM_STOPPED' }),
   };
   if (!canContinue()) return { normal: 0, organic: 0 };
-  const automation = getAutomation() || {};
   const mode = automation.fertilizer || 'none';
   const { isRipeningOnlyMode, runRipeningFertilizer } = require('./farm-ripening');
   if (isRipeningOnlyMode(mode)) return { normal: 0, organic: 0 };
@@ -337,13 +366,6 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
       organicTargets = filterLandIdsByTypes(organicTargets, landTypeMap, landTypes);
     }
     organicCount = await fertilizeOrganicLoop(organicTargets, options.propagateErrors, canContinue);
-    if (organicCount > 0) {
-      log('施肥', `${label}：有机化肥循环施肥完成，共施 ${organicCount} 次（范围: ${landTypeLabels.join('、')}）`, {
-        module: 'farm', event: eventLabel, result: 'ok', reason, type: 'organic',
-        count: organicCount, landTypes
-      });
-      recordOperation('fertilize', organicCount);
-    }
   } else if (mode === 'smart' || mode === 'smart_only' || mode === 'smart_normal' ||
       mode === 'final_normal' || mode === 'final_organic') {
     // 智能/最终阶段施肥：寻找目标作物施肥
@@ -387,7 +409,7 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
       }
 
       const totalCount = useOrganic ? organicCount : normalCount;
-      if (totalCount > 0) {
+      if (totalCount > 0 && !useOrganic) {
         log('施肥', `${typeLabel}化肥${modeLabel}施肥完成，共施 ${totalCount} 次（范围: ${landTypeLabels.join('、')}）`, {
           module: 'farm', event: '施肥', result: 'ok',
           type: useOrganic ? 'organic' : 'normal', count: totalCount

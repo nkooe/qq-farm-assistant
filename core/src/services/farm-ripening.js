@@ -3,9 +3,12 @@ const { getFastMatureLands, getLandTypeByLevel, normalizeFertilizerLandTypes,
   filterLandIdsByTypes, fertilizeOrganicLoop } = require('./farm-fertilizer');
 const { log, toNum } = require('../utils/utils');
 const { recordOperation } = require('./stats');
+const { createFertilizerConfigGuard } = require('./fertilizer-config');
+const store = require('../models/store');
 
 const isRipeningOnlyMode = mode => mode === 'normal_ripen' || mode === 'organic_ripen';
 async function runRipeningFertilizer(automation, lands, propagateErrors = false, canContinue = () => true) {
+  canContinue = createFertilizerConfigGuard(automation, canContinue, store);
   if (!canContinue()) return 0;
   const mode = automation.fertilizer;
   if (mode !== 'smart' && !isRipeningOnlyMode(mode)) return 0;
@@ -37,7 +40,7 @@ async function runRipeningFertilizer(automation, lands, propagateErrors = false,
     const updated = new Set((Array.isArray(reply?.land) ? reply.land : []).map(land => toNum(land.id)));
     count = targets.filter(id => updated.has(id)).length;
   }
-  if (count) {
+  if (count && mode !== 'smart') {
     recordOperation('fertilize', count);
     log('施肥', `临熟催熟：${normal ? '普通' : '有机'}化肥 ${count} 次`, {
       module: 'farm', event: '临熟催熟', result: 'ok', type: normal ? 'normal' : 'organic', count,

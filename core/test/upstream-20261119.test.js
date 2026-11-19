@@ -31,7 +31,9 @@ test('new ripening modes round-trip through real per-account settings without ch
 });
 test('ripening reuses a snapshot, filters land types and slave plots, and counts only confirmed target IDs', async () => {
   const writes = [];
+  let currentConfig;
   const service = load('../src/services/farm-ripening.js', {
+    '../models/store': { getAutomation: () => currentConfig, getFertilizerConfigRevision: () => 0 },
     './farm-api': {
       getAllLands: () => assert.fail('supplied snapshot should be reused'),
       fertilizeBatch: async (ids, fertilizer) => { writes.push([fertilizer, ...ids]); return { land: [{ id: ids[0] }, { id: 99 }] }; },
@@ -42,16 +44,16 @@ test('ripening reuses a snapshot, filters land types and slave plots, and counts
   });
   const lands = [growing(1), growing(2, 0), growing(3, 1, 1, 600), growing(4, 1, 4), growing(5, 1, 1, 120, 1)];
   const config = { fertilizer_land_types: ['normal'], fertilizer_smart_seconds: 300 };
-  assert.equal(await service.runRipeningFertilizer({ ...config, fertilizer: 'normal_ripen' }, lands), 1);
-  assert.equal(await service.runRipeningFertilizer({ ...config, fertilizer: 'organic_ripen' }, lands), 1);
-  assert.equal(await service.runRipeningFertilizer({ ...config, fertilizer: 'smart' }, lands), 2);
-  assert.equal(await service.runRipeningFertilizer({ ...config, fertilizer: 'organic_ripen', fertilizer_land_types: [] }, lands), 0);
+  assert.equal(await service.runRipeningFertilizer(currentConfig = { ...config, fertilizer: 'normal_ripen' }, lands), 1);
+  assert.equal(await service.runRipeningFertilizer(currentConfig = { ...config, fertilizer: 'organic_ripen' }, lands), 1);
+  assert.equal(await service.runRipeningFertilizer(currentConfig = { ...config, fertilizer: 'smart' }, lands), 2);
+  assert.equal(await service.runRipeningFertilizer(currentConfig = { ...config, fertilizer: 'organic_ripen', fertilizer_land_types: [] }, lands), 0);
   assert.deepEqual(writes, [[1011, 1], [1012, 1, 2], ['loop', 1, 2]]);
 });
 test('ripening-only modes spend nothing during planting or multi-season top-up', async () => {
   for (const fertilizer of ['normal_ripen', 'organic_ripen']) {
     const service = load('../src/services/farm-fertilizer.js', {
-      '../models/store': { getAutomation: () => ({ fertilizer }) },
+      '../models/store': { getAutomation: () => ({ fertilizer }), getFertilizerConfigRevision: () => 0 },
       './farm-api': { getAllLands: () => assert.fail('no sowing read'), fertilize: () => assert.fail('no sowing write') },
     });
     for (const reason of ['normal', 'multi_season']) {
@@ -63,7 +65,9 @@ test('ripening-only modes spend nothing during planting or multi-season top-up',
 test('ripening stops after an interrupted land read and rechecks queued writes before sending', async () => {
   let allowed = true;
   let queueWrite = false;
+  const config = { fertilizer: 'organic_ripen', fertilizer_land_types: ['normal'] };
   const service = load('../src/services/farm-ripening.js', {
+    '../models/store': { getAutomation: () => config, getFertilizerConfigRevision: () => 0 },
     './farm-api': {
       getAllLands: async () => { allowed = false; return { lands: [growing(1)] }; },
       fertilizeBatch: async (_ids, _fertilizer, hooks) => {
@@ -75,46 +79,53 @@ test('ripening stops after an interrupted land read and rechecks queued writes b
       },
     },
   });
-  const config = { fertilizer: 'organic_ripen', fertilizer_land_types: ['normal'] };
   assert.equal(await service.runRipeningFertilizer(config, undefined, true, () => allowed), 0);
   assert.equal(queueWrite, false);
   allowed = true;
   assert.equal(await service.runRipeningFertilizer(config, [growing(1)], true, () => allowed), 0);
   assert.equal(queueWrite, true);
 });
-test('organic fertilizing has per-land and global bounds, paced requests, and a queued stop guard', async () => {
+test('organic fertilizing releases after a short batch and keeps its queued stop guard', async () => {
   let sends = 0;
   let delays = 0;
   let allowed = true;
   let stopBeforeSend = false;
+  const tasks = new Map();
+  const config = { fertilizer: 'organic', fertilizer_land_types: ['normal'] };
+  const connection = {};
   const service = load('../src/services/farm-fertilizer.js', {
-    '../utils/network': { sendMsgAsync: async (_service, _method, _payload, hooks) => {
+    '../models/store': { getAutomation: () => config, getFertilizerConfigRevision: () => 0 },
+    './scheduler': { createScheduler: () => ({ clear: key => tasks.delete(key), setTimeoutTask: (key, delay, fn) => tasks.set(key, fn) }) },
+    './farm-api': { getAllLands: async () => ({ lands: Array.from({ length: 13 }, (_, i) => growing(i + 1)) }), ORGANIC_FERTILIZER_ID: 1012 },
+    './stats': { recordOperation() {} },
+    '../utils/network': { getWs: () => connection, isConnected: () => true, sendMsgAsync: async (_service, _method, _payload, hooks) => {
       if (stopBeforeSend) allowed = false;
       const blocked = hooks.beforeSend();
       if (blocked) throw blocked;
       sends++;
     } },
     '../utils/proto': { types: { FertilizeRequest: { create: input => input, encode: () => ({ finish: () => Buffer.alloc(0) }) } } },
-    '../utils/utils': { ...require('../src/utils/utils'), logWarn() {}, randomDelay: async (min, max) => {
+    '../utils/utils': { ...require('../src/utils/utils'), log() {}, logWarn() {}, randomDelay: async (min, max) => {
       assert.equal(min, 1000); assert.equal(max, 1500); delays++;
     } },
   });
-  assert.equal(await service.fertilizeOrganicLoop([1, 1], true, () => allowed), 20);
-  assert.equal(delays, 19);
-  assert.equal(await service.fertilizeOrganicLoop(Array.from({ length: 13 }, (_, i) => i + 1)), 240);
-  assert.equal(sends, 260);
+  assert.equal(await service.fertilizeOrganicLoop([1, 1], true, () => allowed), 4);
+  assert.equal(delays, 3);
+  assert.equal(tasks.size, 1);
   stopBeforeSend = true;
-  assert.equal(await service.fertilizeOrganicLoop([1], true, () => allowed), 0);
-  assert.equal(sends, 260);
+  await tasks.get('continue')();
+  assert.equal(sends, 4);
+  assert.equal(tasks.size, 0);
 });
 test('spent normal fertilizer allowance does not exclude final-stage organic fertilizer', async () => {
   let fertilizer = 'final_organic';
   let writes = 0;
+  const connection = {};
   const service = load('../src/services/farm-fertilizer.js', {
-    '../models/store': { getAutomation: () => ({ fertilizer, fertilizer_land_types: ['normal'] }) },
+    '../models/store': { getAutomation: () => ({ fertilizer, fertilizer_land_types: ['normal'] }), getFertilizerConfigRevision: () => 0 },
     './farm-api': { getAllLands: async () => ({ lands: [growing(1, 0)] }), NORMAL_FERTILIZER_ID: 1011, ORGANIC_FERTILIZER_ID: 1012,
       fertilize: async ids => { assert.equal(ids.length, 0); return 0; } },
-    '../utils/network': { sendMsgAsync: async () => { writes++; throw new Error('insufficient organic stock'); } },
+    '../utils/network': { getWs: () => connection, isConnected: () => true, sendMsgAsync: async () => { writes++; throw new Error('insufficient organic stock'); } },
     '../utils/proto': { types: { FertilizeRequest: { create: input => input, encode: () => ({ finish: () => Buffer.alloc(0) }) } } },
     '../utils/utils': { ...require('../src/utils/utils'), log() {}, logWarn() {} },
   });

@@ -7,6 +7,8 @@ const { getDataFile, ensureDataDir } = require('../config/runtime-paths');
 const { getDefaultSystemConfig } = require('../config/config');
 const { readJsonFile, readJsonFileStrict, writeJsonFileAtomic, storageError } = require('../services/json-db');
 const { createConfigStorage } = require('./store/config-storage');
+const { fertilizerConfigKey } = require('../services/fertilizer-config');
+const fertilizerConfigRevisions = new Map();
 
 // ==================== 文件路径 ====================
 
@@ -724,20 +726,26 @@ function getAccountConfigSnapshot(accountId) {
 
 function setAccountConfigSnapshot(accountId, config, save = true) {
     const id = resolveAccountId(accountId);
+    const next = normalizeAccountConfig(config, accountDefaults);
+    const changed = fertilizerConfigKey(getAccountConfigSnapshot(accountId).automation) !== fertilizerConfigKey(next.automation);
     if (!id) {
-        const next = normalizeAccountConfig(config, accountDefaults);
         if (save) saveGlobalConfig({ defaultAccountConfig: cloneAccountConfig(next) });
         else {
             accountDefaults = next;
             globalConfig.defaultAccountConfig = cloneAccountConfig(next);
         }
+        if (changed) fertilizerConfigRevisions.set(id, getFertilizerConfigRevision(accountId) + 1);
         return cloneAccountConfig(accountDefaults);
     }
 
-    const next = normalizeAccountConfig(config, accountDefaults);
     if (save) configStorage.saveAccount(id, next);
     globalConfig.accountConfigs[id] = next;
+    if (changed) fertilizerConfigRevisions.set(id, getFertilizerConfigRevision(accountId) + 1);
     return cloneAccountConfig(globalConfig.accountConfigs[id]);
+}
+
+function getFertilizerConfigRevision(accountId) {
+    return fertilizerConfigRevisions.get(resolveAccountId(accountId)) || 0;
 }
 
 function removeAccountConfig(accountId) {
@@ -1796,6 +1804,7 @@ module.exports = {
     getConfigSnapshot,
     applyConfigSnapshot,
     getAutomation,
+    getFertilizerConfigRevision,
     setAutomation,
     getAutoCodeRefresh,
     setAutoCodeRefresh,
