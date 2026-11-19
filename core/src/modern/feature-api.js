@@ -16,7 +16,7 @@ const groups = {
   'milk-tea': ['getMilkTeaActivity', 'operateMilkTeaActivity'],
   'share-reward-activity': ['getShareRewardActivity', 'operateShareRewardActivity'],
   'autumn-activities': ['getAutumnActivity', 'operateAutumnActivity'],
-  'illustrated': ['getIllustratedSnapshot', 'claimIllustratedRewards'],
+  'illustrated': ['getIllustratedSnapshot', 'claimIllustratedRewards', 'clearIllustratedNew'],
   'collections': ['getCollectionsSnapshot', 'operateCollections', 'getMutationCatalog'],
   'commerce': ['getPropsShop', 'purchaseProps', 'getMallCatalog', 'purchaseMallProduct'],
   'warehouse': ['setItemsLocked'],

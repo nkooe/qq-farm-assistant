@@ -32,15 +32,6 @@ function getWarehouseModule() {
     return warehouseModule;
 }
 
-// 延迟加载 store 模块避免循环依赖
-let storeModule = null;
-function getStoreModule() {
-    if (!storeModule) {
-        storeModule = require('../models/store');
-    }
-    return storeModule;
-}
-
 // ============ 事件发射器 (用于推送通知) ============
 const networkEvents = new EventEmitter();
 
@@ -473,6 +464,12 @@ function handleNotify(msg) {
         }
 
         // 物品变化通知 (经验/金币等)
+        if (type === 'gamepb.shoppb.RotationShopNotify') {
+            const rotation = types.RanchRotationShopNotify.decode(eventBody).shops.find(shop => toNum(shop.shop_id) === 7);
+            if (rotation) networkEvents.emit('ranchMarketVisitChanged', rotation);
+            return;
+        }
+
         if (type.includes('ItemNotify')) {
             try {
                 const notify = types.ItemNotify.decode(eventBody);
@@ -506,7 +503,7 @@ function handleNotify(msg) {
                         } else if (delta !== 0) {
                             userState.coupon = Math.max(0, Number(userState.coupon || 0) + delta);
                         }
-                    } else if (id === 7002 && delta > 0) {
+                    } else if ((id === 7002 || id === 1008) && delta > 0) {
                         networkEvents.emit('ranchMarketStockReady', { id, count, delta });
                     } else if (id === 1005) {
                         // 金豆豆

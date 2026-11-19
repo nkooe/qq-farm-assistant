@@ -35,7 +35,7 @@ test('ranch friend snapshots exclude the farm guide without mutating the farm li
                 return { global_scene_id: 2, physical_items: [], virtual_items: [] };
             },
         },
-        '../friend': { getFriendsList: async () => source },
+        './friend-roster': { getRanchFriendList: async () => source },
         './operation-state': { forCurrentAccount: () => ({ pending: () => [] }) },
     });
     const state = await service.getState('friends');
@@ -44,23 +44,21 @@ test('ranch friend snapshots exclude the farm guide without mutating the farm li
     assert.deepEqual(source, before, 'the farm still retains its guide friend');
 });
 
-function patrolHarness(source, cached) {
+function patrolHarness(source, _cached) {
     const visits = [];
     const logs = [];
     let fetched = 0;
     let timeReads = 0;
     const service = load('../src/modern/services/ranch/automation.js', {
-        '../../models/store': { getAutomation: () => ({ ranch_friend_steal: true, ranch_check_minutes: 5 }) },
+        '../../models/store': { getAutomation: () => ({ ranch_friend_steal: true, ranch_check_minutes: 5 }), getFriendBlacklist: () => [] },
         './transport': { isUnlocked: () => true, inScene: run => run({ facilities: [] }) },
         './state': {
             loadRaw: async () => ({ cells: { facilities: [] }, bag: {} }),
             snapshot: () => ({ facilities: [], serverTime: Date.now() }),
         },
-        '../friend': {
-            getFriendsListCacheOnly: () => cached ? source : [],
-            getFriendsList: async () => { fetched++; return source; },
-        },
+        './friend-roster': { getRanchFriendList: async () => { fetched++; return source.filter(friend => String(friend.gid) !== '10001'); } },
         './friends': {
+            getInteractionQuotaResetAt: () => 0,
             getInteractionTimes: async () => { timeReads++; return {}; },
             automateFriend: async gid => { visits.push(String(gid)); return { times: {}, results: [] }; },
         },
@@ -76,7 +74,7 @@ test('ranch automatic patrol skips the farm guide in both cached and freshly fet
         const h = patrolHarness(source, cached);
         await h.service.run();
         assert.deepEqual(h.visits, ['1240527334', '1240157857']);
-        assert.equal(h.fetched(), cached ? 0 : 1);
+        assert.equal(h.fetched(), 1, 'the ranch uses its own scene roster');
         assert.equal(h.logs.length, 0);
         assert.equal(source.length, 3);
         await h.service.run();

@@ -2,7 +2,7 @@
 import { NButton } from 'naive-ui/es/button'
 import { storeToRefs } from 'pinia'
 import { computed, ref, watch } from 'vue'
-import { BUCKETS, formatCount, formatDuration, formatHours, RANCH_IMAGE, useRanchClock, useRanchLoader, useRanchUnmountReset } from '@/components/ranch/ranch-shared'
+import { BUCKETS, formatCount, formatDuration, formatHours, RANCH_IMAGE, sortFacilities, useRanchClock, useRanchLoader, useRanchUnmountReset } from '@/components/ranch/ranch-shared'
 import RanchGate from '@/components/ranch/RanchGate.vue'
 import RunLogCard from '@/components/RunLogCard.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
@@ -20,7 +20,7 @@ const { refresh } = useRanchLoader('animals')
 const { remainingSeconds } = useRanchClock()
 useRanchUnmountReset()
 
-const facilities = computed<any[]>(() => state.value?.facilities || [])
+const facilities = computed<any[]>(() => sortFacilities(state.value?.facilities || []))
 const pens = computed(() => facilities.value.filter(f => f.ranch))
 const animals = computed(() => pens.value.flatMap(f => (f.ranch.animals || []).map((animal: any) => ({ animal, pen: f.name }))))
 const capacity = computed(() => pens.value.reduce((sum, f) => sum + (Number(f.ranch.capacity) || 0), 0))
@@ -183,7 +183,7 @@ function facilityMeter(f: any) {
           <!-- 待处理：对应农场的“今日统计” -->
           <section class="farm-card rounded-2xl p-5">
             <header class="ranch-card-head">
-              <h3 class="flex items-center gap-2 text-lg font-display font-medium">
+              <h3 class="font-display flex items-center gap-2 text-lg font-medium">
                 <span class="i-carbon-task" /> <span>待处理</span>
               </h3>
               <BaseButton variant="text" size="sm" to="/ranch/personal">
@@ -203,7 +203,7 @@ function facilityMeter(f: any) {
 
           <!-- 设施 -->
           <section class="farm-card rounded-2xl p-5">
-            <h3 class="mb-4 flex items-center gap-2 text-lg font-display font-medium">
+            <h3 class="font-display mb-4 flex items-center gap-2 text-lg font-medium">
               <span class="i-carbon-building" /> <span>牧场设施</span>
             </h3>
             <div class="ranch-facilities">

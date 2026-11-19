@@ -15,7 +15,7 @@ const illustratedStore = useIllustratedStore()
 const toast = useToastStore()
 
 const { currentAccountId } = storeToRefs(accountStore)
-const { items, summary, loading, buying, error, userLevel } = storeToRefs(illustratedStore)
+const { items, summary, loading, buying, clearing, error, userLevel } = storeToRefs(illustratedStore)
 
 const filter = ref<'all' | 'unlocked' | 'locked'>('all')
 const illustratedType = ref(1)
@@ -114,6 +114,21 @@ async function refreshList(force = true) {
   await illustratedStore.fetchList(currentAccountId.value, force, illustratedType.value)
 }
 
+async function clearNew() {
+  const id = currentAccountId.value
+  try {
+    await illustratedStore.clearNew(id)
+    if (id !== currentAccountId.value)
+      return
+    toast.success('已读')
+    await refreshList(true)
+  }
+  catch {
+    if (id === currentAccountId.value)
+      toast.error('已读失败')
+  }
+}
+
 async function buySeed(item: any) {
   if (!currentAccountId.value || !item.goodsId)
     return
@@ -158,8 +173,7 @@ function confirmBuyAll() {
 }
 
 watch([currentAccountId, illustratedType], () => {
-  if (currentAccountId.value)
-    illustratedStore.clearIllustratedData()
+  illustratedStore.clearIllustratedData()
   refreshList(false)
 })
 
@@ -225,6 +239,9 @@ onMounted(() => {
           </BaseButton>
           <BaseButton class="w-24" variant="primary" :loading="loading" @click="refreshList(true)">
             刷新
+          </BaseButton>
+          <BaseButton :loading="clearing" :disabled="!currentAccountId || loading || buying || clearing" @click="clearNew">
+            全部已读
           </BaseButton>
         </div>
       </div>

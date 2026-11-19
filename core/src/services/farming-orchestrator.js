@@ -9,6 +9,7 @@ const { createScheduler } = require('./scheduler');
 const { getAllLands, harvest, farming, unlockLand, upgradeLand } = require('./farm-api');
 const { analyzeLands, resolveRemovableHarvestedLands } = require('./farm-land-analyzer');
 const { runFertilizerByConfig } = require('./farm-fertilizer');
+const { isRipeningOnlyMode, runRipeningFertilizer } = require('./farm-ripening');
 const { autoPlantEmptyLands, getRemainingPlantDelayMs } = require('./planting-service');
 const { startFertilizerBuyCheckTimer, stopFertilizerBuyCheckTimer, refreshFertilizerBuyCheckTimer } = require('./farm-scheduler');
 const { startMysteryAutoBuyTimer, stopMysteryAutoBuyTimer } = require('./mystery-scheduler');
@@ -74,6 +75,7 @@ async function performFarmOperation(opType) {
   }
 
   const lands = landsReply.lands;
+  let fertilizerSnapshot = lands;
   const analysis = analyzeLands(lands, isFirstFarmCheck);
   const labels = [];
 
@@ -103,6 +105,7 @@ async function performFarmOperation(opType) {
     const farmingLandIds = [...new Set([...ordinaryLandIds, ...goldenBugLandIds])];
 
     if (farmingLandIds.length > 0) {
+      fertilizerSnapshot = undefined;
       try {
         await farming(farmingLandIds);
         const parts = [];
@@ -130,6 +133,7 @@ async function performFarmOperation(opType) {
       ? new Set(analysis.harvestableInfo.filter(info => Number(getItemById(getPlantById(info.plantId)?.seed_id)?.rarity) === 4).map(info => info.landId)) : new Set();
     const harvestable = analysis.harvestable.filter(id => !protectedIds.has(id));
     if (harvestable.length > 0) {
+      fertilizerSnapshot = undefined;
       try {
         harvestResult = await harvest(harvestable);
         log('收获', `收获完成 ${harvestable.length} 块土地`, {
@@ -168,6 +172,7 @@ async function performFarmOperation(opType) {
     const shouldRefresh2x2 = shouldRefresh2x2Plan && getPrioritize2x2Crops();
     if (!canContinue()) return { hadWork: actions.length > 0, actions };
     if (deadLands.length > 0 || emptyLands.length > 0 || shouldRefresh2x2) {
+      fertilizerSnapshot = undefined;
       try {
         const pacing = opType === 'all' ? plantPacing : { lastPlantAt: null };
         if (opType === 'all') pacing.canContinue = canContinue;
@@ -198,7 +203,8 @@ async function performFarmOperation(opType) {
   if (!canContinue()) return { hadWork: actions.length > 0, actions };
   if (opType === 'all' && removeResult && Array.isArray(removeResult.growing) &&
       removeResult.growing.length > 0 && isAutomationOn('fertilizer_multi_season') &&
-      (getAutomation().fertilizer || 'none') !== 'final_normal') {
+      !['none', 'final_normal', 'normal_ripen', 'organic_ripen'].includes(getAutomation().fertilizer)) {
+    fertilizerSnapshot = undefined;
     const multiSeasonLands = [...new Set(
       removeResult.growing.map(id => toNum(id)).filter(Boolean)
     )];
@@ -208,7 +214,7 @@ async function performFarmOperation(opType) {
         count: multiSeasonLands.length, landIds: multiSeasonLands
       });
       try {
-        await runFertilizerByConfig(multiSeasonLands, { reason: 'multi_season' });
+        await runFertilizerByConfig(multiSeasonLands, { reason: 'multi_season', canContinue });
       } catch (err) {
         logWarn('施肥', `多季补肥执行失败: ${err.message}`, {
           module: 'farm', event: '多季节施肥', result: 'error'
@@ -221,6 +227,7 @@ async function performFarmOperation(opType) {
   if (!canContinue()) return { hadWork: actions.length > 0, actions };
   const shouldUpgrade = opType === 'all' && isAutomationOn('land_upgrade');
   if (shouldUpgrade || opType === 'upgrade') {
+    if (analysis.unlockable.length || analysis.upgradable.length) fertilizerSnapshot = undefined;
     // 解锁土地
     if (analysis.unlockable.length > 0) {
       let unlockedCount = 0;
@@ -272,10 +279,36 @@ async function performFarmOperation(opType) {
   if (!canContinue()) return { hadWork: actions.length > 0, actions };
   if (opType === 'all') {
     const fertilizerMode = getAutomation().fertilizer || 'none';
-    if (fertilizerMode === 'smart' || fertilizerMode === 'smart_only' || fertilizerMode === 'smart_normal' ||
+    if (fertilizerMode === 'smart' || isRipeningOnlyMode(fertilizerMode)) {
+      try {
+        const count = await runRipeningFertilizer(getAutomation(), fertilizerSnapshot, true,
+          () => canContinue() && getAutomation().fertilizer === fertilizerMode);
+        if (!canContinue()) return { hadWork: actions.length > 0, actions };
+        if (count > 0) {
+          actions.push(`催熟${count}`);
+          const latest = await getAllLands();
+          if (!canContinue()) return { hadWork: actions.length > 0, actions };
+          const state = analyzeLands(latest.lands || [], false);
+          const protectedIds = getAutomation().farm_harvest_tiangong === false
+            ? new Set(state.harvestableInfo.filter(info => Number(getItemById(getPlantById(info.plantId)?.seed_id)?.rarity) === 4).map(info => info.landId)) : new Set();
+          const ids = state.harvestable.filter(id => !protectedIds.has(id));
+          if (ids.length) {
+            const reply = await harvest(ids);
+            actions.push(`收获${ids.length}`);
+            recordOperation('harvest', ids.length);
+            networkEvents.emit('farmHarvested', { count: ids.length, landIds: ids, opType });
+            if (!canContinue()) return { hadWork: actions.length > 0, actions };
+            if (isAutomationOn('fertilizer_multi_season') && !isRipeningOnlyMode(fertilizerMode)) {
+              const next = await resolveRemovableHarvestedLands(ids, reply);
+              if (canContinue() && next.growing.length) await runFertilizerByConfig(next.growing, { reason: 'multi_season', canContinue });
+            }
+          }
+        }
+      } catch (cause) { logWarn('施肥', `催熟检查失败: ${cause.message}`); }
+    } else if (fertilizerMode === 'smart_only' || fertilizerMode === 'smart_normal' ||
         fertilizerMode === 'final_normal' || fertilizerMode === 'final_organic') {
       try {
-        const fertResult = await runFertilizerByConfig([], { skipNormal: true });
+        const fertResult = await runFertilizerByConfig([], { skipNormal: true, canContinue });
         if (fertResult.organic > 0) actions.push(`有机肥${  fertResult.organic}`);
         else if (fertResult.normal > 0) actions.push(`普通肥${  fertResult.normal}`);
       } catch (err) {

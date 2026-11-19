@@ -1,5 +1,5 @@
 "use strict";
-var __importDefault = (this && this.__importDefault) || function (mod) {
+const __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
@@ -9,6 +9,7 @@ const { types } = require('../utils/proto');
 const { getServerTimeSec, toNum } = require('../utils/utils');
 const { getItemById, getItemImageById } = require('../config/gameConfig');
 const { util } = require('protobufjs');
+const { getAmbientSendContext, runWithSendContext } = require('./ranch/context');
 const GROUP_ID = '2026111700';
 const IDS = { celebration: '2026111702', friends: '2026111703', handbook: '2026111704', personality: '2026111705' };
 const OPERATIONS = {
@@ -21,6 +22,15 @@ const OPERATIONS = {
     claimShare: { id: IDS.personality, cmd: 89, field: 'survey_claim_share_reward' },
 };
 let mutationTail = Promise.resolve();
+const SERVICE = 'gamepb.activitypb.ActivityService';
+function request(method, body, endTime = Infinity) {
+    const context = getAmbientSendContext();
+    return sendMsgAsync(SERVICE, method, body, {
+        beforeSend: () => context?.check(SERVICE, method) || (getServerTimeSec() * 1000 >= endTime
+            ? Object.assign(new Error('牧歌初启已结束'), { code: 'MUGE_ENDED' }) : null),
+        onSent: () => { if (method === 'Operate') context?.onSent?.(SERVICE, method); },
+    });
+}
 function fail(code, message) {
     throw Object.assign(new Error(message), { code });
 }
@@ -38,7 +48,7 @@ function answersDto(answers) {
 }
 async function getMugeActivity() {
     const body = types.ActivityListRequest.encode({ game_scene_id: 1 }).finish();
-    const response = await sendMsgAsync('gamepb.activitypb.ActivityService', 'List', body);
+    const response = await request('List', body);
     const group = types.MugeListReply.decode(response.body).groups.find((group) => String(group.head?.id) === GROUP_ID);
     if (String(group?.head?.id) !== GROUP_ID)
         fail('MUGE_UNAVAILABLE', '牧歌初启活动数据暂不可用');
@@ -116,7 +126,7 @@ async function perform(action, input) {
         }
     }
     const body = types.MugeOperateRequest.encode({ id: operation.id, cmd: operation.cmd, [operation.field]: params }).finish();
-    const response = await sendMsgAsync('gamepb.activitypb.ActivityService', 'Operate', body);
+    const response = await request('Operate', body, state.endTime);
     const reply = types.MugeOperateReply.decode(response.body);
     if (String(reply.id) !== operation.id || toNum(reply.cmd) !== operation.cmd || !reply[operation.field] || String(reply.activity?.head?.id) !== operation.id) {
         fail('MUGE_RESULT_UNKNOWN', '操作回包未能确认，请刷新核对，勿重复提交');
@@ -143,4 +153,54 @@ function operateMugeActivity(action, input = {}) {
     mutationTail = pending.catch(() => { });
     return pending;
 }
-module.exports = { getMugeActivity, operateMugeActivity };
+// This worker owns one account. Claim-only automation shares the manual mutation
+// queue, and checks its login generation again when queued RPCs actually send.
+async function runMugeAutomation(allowed) {
+    const completed = [];
+    const parent = getAmbientSendContext();
+    const stopped = () => Object.assign(new Error('牧歌任务已暂停'), { code: 'MUGE_STOPPED' });
+    return runWithSendContext({
+        check: (service, method) => allowed() ? parent?.check?.(service, method) || null : stopped(),
+        onSent: (service, method) => parent?.onSent?.(service, method),
+    }, async () => {
+        try {
+            if (!allowed()) throw stopped();
+            let state = await getMugeActivity();
+            if (!state.active) return { status: 'inactive', message: state.serverTime < state.startTime ? '活动未开始' : '活动已结束', completed };
+            // Task rewards may unlock the next handbook tier during this cycle.
+            const actions = [
+                ['claimCelebration', '兴牧庆典', s => s.celebration?.tiers.some(t => t.status === 2)],
+                ['claimFriends', '牧友同行', s => s.friends?.tiers.some(t => t.status === 2)],
+                ['claimTask', '成长任务', s => s.handbook?.tasks.some(t => t.status === 2)],
+                ['claimHandbook', '成长手册', s => s.handbook?.tiers.some(t => t.status === 2)],
+                ['claimShare', '人格奖励', s => s.personality?.personalityId > 0 && !s.personality.shareRewardClaimed],
+            ];
+            for (const [action, label, eligible] of actions) {
+                if (!allowed()) throw stopped();
+                if (!state.active) break;
+                if (!eligible(state)) continue;
+                try {
+                    // perform() reads fresh eligibility again inside mutationTail.
+                    const result = await operateMugeActivity(action);
+                    completed.push(label);
+                    state = result.activity;
+                    // A confirmed claim stays successful when its follow-up read fails.
+                    // End this cycle so other actions never use a stale snapshot.
+                    if (!state) break;
+                } catch (cause) {
+                    if (cause.code === 'MUGE_NOT_CLAIMABLE') { state = await getMugeActivity(); continue; }
+                    throw cause;
+                }
+            }
+            return { status: 'idle', message: completed.length ? `已领取${completed.join('、')}` : '暂无奖励', completed };
+        } catch (cause) {
+            if (['MUGE_UNAVAILABLE', 'MUGE_ENDED'].includes(cause.code)) return { status: 'inactive', message: '活动未开放', completed };
+            if (cause.code === 'MUGE_STOPPED') return { status: 'paused', message: '账号已暂停', completed };
+            // Do not replay an uncertain Operate. The next scheduled cycle starts
+            // with a new server snapshot; claim commands are one-time per reward.
+            cause.completed = completed;
+            throw cause;
+        }
+    });
+}
+module.exports = { getMugeActivity, operateMugeActivity, runMugeAutomation };

@@ -7,7 +7,7 @@ const lock = require('../src/services/automation-lock');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 function harness() {
-  const calls = { farm: 0, friend: 0, email: [] }, timers = new Map();
+  const calls = { farm: 0, friend: 0, email: [] }; const timers = new Map();
   const auto = { farm: true, friend: true, friend_steal: true };
   let finishFriend;
   const waiting = new Promise(resolve => { finishFriend = resolve; });
@@ -26,7 +26,7 @@ function harness() {
     '../services/automation-lock': lock,
     '../services/scheduler': { createScheduler: () => scheduler },
     '../services/milk-tea-automation': { automation: {} },
-    '../modern/services/ranch/automation': { getRoutineState: () => ({ doneToday: true }), resetSchedule: noop },
+    '../modern/services/ranch/automation': { getRoutineState: () => ({ doneToday: true, nextCheckAt: Infinity }), resetSchedule: noop },
     '../services/farm': { checkFarm: async () => { calls.farm++; } },
     '../services/friend': { checkFriends: async () => { calls.friend++; await waiting; }, computeEffectiveTurbo: () => false },
     '../services/friend-pet-sync': { isPetSyncVisiting: () => false },
@@ -37,7 +37,7 @@ function harness() {
     '../services/email': { checkAndClaimEmails: async (...args) => { calls.email.push(args); } },
   };
   imports['../utils/network'].getGatewayLoad = () => ({});
-  const source = fs.readFileSync(filename, 'utf8') + `
+  const source = `${fs.readFileSync(filename, 'utf8')  }
     module.exports = { runUnifiedTick, scheduleUnifiedNextTick, startDailyRoutineTimer,
       stopUnifiedScheduler, startUnifiedScheduler,
       prepare() { loginReady = true; unifiedSchedulerRunning = true; schedulerGeneration = 1; nextFarmRunAt = nextHelpRunAt = nextStealRunAt = 0; },

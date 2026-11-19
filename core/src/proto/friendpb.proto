@@ -22,6 +22,15 @@ message Tags {
 }
 
 // ============ 好友信息 ============
+message BigFarmStatus {
+    bool can_steal = 1;
+    bool can_midwife = 2;
+    bool can_help = 3;
+    int32 steal_lot_count = 4;
+    int32 midwife_count = 5;
+    int32 help_count = 6;
+}
+
 message GameFriend {
     int64 gid = 1;
     string open_id = 2;
@@ -33,6 +42,7 @@ message GameFriend {
     Tags tags = 8;
     Plant plant = 9;
     int32 authorized_status = 10;
+    BigFarmStatus big_farm_status = 23;
     // field 11 reserved
     // Illustrated illustrated = 12;  // 略
     // repeated AvatarFrame equip_avatar_frames = 13;  // 略

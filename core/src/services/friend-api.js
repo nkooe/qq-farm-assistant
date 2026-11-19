@@ -1,5 +1,4 @@
 const protobuf = require('protobufjs/minimal');
-const crypto = require('node:crypto');
 const { parentPort } = require('node:worker_threads');
 const { CONFIG } = require('../config/config');
 const {
@@ -90,7 +89,7 @@ function decodeProtoFields(rawBytes, depth = 0, maxDepth = 2) {
           if (nested.length > 0) {
             entry.fields = nested;
           }
-        } catch (_) {
+        } catch {
           // Ignore nested decode errors
         }
       }
@@ -130,7 +129,7 @@ function parseBriefDogInfoBytes(bytes) {
   let fields = [];
   try {
     fields = decodeProtoFields(bytes);
-  } catch (_) {
+  } catch {
     fields = [];
   }
   const varints = collectVarints(fields).filter(v => v > 0);
@@ -175,7 +174,7 @@ function postToMaster(msg) {
       parentPort.postMessage(msg);
       return true;
     }
-  } catch (_) {
+  } catch {
     // Ignore IPC errors
   }
   return false;
@@ -491,6 +490,27 @@ function handleFriendEnterError(gid, friendName, error) {
 
 // ===== QQ friend APIs =====
 
+async function fetchFriendsByGids(gids, sceneId, priority = 'normal') {
+  if (!isGatewayHealthyForBusiness(getGatewayLoad())) throw new GatewayBusyError('好友列表暂缓：网关繁忙');
+  const context = require('../modern/services/ranch/context').getAmbientSendContext();
+  const payload = types.GetGameFriendsRequest.encode(types.GetGameFriendsRequest.create({
+    gids: gids.map(gid => toLong(gid)), global_scene_id: sceneId,
+  })).finish();
+  const { body } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetGameFriends', payload, {
+    priority, beforeSend: () => context?.check('gamepb.friendpb.FriendService', 'GetGameFriends') || null,
+  });
+  return extractReplyFriends(types.GetAllFriendsReply.decode(body));
+}
+
+async function fetchAllFriendsForScene(sceneId, priority = 'normal') {
+  const context = require('../modern/services/ranch/context').getAmbientSendContext();
+  const payload = types.GetAllFriendsRequest.encode(types.GetAllFriendsRequest.create({ global_scene_id: sceneId })).finish();
+  const { body } = await sendMsgAsync('gamepb.friendpb.FriendService', 'GetAll', payload, {
+    priority, beforeSend: () => context?.check('gamepb.friendpb.FriendService', 'GetAll') || null,
+  });
+  return types.GetAllFriendsReply.decode(body);
+}
+
 /** Fetch QQ friends by batch-requesting known GIDs via GetGameFriends. */
 async function fetchQqFriendsByKnownGids() {
   if (!types.GetGameFriendsRequest || !types.GetAllFriendsReply) {
@@ -505,7 +525,7 @@ async function fetchQqFriendsByKnownGids() {
     if (!isGatewayHealthyForBusiness(getGatewayLoad())) throw new GatewayBusyError('好友列表暂缓：网关繁忙');
     const batch = gids.slice(i, i + QQ_FRIEND_LIST_BATCH_SIZE);
     const payload = types.GetGameFriendsRequest.encode(
-      types.GetGameFriendsRequest.create({ gids: batch.map(g => toLong(g)) })
+      types.GetGameFriendsRequest.create({ gids: batch.map(g => toLong(g)), global_scene_id: 1 })
     ).finish();
 
     try {
@@ -539,7 +559,7 @@ async function fetchQqFriendsByKnownGids() {
   return dedupeFriendsByGid(allFriends);
 }
 
-async function getAllFriendsInternal(forceRefresh = false) {
+async function getAllFriendsInternal(_forceRefresh = false) {
   const isQQ = CONFIG.platform === 'qq';
 
   if (isQQ) {
@@ -552,7 +572,7 @@ async function getAllFriendsInternal(forceRefresh = false) {
 
   // WeChat platform: direct GetAll
   const payload = types.GetAllFriendsRequest.encode(
-    types.GetAllFriendsRequest.create({})
+    types.GetAllFriendsRequest.create({ global_scene_id: 1 })
   ).finish();
   const { body } = await sendMsgAsync(
     'gamepb.friendpb.FriendService',
@@ -637,19 +657,13 @@ async function delFriend(gid) {
 }
 
 
-/**
- * Enter a friend's farm.
- * @param {number|string} gid target gid
- * @param {{reason?:number, visitToken?:string}} [opts] reason 默认 2（偷菜访问）；
- *        加好友时传 reason=5 + visitToken(32hex)
- */
 // 从 Enter 响应的原始明文 bytes 中提取 field7 (string) nonce（抓包已验证：field7 = 32hex 会话 nonce）
 function extractEnterNonce(rawBytes) {
   try {
     const reader = require('protobufjs/minimal').Reader.create(Buffer.from(rawBytes || []));
     while (reader.pos < reader.len) {
       const key = reader.uint32();
-      const fno = key >> 3, wt = key & 7;
+      const fno = key >> 3; const wt = key & 7;
       if (fno === 7 && wt === 2) {
         const len = reader.uint32();
         return reader.bytes(len).toString('latin1');
@@ -659,10 +673,16 @@ function extractEnterNonce(rawBytes) {
       else if (wt === 2) { const l = reader.uint32(); reader.skip(l); }
       else break;
     }
-  } catch (_) {}
+  } catch {}
   return null;
 }
 
+/**
+ * Enter a friend's farm.
+ * @param {number|string} gid target gid
+ * @param {{reason?:number, visitToken?:string}} [opts] reason 默认 2（偷菜访问）；
+ *        加好友时传 reason=5 + visitToken(32hex)
+ */
 async function enterFriendFarm(gid, opts = {}) {
   const reason = opts.reason != null ? Number(opts.reason) : 2;
   const enterReq = { host_gid: toLong(gid), reason };
@@ -702,7 +722,7 @@ async function leaveFriendFarm(gid, opts = {}) {
   ).finish();
   try {
     await sendMsgAsync('gamepb.visitpb.VisitService', 'Leave', payload, opts);
-  } catch (_) {
+  } catch {
     // Ignore leave errors
   }
 }
@@ -730,7 +750,7 @@ async function checkCanOperateRemote(gid, operationId) {
       canOperate: !!reply.can_operate,
       canStealNum: toNum(reply.can_steal_num),
     };
-  } catch (_) {
+  } catch {
     return { canOperate: true, canStealNum: 0 };
   }
 }
@@ -774,6 +794,7 @@ function clearAllInvalidKnownFriendGidCooldown() {
 
 // ===== Exports =====
 module.exports = {
+  QQ_FRIEND_LIST_BATCH_SIZE, fetchFriendsByGids, fetchAllFriendsForScene,
   getInvalidKnownFriendGidSet,
   DOG_NAMES,
   getDogName,

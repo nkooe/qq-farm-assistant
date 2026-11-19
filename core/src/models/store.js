@@ -431,6 +431,10 @@ function cloneAccountConfig(config = DEFAULT_ACCOUNT_CONFIG) {
             auto[key] = normalizeFertilizerLandTypes(srcAuto[key], DEFAULT_FERTILIZER_LAND_TYPES);
             continue;
         }
+        if (key === 'ranch_coop_cub_priority' || key === 'ranch_shed_cub_priority') {
+            auto[key] = [...(srcAuto[key] ?? auto[key])];
+            continue;
+        }
         if (srcAuto[key] !== undefined) {
             auto[key] = srcAuto[key];
         }
@@ -526,7 +530,7 @@ function normalizeAccountConfig(raw, defaults = accountDefaults) {
             if (key.startsWith('ranch_')) {
                 cfg.automation[key] = normalizeRanchSetting(key, value);
             } else if (key === 'fertilizer') {
-                const allowed = ['both', 'normal', 'organic', 'smart', 'smart_only', 'smart_normal', 'final_normal', 'final_organic', 'none'];
+                const allowed = ['both', 'normal', 'organic', 'smart', 'smart_only', 'smart_normal', 'final_normal', 'final_organic', 'none', 'normal_ripen', 'organic_ripen'];
                 cfg.automation[key] = allowed.includes(value) ? value : cfg.automation[key];
             } else if (key === 'fertilizer_land_types') {
                 cfg.automation[key] = normalizeFertilizerLandTypes(value, cfg.automation[key]);
@@ -952,7 +956,7 @@ function applyConfigSnapshot(patch = {}, opts = {}) {
             if (key.startsWith('ranch_')) {
                 cfg.automation[key] = normalizeRanchSetting(key, value);
             } else if (key === 'fertilizer') {
-                const allowed = ['both', 'normal', 'organic', 'smart', 'smart_only', 'smart_normal', 'final_normal', 'final_organic', 'none'];
+                const allowed = ['both', 'normal', 'organic', 'smart', 'smart_only', 'smart_normal', 'final_normal', 'final_organic', 'none', 'normal_ripen', 'organic_ripen'];
                 cfg.automation[key] = allowed.includes(value) ? value : cfg.automation[key];
             } else if (key === 'fertilizer_land_types') {
                 cfg.automation[key] = normalizeFertilizerLandTypes(value, cfg.automation[key]);

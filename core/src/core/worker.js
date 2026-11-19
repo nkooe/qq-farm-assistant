@@ -198,7 +198,9 @@ let friendSyncPaused = false;
 
 const workerScheduler = createScheduler('worker');
 const milkTeaAutomation = require('../services/milk-tea-automation').automation;
+const mugeAutomation = require('../services/muge-automation').automation;
 const ranchAutomation = require('../modern/services/ranch/automation');
+const { isRanchMarketEnabled } = require('../modern/config/ranch-automation');
 const { runWithSendContext } = require('../modern/services/ranch/context');
 let ranchTaskRunning = false;
 let ranchDeferredUntil = 0;
@@ -414,7 +416,7 @@ async function runStealTick(autoConfig) {
 function ranchNextRunAt() {
     if (!unifiedSchedulerRunning || !loginReady || friendSyncPaused || ranchTaskRunning || farmTaskRunning || isPetSyncVisiting()) return Infinity;
     const state = ranchAutomation.getRoutineState();
-    return state.doneToday ? Infinity : Math.max(Number(state.nextCheckAt) || 0, ranchDeferredUntil);
+    return Math.max(Number(state.nextCheckAt) || 0, ranchDeferredUntil);
 }
 async function runRanchRoutine() {
     if (Date.now() < ranchNextRunAt()) return;
@@ -441,9 +443,16 @@ async function runRanchRoutine() {
     }
 }
 function wakeRanchMarket() {
-    ranchAutomation.resetMarketSchedule();
+    if (!loginReady || !isRanchMarketEnabled(getAutomation())) return;
+    ranchAutomation.requestMarketCheck();
     ranchDeferredUntil = 0;
     if (unifiedSchedulerRunning) scheduleUnifiedNextTick();
+}
+function onRanchMarketVisitChanged(rotation) {
+    if (loginReady && isRanchMarketEnabled(getAutomation()) && ranchAutomation.noteMarketVisit(rotation)) {
+        ranchDeferredUntil = 0;
+        if (unifiedSchedulerRunning) scheduleUnifiedNextTick();
+    }
 }
 function onRanchTaskInfo(_info, context) {
     if (context?.globalSceneId === 2) require('../modern/services/ranch/daily').markTasksChanged();
@@ -530,7 +539,7 @@ function applyRuntimeConfig(config, syncStatusAfter = false) {
 
     configureEmailClaim({ accountId, hour: getConfigSnapshot(accountId).emailClaimHour });
     const nextAuto = getAutomation();
-    if (Object.keys(nextAuto).some(key => key.startsWith('ranch_') && nextAuto[key] !== prevAuto[key])) {
+    if (Object.keys(nextAuto).some(key => key.startsWith('ranch_') && JSON.stringify(nextAuto[key]) !== JSON.stringify(prevAuto[key]))) {
         ranchConfigGeneration++;
         ranchAutomation.resetSchedule();
     }
@@ -709,6 +718,7 @@ async function startBot(config) {
     networkEvents.on('reconnect_failed', onReconnectFailed);
     networkEvents.on('kickout', onKickout);
     networkEvents.on('ranchMarketStockReady', wakeRanchMarket);
+    networkEvents.on('ranchMarketVisitChanged', onRanchMarketVisitChanged);
     networkEvents.on('ranchUnlocked', wakeRanchMarket);
     networkEvents.on('taskInfoNotify', onRanchTaskInfo);
 
@@ -718,6 +728,7 @@ async function startBot(config) {
         if (!loginReady) return;
         loginReady = false;
         milkTeaAutomation.stop();
+        mugeAutomation.stop();
         stopFriendPetSync();
         invalidateLandForecast();
         log('系统', '连接断开，暂停自动化任务，等待重连...');
@@ -727,6 +738,7 @@ async function startBot(config) {
     // 登录成功回调
     const onReady = async () => {
         loginReady = true;
+        ranchAutomation.resetSchedule();
         gatewayBackoffMs = 30000;
         invalidateLandForecast();
 
@@ -820,6 +832,7 @@ async function startBot(config) {
         // 启动每日定时器
         startDailyRoutineTimer();
         milkTeaAutomation.start({ ready: () => loginReady, paused: () => friendSyncPaused });
+        mugeAutomation.start({ ready: () => loginReady, paused: () => friendSyncPaused });
 
         syncStatus();
     };
@@ -840,12 +853,14 @@ async function stopBot() {
 
     stopUnifiedScheduler();
     milkTeaAutomation.stop();
+    mugeAutomation.stop();
     stopFriendPetSync();
     invalidateLandForecast();
     require('../services/friend-pet-cache').flushAll();
 
     networkEvents.off('kickout', onKickout);
     networkEvents.off('ranchMarketStockReady', wakeRanchMarket);
+    networkEvents.off('ranchMarketVisitChanged', onRanchMarketVisitChanged);
     networkEvents.off('ranchUnlocked', wakeRanchMarket);
     networkEvents.off('taskInfoNotify', onRanchTaskInfo);
     networkEvents.off('reconnect_failed', onReconnectFailed);
@@ -1429,6 +1444,7 @@ function syncStatus() {
     };
     stats.automation = getAutomation();
     stats.milkTeaAutomation = milkTeaAutomation.snapshot();
+    stats.mugeAutomation = mugeAutomation.snapshot();
     stats.connectionDiagnostics = { load: getGatewayLoad(), ...getRequestDiagnostics() };
     stats.preferredSeed = getPreferredSeed();
     stats.levelProgress = levelProgress;

@@ -2,8 +2,8 @@ import type { Ref } from 'vue'
 import { storeToRefs } from 'pinia'
 import { ref } from 'vue'
 import api from '@/api'
-import { parseHourOfDay } from '@/utils/hour-of-day'
 import { useSettingStore } from '@/stores/setting'
+import { parseHourOfDay } from '@/utils/hour-of-day'
 
 type AlertType = 'primary' | 'danger'
 
@@ -85,6 +85,8 @@ export function useAutomationSettings({
     { label: '普通 + 快成熟有机', value: 'smart' },
     { label: '快成熟有机', value: 'smart_only' },
     { label: '快成熟普通', value: 'smart_normal' },
+    { label: '仅普通催熟', value: 'normal_ripen' },
+    { label: '仅有机催熟（单次）', value: 'organic_ripen' },
     { label: '最终阶段普通肥', value: 'final_normal' },
     { label: '最终阶段有机肥', value: 'final_organic' },
     { label: '仅普通化肥', value: 'normal' },

@@ -931,7 +931,7 @@ async function autoPlantEmptyLands(deadLandIds, emptyLandIds, lands = [], pacing
   result.occupiedCount += Number(size2Result.occupiedCount || 0);
 
   if (size2Result.plantedMasterIds.length > 0) {
-    await runFertilizerByConfig(size2Result.plantedMasterIds);
+    await runFertilizerByConfig(size2Result.plantedMasterIds, { canContinue: pacing.canContinue });
   }
 
   if (pacing.deferred) return result;
@@ -996,7 +996,7 @@ async function autoPlantEmptyLands(deadLandIds, emptyLandIds, lands = [], pacing
       bagFallbackAllowed = bagResult.fallbackAllowed;
       if (bagResult.uncertain) {
         result.uncertain = true;
-        if (plantedLands.length > 0) await runFertilizerByConfig(plantedLands);
+        if (plantedLands.length > 0) await runFertilizerByConfig(plantedLands, { canContinue: pacing.canContinue });
         return result;
       }
     }
@@ -1028,7 +1028,7 @@ async function autoPlantEmptyLands(deadLandIds, emptyLandIds, lands = [], pacing
 
     // 种植后补肥
     if (plantedLands.length > 0) {
-      await runFertilizerByConfig(plantedLands);
+      await runFertilizerByConfig(plantedLands, { canContinue: pacing.canContinue });
     }
     return result;
   }
@@ -1040,7 +1040,7 @@ async function autoPlantEmptyLands(deadLandIds, emptyLandIds, lands = [], pacing
   result.occupiedCount += Number(shopResult.occupiedCount || 0);
   if (shopResult.uncertain) result.uncertain = true;
   if (shopResult.plantedLands && shopResult.plantedLands.length > 0) {
-    await runFertilizerByConfig(shopResult.plantedLands);
+    await runFertilizerByConfig(shopResult.plantedLands, { canContinue: pacing.canContinue });
   }
   return result;
 }

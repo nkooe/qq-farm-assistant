@@ -12,6 +12,8 @@ const { getCurrentPhase } = require('./farm-land-analyzer');
 /** 全部可施肥土地类型 */
 const DEFAULT_FERTILIZER_LAND_TYPES = ['purple', 'gold', 'black', 'red', 'normal'];
 const ALL_FERTILIZER_LAND_TYPES = ['blue', 'purple', 'gold', 'black', 'red', 'normal'];
+const MAX_ORGANIC_FERTILIZE_OPERATIONS = 240;
+const MAX_ORGANIC_FERTILIZE_ROUNDS = 20;
 
 /** 土地类型中文标签 */
 const FERTILIZER_LAND_TYPE_LABELS = {
@@ -26,31 +28,36 @@ const FERTILIZER_LAND_TYPE_LABELS = {
 // ─── 辅助函数 ───
 
 /**
- * 有机化肥循环施肥（逐块施肥直到失败）
+ * 有机化肥逐块施肥，遇失败、暂停或本轮上限即停止。
  * @param {number[]} landIds - 地块 ID 列表
  * @returns {number} 成功施肥次数
  */
-async function fertilizeOrganicLoop(landIds) {
-  const ids = (Array.isArray(landIds) ? landIds : []).filter(Boolean);
+async function fertilizeOrganicLoop(landIds, propagateErrors = false, canContinue = () => true) {
+  const ids = [...new Set((Array.isArray(landIds) ? landIds : []).map(toNum).filter(id => Number.isSafeInteger(id) && id > 0))];
   if (ids.length === 0) return 0;
+  const operationLimit = Math.min(MAX_ORGANIC_FERTILIZE_OPERATIONS, ids.length * MAX_ORGANIC_FERTILIZE_ROUNDS);
 
   let successCount = 0;
   let index = 0;
-  while (true) {
+  while (successCount < operationLimit && canContinue()) {
     const landId = ids[index];
     try {
       const payload = types.FertilizeRequest.encode(types.FertilizeRequest.create({
         land_ids: [toNum(landId)],
         fertilizer_id: toNum(ORGANIC_FERTILIZER_ID)
       })).finish();
-      await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload);
+      await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload, {
+        beforeSend: () => canContinue() ? null : Object.assign(new Error('施肥任务已暂停'), { code: 'FARM_STOPPED' }),
+      });
       successCount++;
-    } catch {
+    } catch (cause) {
+      if (propagateErrors && isTransientNetworkError(cause)) throw cause;
       break;
     }
     index = (index + 1) % ids.length;
-    await randomDelay(200, 300);
+    if (successCount < operationLimit && canContinue()) await randomDelay(1000, 1500);
   }
+  if (successCount === operationLimit) logWarn('施肥', '有机施肥达到本轮上限，等待下次巡田');
   return successCount;
 }
 
@@ -74,11 +81,6 @@ function getOrganicFertilizerTargetsFromLands(lands) {
     if (!currentPhase) continue;
     if (currentPhase.phase === PlantPhase.DEAD) continue;
 
-    // 检查剩余有机肥次数
-    if (Object.hasOwn(plant, 'left_inorc_fert_times')) {
-      const remaining = toNum(plant.left_inorc_fert_times);
-      if (remaining <= 0) continue;
-    }
     targets.push(landId);
   }
   return targets;
@@ -87,13 +89,13 @@ function getOrganicFertilizerTargetsFromLands(lands) {
 /**
  * 获取即将成熟的地块（用于智能施肥）
  * @param {Array} lands - 地块数据
- * @param {number} thresholdSec - 距成熟时间阈值（秒），默认 3600（1小时）
+ * @param {number} thresholdSec - 距成熟时间阈值（秒），默认 300（5分钟）
  */
-function getFastMatureLands(lands, thresholdSec = 3600) {
+function getFastMatureLands(lands, thresholdSec = 300) {
   const list = Array.isArray(lands) ? lands : [];
   const result = [];
   const serverTime = getServerTimeSec();
-  const threshold = Math.max(0, toNum(thresholdSec) || 3600);
+  const threshold = Math.max(0, toNum(thresholdSec) || 300);
 
   for (const land of list) {
     if (!land || !land.unlocked) continue;
@@ -117,11 +119,6 @@ function getFastMatureLands(lands, thresholdSec = 3600) {
 
     const remaining = matureTime - serverTime;
     if (remaining <= threshold && remaining >= 0) {
-      // 检查剩余有机肥次数
-      if (Object.hasOwn(plant, 'left_inorc_fert_times')) {
-        const left = toNum(plant.left_inorc_fert_times);
-        if (left <= 0) continue;
-      }
       result.push(landId);
     }
   }
@@ -131,13 +128,11 @@ function getFastMatureLands(lands, thresholdSec = 3600) {
 /**
  * 获取处于成熟前最后一个生长阶段的地块（用于最终阶段施肥）
  * @param {Array} lands - 地块数据
- * @param {object} options - { organicOnly }
  * @returns {number[]} 最终阶段地块 ID
  */
-function getFinalStageLands(lands, options = {}) {
+function getFinalStageLands(lands) {
   const list = Array.isArray(lands) ? lands : [];
   const result = [];
-  const organicOnly = !!options.organicOnly;
 
   for (const land of list) {
     if (!land || !land.unlocked) continue;
@@ -168,11 +163,6 @@ function getFinalStageLands(lands, options = {}) {
 
     const currentIndex = orderedPhases.findIndex(item => item.phase === currentPhase);
     if (currentIndex !== matureIndex - 1) continue;
-
-    if (organicOnly && Object.hasOwn(plant, 'left_inorc_fert_times')) {
-      const left = toNum(plant.left_inorc_fert_times);
-      if (left <= 0) continue;
-    }
 
     result.push(landId);
   }
@@ -234,8 +224,19 @@ function formatFertilizerLandTypes(types) {
  * @returns {{ normal: number, organic: number }} 实际使用的无机和有机肥数量
  */
 async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
+  const canContinue = options.canContinue || (() => true);
+  const sendOptions = {
+    canContinue,
+    beforeSend: () => canContinue() ? null : Object.assign(new Error('施肥任务已暂停'), { code: 'FARM_STOPPED' }),
+  };
+  if (!canContinue()) return { normal: 0, organic: 0 };
   const automation = getAutomation() || {};
   const mode = automation.fertilizer || 'none';
+  const { isRipeningOnlyMode, runRipeningFertilizer } = require('./farm-ripening');
+  if (isRipeningOnlyMode(mode)) return { normal: 0, organic: 0 };
+  if (options.skipNormal && mode === 'smart') {
+    return { normal: 0, organic: await runRipeningFertilizer(automation, undefined, options.propagateErrors, canContinue) };
+  }
   const reason = String(options.reason || '').trim().toLowerCase() === 'multi_season' ? 'multi_season' : 'normal';
   const label = reason === 'multi_season' ? '多季补肥' : '常规施肥';
   const eventLabel = reason === 'multi_season' ? '多季节施肥' : '常规施肥';
@@ -278,7 +279,8 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
   const landTypeMap = new Map();
   try {
     const landsReply = await getAllLands();
-    allLands = Array.isArray(landsReply && landsReply.lands) ? landsReply.lands : [];
+    allLands = (Array.isArray(landsReply && landsReply.lands) ? landsReply.lands : [])
+      .filter(land => !toNum(land?.master_land_id) || toNum(land.master_land_id) === toNum(land.id));
     for (const land of allLands) {
       if (!land) continue;
       const landId = toNum(land.id);
@@ -294,6 +296,7 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
   }
 
   const isAllTypes = landTypes.length === ALL_FERTILIZER_LAND_TYPES.length;
+  if (!canContinue()) return { normal: 0, organic: 0 };
 
   if (landTypeMap.size === 0 && !isAllTypes) {
     logWarn('施肥', `${label}：无法确认土地类型，已跳过本轮施肥`, {
@@ -312,7 +315,9 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
 
   // 普通化肥
   if (!skipNormal && (mode === 'normal' || mode === 'both' || mode === 'smart') && targetIds.length > 0) {
-    normalCount = await fertilize(targetIds, NORMAL_FERTILIZER_ID);
+    const eligible = new Set(allLands.filter(land => toNum(land.plant?.left_inorc_fert_times) > 0).map(land => toNum(land.id)));
+    targetIds = targetIds.filter(id => eligible.has(id));
+    normalCount = await fertilize(targetIds, NORMAL_FERTILIZER_ID, sendOptions);
     if (normalCount > 0) {
       log('施肥', `${label}：已为 ${normalCount}/${targetIds.length} 块地施普通化肥（范围: ${landTypeLabels.join('、')}）`, {
         module: 'farm', event: eventLabel, result: 'ok', reason, type: 'normal',
@@ -331,7 +336,7 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
     if (landTypeMap.size > 0) {
       organicTargets = filterLandIdsByTypes(organicTargets, landTypeMap, landTypes);
     }
-    organicCount = await fertilizeOrganicLoop(organicTargets);
+    organicCount = await fertilizeOrganicLoop(organicTargets, options.propagateErrors, canContinue);
     if (organicCount > 0) {
       log('施肥', `${label}：有机化肥循环施肥完成，共施 ${organicCount} 次（范围: ${landTypeLabels.join('、')}）`, {
         module: 'farm', event: eventLabel, result: 'ok', reason, type: 'organic',
@@ -347,7 +352,7 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
     const explicitIdSet = new Set(explicitIds);
 
     if (isFinalStageMode) {
-      targetFertilizerLands = getFinalStageLands(allLands, { organicOnly: mode === 'final_organic' });
+      targetFertilizerLands = getFinalStageLands(allLands);
       if (explicitIdSet.size > 0) {
         targetFertilizerLands = targetFertilizerLands.filter(id => explicitIdSet.has(id));
       }
@@ -375,9 +380,10 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
       const modeLabel = isFinalStageMode ? '最终阶段' : '快成熟';
 
       if (useOrganic) {
-        organicCount = await fertilizeOrganicLoop(targetFertilizerLands);
+        organicCount = await fertilizeOrganicLoop(targetFertilizerLands, options.propagateErrors, canContinue);
       } else {
-        normalCount = await fertilize(targetFertilizerLands, fertId);
+        const eligible = new Set(allLands.filter(land => toNum(land.plant?.left_inorc_fert_times) > 0).map(land => toNum(land.id)));
+        normalCount = await fertilize(targetFertilizerLands.filter(id => eligible.has(id)), fertId, sendOptions);
       }
 
       const totalCount = useOrganic ? organicCount : normalCount;
@@ -395,6 +401,7 @@ async function runFertilizerByConfig(explicitLandIds = [], options = {}) {
 }
 
 module.exports = {
+  getFastMatureLands, getLandTypeByLevel, normalizeFertilizerLandTypes, filterLandIdsByTypes, fertilizeOrganicLoop,
   ALL_FERTILIZER_LAND_TYPES,
   FERTILIZER_LAND_TYPE_LABELS,
   runFertilizerByConfig

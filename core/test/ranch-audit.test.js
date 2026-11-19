@@ -81,7 +81,7 @@ function friendHarness(blockedCode) {
         './transport': {
             inScene: run => run(),
             rpc: async (route, input) => {
-                if (route === 'enterFriend') { host = input.host_gid; return { basic: { gid: host }, homestead_cells: {} }; }
+                if (route === 'enterFriend') { host = input.host_gid; return { basic: { gid: host, name: '好友' }, homestead_cells: {} }; }
                 if (route === 'animals') return { ranches };
                 if (route === 'leaveFriend') { leaves.push(input.host_gid); return {}; }
                 assert.equal(route, 'steal');
@@ -102,13 +102,15 @@ function friendHarness(blockedCode) {
 
 test('a pending friend operation sends no duplicate and does not abort subsequent friend patrols', async () => {
     const h = friendHarness('PENDING_CONFIRMATION');
-    const first = await h.service.automateFriend(200, action => action === 'steal');
+    const skipped = [];
+    const first = await h.service.automateFriend(200, action => action === 'steal', () => false, outcome => skipped.push(outcome));
     assert.equal(first.results.length, 0);
     const second = await h.service.automateFriend(300, action => action === 'steal');
     assert.equal(second.results.length, 1);
     assert.deepEqual(h.writes, ['300']);
     assert.deepEqual(h.leaves, ['200', '300']);
-    assert.equal(h.warnings.length, 1);
+    assert.equal(skipped.length, 1);
+    assert.equal(skipped[0].status, 'skipped');
 });
 
 test('unexpected friend operation failures still stop and restore the visit', async () => {

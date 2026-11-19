@@ -23,6 +23,7 @@ function registerModernFeatureRoutes(context) {
   post('/api/solar-calendar/:action', 'operateSolarCalendar', req => [req.params.action, req.body]);
   get('/api/illustrated/snapshot', 'getIllustratedSnapshot');
   post('/api/illustrated/claim', 'claimIllustratedRewards', req => [req.body?.type]);
+  post('/api/illustrated/clear-new', 'clearIllustratedNew', req => [req.body?.fruitIds]);
   get('/api/collections', 'getCollectionsSnapshot');
   get('/api/props-shop', 'getPropsShop');
   post('/api/props-shop/purchase', 'purchaseProps', req => [req.body?.goodsId, req.body?.count, req.body?.expectedOffer]);

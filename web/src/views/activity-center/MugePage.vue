@@ -8,6 +8,7 @@ import ActivityRulesDialog from '@/components/activity/ActivityRulesDialog.vue'
 import EmptyState from '@/components/ui/EmptyState.vue'
 import { useAccountStore } from '@/stores/account'
 import { useMugeStore } from '@/stores/muge'
+import { useStatusStore } from '@/stores/status'
 
 /**
  * 牧歌初启：农场与牧场共用同一份账号进度，两个空间的活动页都打开这里。
@@ -20,6 +21,8 @@ defineEmits<{ back: [] }>()
 const store = useMugeStore()
 const { state, busy, error, needsRefresh } = storeToRefs(store)
 const { currentAccountId } = storeToRefs(useAccountStore())
+const { status, currentStatusReady } = storeToRefs(useStatusStore())
+const automation = computed(() => currentStatusReady.value ? status.value?.mugeAutomation : null)
 const tab = ref<Section>('celebration')
 const rulesOpen = ref(false)
 const answering = ref(false)
@@ -192,6 +195,11 @@ watch(currentAccountId, () => {
         </NButton>
       </div>
     </header>
+
+    <p v-if="currentAccountId" class="muge-notice" role="status">
+      自动领奖 · {{ automation?.message || '等待账号连接' }}
+      <span v-if="automation?.nextRunAt"> · 下次 {{ new Date(automation.nextRunAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) }}</span>
+    </p>
 
     <NTabs v-model:value="tab" type="line" class="muge-tabs" role="tablist" aria-label="牧歌初启玩法">
       <NTab v-for="section in sections" :key="section.key" :name="section.key" role="tab" :aria-selected="tab === section.key" :tabindex="tab === section.key ? 0 : -1" @keydown.enter="tab = section.key" @keydown.space.prevent="tab = section.key">

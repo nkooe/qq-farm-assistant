@@ -1,9 +1,19 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const friend_roster_1 = require("./friend-roster");
 const { rpc, inScene, isUnlocked } = require('./transport');
 const { animalMap, mutationMap, cubMap, canMap, facilityMap, itemMap, taskMap, itemDto, pendingOperationView, quantity, levelInfo, error } = require('./model');
 const { getServerTimeSec } = require('../../utils/utils');
 const { isFarmOnlyFriend } = require('./friend-eligibility');
+const { types } = require('../../utils/proto');
 function bagItems(bag) {
     return [...bag.physical_items, ...bag.virtual_items];
+}
+function salePrices(item) {
+    if (item.is_locked || !item.show || item.show.sell_cond.length || BigInt(quantity(item.count)) <= 0n)
+        return [];
+    const prices = item.show.sells;
+    return prices.every((price) => BigInt(quantity(price.id)) > 0n && BigInt(quantity(price.count)) > 0n) ? prices : [];
 }
 function balance(bag, id) {
     const entries = bagItems(bag).filter(item => Number(item.id) === id);
@@ -75,6 +85,10 @@ async function loadRaw(cells) {
         throw error('RANCH_RESPONSE_MISMATCH', '牧场背包场景不匹配');
     return { cells: currentCells, bag };
 }
+function shedAwaitingActivation(raw) {
+    // 达到开放条件后，服务器下发待激活的一级棚和正式实例 ID。
+    return raw.cells.facilities.find((facility) => facility.module_type === 7 && facility.facility_id === 6002001 && facility.state === 3);
+}
 function snapshot(raw) {
     const info = levelInfo(Number(balance(raw.bag, 1102).total));
     return {
@@ -92,8 +106,9 @@ function inventory(raw) {
         return {
             ...itemDto(item), uid: quantity(item.uid), locked: item.is_locked, tabId: Number(item.tab_id) || Number(metadata?.show_tab_ids) || 0,
             type: metadata?.type || 0, sellPrices: item.show?.sells?.map(itemDto) || [],
-            canSell: !item.is_locked && !!item.show?.sells?.length && !item.show.sell_cond.length && [106, 107].includes(metadata?.type),
+            canSell: salePrices(item).length > 0,
             can: canMap.get(Number(item.id)) || null, animalId: animal?.id || null, giantCub: !!animal?.giantCubItemId,
+            husbandryType: animal?.husbandry_type ?? null,
             product: item.item_detail?.ranch_product ? {
                 weightX10: item.item_detail.ranch_product.weight_x10, tier: item.item_detail.ranch_product.tier,
                 priceRate: quantity(item.item_detail.ranch_product.price_rate),
@@ -138,6 +153,11 @@ async function catalog(raw, shopId) {
                 animal: [...animalMap.values()].find(row => row.cub_item_id === Number(good.item_id)) || null,
             };
         }) };
+}
+async function readMarketRotation() {
+    const reply = await rpc('shopProfiles', { global_scene_id: 2 });
+    const profile = reply.shop_profiles.find((shop) => Number(shop.shop_id) === 7);
+    return profile?.rotation_state.length ? types.RanchRotationShopState.decode(profile.rotation_state) : null;
 }
 async function market(raw) {
     const reply = await rpc('market', { shop_id: 7 });
@@ -215,9 +235,7 @@ async function getState(view = 'animals', shopId, hostGid) {
             if (hostGid !== undefined)
                 state.friendRanch = await require('./friends').getFriend(hostGid);
             else
-                state.friends = (await require('../friend').getFriendsList())
-                    .filter(friend => !isFarmOnlyFriend(friend.gid))
-                    .map((friend) => ({ gid: String(friend.gid), name: friend.name, avatarUrl: friend.avatarUrl }));
+                state.friends = (await (0, friend_roster_1.getRanchFriendList)()).filter(friend => !isFarmOnlyFriend(friend.gid)).map(friend => ({ ...friend, gid: String(friend.gid) }));
         }
         return state;
     });
@@ -233,4 +251,4 @@ async function resourceBalances(keys) {
         return keys.map(key => ({ ...balance(raw.bag, Number(key.slice(5))), name: itemDto({ id: key.slice(5), count: 0 }).name, source: 'ranch-bag', asOfMs: Date.now() }));
     });
 }
-module.exports = { getState, loadRaw, snapshot, balance, bagItems, inventory, taskList, catalog, market, canCatalog, resourceBalance, isRanchResource, resourceBalances, animalDto };
+module.exports = { getState, loadRaw, shedAwaitingActivation, snapshot, balance, bagItems, inventory, salePrices, taskList, catalog, market, readMarketRotation, canCatalog, resourceBalance, isRanchResource, resourceBalances, animalDto };

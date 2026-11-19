@@ -10,7 +10,7 @@ function getAmbientRequestClass() { return storage.getStore()?.requestClass || n
 function getAmbientRequestSignal() { return storage.getStore()?.signal; }
 function classForSchedulerNamespace(namespace) {
     if (['network', 'ace', 'worker_manager'].includes(namespace) || String(namespace).startsWith('ace-')) return null;
-    if (['friend-pet-sync', 'milk-tea'].includes(namespace)) return 'background';
+    if (['friend-pet-sync', 'milk-tea', 'muge'].includes(namespace)) return 'background';
     return String(namespace).startsWith('friend') ? 'friend' : 'farm';
 }
 function resolveRequestClass(opts = {}, ambient = getAmbientRequestClass()) {

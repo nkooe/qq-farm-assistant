@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs'
+import process from 'node:process'
 import { fileURLToPath, URL } from 'node:url'
 import vue from '@vitejs/plugin-vue'
 import { visualizer } from 'rollup-plugin-visualizer'
@@ -6,7 +7,7 @@ import UnoCSS from 'unocss/vite'
 import { defineConfig } from 'vite'
 import viteCompression from 'vite-plugin-compression'
 
-const corePackageJson = JSON.parse(readFileSync('../core/package.json', 'utf-8'))
+const webPackageJson = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8'))
 
 // 后端面板端口：与 core 的 ADMIN_PORT 环境变量保持一致，默认 3900（3007 落在 Windows 端口排除区间会 EACCES）
 const ADMIN_PORT = Number(process.env.ADMIN_PORT) || 3900
@@ -53,7 +54,7 @@ export default defineConfig({
     chunkSizeWarningLimit: 1000,
   },
   define: {
-    __APP_VERSION__: JSON.stringify(corePackageJson.appVersion || corePackageJson.version),
+    __APP_VERSION__: JSON.stringify(webPackageJson.appVersion || webPackageJson.version),
   },
   resolve: {
     alias: {

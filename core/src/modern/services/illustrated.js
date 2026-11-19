@@ -44,6 +44,7 @@ function itemDto(input) {
     const name = String(item && item.name || plant && plant.name || getPlantNameBySeedId(seedId));
     return {
         seedId,
+        fruitId: toNum(input && input.fruit_id),
         name,
         image: getItemImageById(seedId),
         rewardCategory: toNum(input && input.rarity),
@@ -165,7 +166,20 @@ function claimIllustratedRewards(type) {
     claimTail = request.catch(() => { });
     return request;
 }
+async function clearIllustratedNew(fruitIds) {
+    if (!Array.isArray(fruitIds) || fruitIds.length > 1000 || fruitIds.some(id => !Number.isInteger(id) || id <= 0 || id > 2147483647))
+        throw Object.assign(new Error('图鉴条目无效'), { code: 'INVALID_ARGUMENT' });
+    const ids = [...new Set(fruitIds)];
+    if (!ids.length)
+        return { cleared: [] };
+    const body = types.ClearNewUnlockedFruitsV2Request.encode(types.ClearNewUnlockedFruitsV2Request.create({
+        fruit_ids: ids,
+    })).finish();
+    const { body: replyBody } = await sendMsgAsync(SERVICE, 'ClearNewUnlockedFruitsV2', body);
+    return { cleared: (types.ClearNewUnlockedFruitsV2Reply.decode(replyBody).cleared_fruit_ids || []).map((id) => toNum(id)) };
+}
 module.exports = {
     getIllustratedSnapshot,
     claimIllustratedRewards,
+    clearIllustratedNew,
 };

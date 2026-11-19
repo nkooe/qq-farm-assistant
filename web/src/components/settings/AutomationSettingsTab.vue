@@ -76,7 +76,7 @@ const turboWindow = computed({
 })
 
 function isFastMatureFertilizerMode(mode: string) {
-  return mode === 'smart' || mode === 'smart_only' || mode === 'smart_normal'
+  return ['smart', 'smart_only', 'smart_normal', 'normal_ripen', 'organic_ripen'].includes(mode)
 }
 </script>
 

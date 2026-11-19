@@ -81,8 +81,8 @@ async function completeClientReportedTasks(tasks, canContinue) {
   let changed = false;
   for (const task of tasks) {
     if (!canContinue()) break;
-    const id = toNum(task.id), total = toNum(task.total_progress);
-    if (id <= 0 || toNum(task.cond_type) !== 15 || !task.is_unlocked || task.is_claimed
+    const id = toNum(task.id); const total = toNum(task.total_progress);
+    if (id <= 0 || ![15, 25].includes(toNum(task.cond_type)) || !task.is_unlocked || task.is_claimed
       || total <= 0 || toNum(task.progress) >= total || [4, 5].includes(toNum(task.task_type))) continue;
     try {
       const request = types.ClientReportProgressRequest.encode(types.ClientReportProgressRequest.create({
@@ -145,7 +145,7 @@ async function getTicketBalanceFromBag() {
       }
     }
     return 0;
-  } catch (_) {
+  } catch {
     return 0;
   }
 }
@@ -312,7 +312,7 @@ async function checkAndClaimIllustratedRewards() {
     taskClaimLastAt = Date.now();
     recordOperation('taskClaim', 1);
     return true;
-  } catch (_) {
+  } catch {
     return false;
   }
 }
@@ -342,7 +342,7 @@ async function doClaim(task) {
     recordOperation('taskClaim', 1);
     await sleep(300);
     return true;
-  } catch (_) {
+  } catch {
     return false;
   }
 }
@@ -524,7 +524,7 @@ module.exports = {
         completedCount: completed.length,
         totalCount: 3,
       };
-    } catch (_) {
+    } catch {
       return {
         key: 'task_claim',
         doneToday: false,
@@ -574,7 +574,7 @@ module.exports = {
         totalCount,
         tasks,
       };
-    } catch (_) {
+    } catch {
       return {
         key: 'growth_task',
         doneToday: false,

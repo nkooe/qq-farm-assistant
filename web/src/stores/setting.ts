@@ -9,7 +9,8 @@ export interface AutomationConfig {
   ranch_buy?: boolean
   ranch_upgrade?: boolean
   ranch_sell?: boolean
-  ranch_market_organic?: boolean
+  ranch_market_organic_poop?: boolean
+  ranch_market_organic_pinecone?: boolean
   ranch_grass?: boolean
   ranch_grass_buy?: boolean
   ranch_grass_threshold_percent?: number
@@ -22,6 +23,7 @@ export interface AutomationConfig {
   ranch_friend_clean?: boolean
   ranch_friend_mosquito?: boolean
   ranch_task?: boolean
+  ranch_illustrated?: boolean
   ranch_share?: boolean
   ranch_daily_benefit?: boolean
   ranch_check_minutes?: number
@@ -29,6 +31,8 @@ export interface AutomationConfig {
   ranch_bag_fallback?: string
   ranch_coop_animal?: number
   ranch_shed_animal?: number
+  ranch_coop_cub_priority?: number[]
+  ranch_shed_cub_priority?: number[]
   farm?: boolean
   farm_push?: boolean
   land_upgrade?: boolean

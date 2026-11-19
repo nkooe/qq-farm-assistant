@@ -206,7 +206,6 @@ async function batchGetFriendDogInfo(friends) {
   let unknownCount = 0;
   let blacklistCount = 0;
   const BATCH_LOG_INTERVAL = 30;
-  const BATCH_SLEEP_MS = 1000;
   const accountId = process.env.FARM_ACCOUNT_ID || '';
   const blacklist = new Set(getFriendBlacklist(accountId));
 
@@ -319,7 +318,7 @@ async function getFriendsList(forceRefresh = false) {
         const cachedDog = dogInfoCache && dogInfoCache[gid] ? dogInfoCache[gid] : null;
         return {
           gid,
-          name: friend.remark || friend.name || `GID:${gid}`,
+          name: friend.name || friend.remark || `GID:${gid}`,
           avatarUrl: String(friend.avatar_url || '').trim(),
           level: toNum(friend.level),
           gold: toNum(friend.gold),

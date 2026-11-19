@@ -35,10 +35,12 @@ export const useIllustratedStore = defineStore('illustrated', () => {
   const userLevel = ref(0)
   const loading = ref(false)
   const buying = ref(false)
+  const clearing = ref(false)
   const error = ref('')
   let fetchRequestId = 0
 
   function clearIllustratedData() {
+    fetchRequestId++
     items.value = []
     summary.value = {
       total: 0,
@@ -49,6 +51,7 @@ export const useIllustratedStore = defineStore('illustrated', () => {
     userLevel.value = 0
     loading.value = false
     buying.value = false
+    clearing.value = false
     error.value = ''
   }
 
@@ -107,6 +110,30 @@ export const useIllustratedStore = defineStore('illustrated', () => {
     }
   }
 
+  async function clearNew(accountId: string) {
+    if (!accountId || clearing.value)
+      return
+    const version = fetchRequestId
+    clearing.value = true
+    try {
+      const { data } = await api.get('/api/illustrated/snapshot', { headers: { 'x-account-id': accountId } })
+      if (!data.ok)
+        throw new Error(data.error || '读取失败')
+      if (version !== fetchRequestId || !isCurrentAccount(accountId))
+        return
+      const ids = [data.data.crop, data.data.mutant].flatMap(book => (book?.items || []).filter((item: any) => item.isNew).map((item: any) => item.fruitId))
+      if (!ids.length)
+        return
+      const response = await api.post('/api/illustrated/clear-new', { fruitIds: ids }, { headers: { 'x-account-id': accountId } })
+      if (!response.data.ok)
+        throw new Error(response.data.error || '已读失败')
+    }
+    finally {
+      if (version === fetchRequestId && isCurrentAccount(accountId))
+        clearing.value = false
+    }
+  }
+
   async function buyAllSeeds(accountId: string, illustratedType = 1) {
     buying.value = true
     try {
@@ -128,10 +155,12 @@ export const useIllustratedStore = defineStore('illustrated', () => {
     userLevel,
     loading,
     buying,
+    clearing,
     error,
     clearIllustratedData,
     fetchList,
     buySeed,
     buyAllSeeds,
+    clearNew,
   }
 })

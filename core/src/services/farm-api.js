@@ -1,6 +1,6 @@
 const { sendMsgAsync, getUserState } = require('../utils/network');
 const { types, waitForProtoReady } = require('../utils/proto');
-const { toLong, sleep, log } = require('../utils/utils');
+const { toLong, sleep } = require('../utils/utils');
 
 /** 普通化肥 ID */
 const NORMAL_FERTILIZER_ID = 1011;
@@ -84,15 +84,16 @@ async function insecticide(landIds) {
  * @param {number} fertilizerId - 化肥类型（默认普通化肥）
  * @returns {number} 成功施肥次数
  */
-async function fertilize(landIds, fertilizerId = NORMAL_FERTILIZER_ID) {
+async function fertilize(landIds, fertilizerId = NORMAL_FERTILIZER_ID, options = {}) {
   let successCount = 0;
   for (const landId of landIds) {
+    if (options.canContinue && !options.canContinue()) break;
     try {
       const payload = types.FertilizeRequest.encode(types.FertilizeRequest.create({
         land_ids: [toLong(landId)],
         fertilizer_id: toLong(fertilizerId)
       })).finish();
-      await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload);
+      await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload, options);
       successCount++;
     } catch {
       break;
@@ -106,12 +107,12 @@ async function fertilize(landIds, fertilizerId = NORMAL_FERTILIZER_ID) {
 }
 
 /** 手动批量施肥：一次提交、保留逐地回包，不重试不确定结果。 */
-async function fertilizeBatch(landIds, fertilizerId) {
+async function fertilizeBatch(landIds, fertilizerId, options = {}) {
   const payload = types.FertilizeRequest.encode(types.FertilizeRequest.create({
     land_ids: landIds.map(id => toLong(id)),
     fertilizer_id: toLong(fertilizerId)
   })).finish();
-  const { body } = await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload);
+  const { body } = await sendMsgAsync('gamepb.plantpb.PlantService', 'Fertilize', payload, options);
   return types.FertilizeReply.decode(body);
 }
 

@@ -1,6 +1,6 @@
 const { rpc, inScene } = require('./transport');
-const { loadRaw, snapshot, balance, taskList, catalog, market, canCatalog, resourceBalance } = require('./state');
-const { animalMap, cubMap, canMap, facilityMap, itemMap, error, positiveId, positiveCount, quantity, itemDto, sumItems, signature } = require('./model');
+const { loadRaw, snapshot, balance, taskList, catalog, market, canCatalog, resourceBalance, salePrices, shedAwaitingActivation } = require('./state');
+const { animalMap, cubMap, canMap, facilityMap, itemMap, taskMap, error, positiveId, positiveCount, quantity, itemDto, sumItems, signature } = require('./model');
 const reservations = require('./operation-state');
 const { getServerTimeSec } = require('../../utils/utils');
 const { ACTIONS } = require('./contract');
@@ -8,6 +8,7 @@ const LABELS = {
     buy: '购买牧场商品', place: '放养幼崽', addGrass: '补充牧草', useCan: '添加罐头', feed: '喂养动物',
     produce: '牧场生产', harvest: '牧场收获', sell: '出售牧场产物', clean: '清理牧场', upgrade: '升级牧场设施',
     completeUpgrade: '完成牧场升级', claimTasks: '领取牧场任务', reportEntry: '完成牧场引导', exchange: '集市兑换',
+    activateShed: '解锁牧场棚',
     claimIllustrated: '领取牧场图鉴奖励',
     claimDailyShare: '领取每日首次分享礼包',
     buyCan: '购买牧场罐头',
@@ -26,6 +27,13 @@ function selectedAnimals(raw, input, eligible) {
 }
 function animalRefs(animals) {
     return animals.map(animal => ({ ranch_inst_id: quantity(animal.ranch_inst_id), animal_inst_id: animal.animal_inst_id }));
+}
+function isClientReportedTask(task) {
+    if (!task?.unlocked || task.claimed)
+        return false;
+    if (BigInt(task.total) <= 0n || BigInt(task.progress) >= BigInt(task.total))
+        return false;
+    return taskMap.get(Number(task.id))?.condition === '客户端上报进度';
 }
 async function planAction(action, input, raw) {
     if (!ACTIONS.includes(action))
@@ -80,6 +88,7 @@ async function planAction(action, input, raw) {
             throw error('RANCH_FULL', '窝或棚的空位不足');
         plan.payload = { items: Array.from({ length: count }, () => ({ ranch_inst_id: ranchId, animal_id: animal.id, giant_cub_item_id: animal.giantCubItemId })) };
         plan.costItems = [itemDto({ id: itemId, count })];
+        plan.label = `放养${plan.costItems[0].name} ×${count}`;
         plan.marker = { ranchId, animalId: animal.id, capacity: ranch.capacity, occupied: ranch.animal_count };
         plan.count = count;
     }
@@ -164,16 +173,36 @@ async function planAction(action, input, raw) {
         plan.count = plan.marker.length;
     }
     else if (action === 'sell') {
-        const requested = input.all === true ? raw.bag.physical_items.filter((item) => [106, 107].includes(itemMap.get(Number(item.id))?.type) && !item.is_locked && item.show?.sells.length && !item.show.sell_cond.length).map((item) => ({ uid: quantity(item.uid), count: quantity(item.count) })) : [{ uid: positiveId(input.uid, '物品批次'), count: positiveCount(input.count) }];
-        plan.payload.items = requested.map((entry) => {
-            const item = raw.bag.physical_items.find((row) => quantity(row.uid) === entry.uid);
-            if (!item || item.is_locked || ![106, 107].includes(itemMap.get(Number(item.id))?.type) || !item.show?.sells.length || item.show.sell_cond.length || BigInt(quantity(item.count)) < BigInt(entry.count))
-                throw error('RANCH_ITEM_UNAVAILABLE', '产物库存、锁定或出售条件已变化');
-            plan.expectedRewards.push(...item.show.sells.map((price) => itemDto({ id: price.id, count: BigInt(quantity(price.count)) * BigInt(entry.count) })));
-            return { id: quantity(item.id), uid: entry.uid, count: entry.count };
+        let requested;
+        if (input.all === true) {
+            requested = raw.bag.physical_items.filter((item) => [106, 107].includes(itemMap.get(Number(item.id))?.type))
+                .map((item) => ({ item, count: quantity(item.count), prices: salePrices(item) }))
+                .filter((entry) => entry.prices.length);
+        }
+        else {
+            const uid = positiveId(input.uid, '物品批次');
+            const count = positiveCount(input.count);
+            const item = raw.bag.physical_items.find((row) => quantity(row.uid) === uid);
+            const prices = item && salePrices(item);
+            if (!prices?.length || BigInt(quantity(item.count)) < BigInt(count))
+                throw error('RANCH_ITEM_UNAVAILABLE', '物品库存、锁定或出售条件已变化');
+            requested = [{ item, count, prices }];
+        }
+        plan.payload.items = requested.map(({ item, count, prices }) => {
+            plan.expectedRewards.push(...prices.map((price) => itemDto({ id: price.id, count: BigInt(quantity(price.count)) * BigInt(count) })));
+            return { id: quantity(item.id), uid: quantity(item.uid), count };
         });
         plan.costItems = plan.payload.items.map(itemDto);
         plan.count = requested.length;
+        if (input.all !== true)
+            plan.label = `出售${plan.costItems[0].name} ×${plan.costItems[0].count}`;
+    }
+    else if (action === 'activateShed') {
+        const id = positiveId(input.facilityId, '牧场棚');
+        const shed = shedAwaitingActivation(raw);
+        plan.count = Number(quantity(shed?.instance_id) === id);
+        plan.payload = { instance_id: id };
+        plan.marker = shed?.facility_id;
     }
     else if (action === 'upgrade' || action === 'completeUpgrade') {
         const id = positiveId(input.facilityId, '牧场设施');
@@ -225,14 +254,16 @@ async function planAction(action, input, raw) {
         if (input.entry !== 'friends')
             throw error('INVALID_ARGUMENT', '该任务入口尚未验证');
         const tasks = taskList(await rpc('tasks', { global_scene_id: 2 }));
-        const task = tasks.find((entry) => entry.id === '300008');
-        plan.count = task?.unlocked && !task.claimed && BigInt(task.progress) < BigInt(task.total) ? 1 : 0;
-        plan.payload = { task_id: '300008', progress: task?.total || '1' };
+        plan.reportTasks = tasks.filter((task) => isClientReportedTask(task))
+            .map((task) => ({ id: task.id, progress: task.total }));
+        plan.payload = plan.reportTasks.map((task) => ({ task_id: task.id, progress: task.progress }));
         plan.route = 'reportTask';
-        plan.marker = 'friends';
+        plan.marker = plan.reportTasks.map((task) => task.id);
+        plan.count = plan.reportTasks.length;
     }
     else if (action === 'claimIllustrated') {
         plan.bookClaim = await require('./book').prepareBookClaim(input.kind);
+        plan.label = plan.bookClaim.kind === 'normal' ? '领取牧场普通图鉴奖励' : '领取牧场巨大图鉴奖励';
         plan.marker = { kind: plan.bookClaim.kind, ids: plan.bookClaim.ids, rewards: plan.bookClaim.rewards };
         plan.expectedRewards = plan.bookClaim.rewards;
         plan.count = plan.bookClaim.count;
@@ -245,6 +276,10 @@ async function planAction(action, input, raw) {
     }
     else if (action === 'exchange') {
         const current = await market(raw);
+        if (input.marketRotation && (current.periodDay !== input.marketRotation.periodDay
+            || current.roundIndex !== input.marketRotation.roundIndex || getServerTimeSec() >= input.marketRotation.endsAt)) {
+            throw error('RANCH_OFFER_CHANGED', '集市场次已变化或已结束');
+        }
         const id = positiveId(input.goodsId, '兑换商品');
         const count = positiveCount(input.count);
         const good = current.goods.find((entry) => entry.id === id);
@@ -274,7 +309,7 @@ async function prepareAction(action, input = {}) {
     if (['stroke', 'putMosquito', 'cleanFriend'].includes(action))
         return require('./friends').prepareInteraction(action, input);
     return inScene(async (cells) => {
-        const plan = await planAction(action, input, await loadRaw(cells));
+        const plan = await planAction(action, input, action === 'claimIllustrated' ? null : await loadRaw(cells));
         return { action, label: plan.label, costs: plan.costs, costItems: plan.costItems, rewards: plan.expectedRewards, count: plan.count,
             expected: { signature: plan.signature }, skipped: plan.count === 0, message: plan.message };
     });
@@ -312,6 +347,13 @@ async function operate(action, input = {}) {
             else if (action === 'claimIllustrated') {
                 rewards = await require('./book').claimBook(plan.bookClaim);
                 reply = {};
+            }
+            else if (action === 'reportEntry') {
+                for (const entry of plan.reportTasks) {
+                    reply = await rpc('reportTask', { task_id: entry.id, progress: entry.progress }, true);
+                    if (!taskList(reply).find((task) => task.id === entry.id)?.canClaim)
+                        unknown(action, '引导任务未完成');
+                }
             }
             else if (action === 'claimTasks') {
                 const allOrdinary = plan.marker.every((task) => task.multiple === 1);
@@ -370,6 +412,12 @@ async function operate(action, input = {}) {
                         unknown(action, '罐头消耗或余量不匹配');
                     actualCosts = [itemDto({ id: plan.bucketId, count: used })];
                 }
+                else if (action === 'activateShed') {
+                    const shed = reply.facility;
+                    if (quantity(shed?.instance_id) !== plan.payload.instance_id || shed.facility_id !== plan.marker
+                        || shed.module_type !== 7 || shed.state !== 1 || !shed.ranch)
+                        unknown(action, '棚的激活状态不匹配');
+                }
                 else if (action === 'upgrade') {
                     if (quantity(reply.upgrade?.inst_id) !== plan.payload.inst_id || reply.upgrade.target_level !== plan.next.level || reply.upgrade.target_facility_id !== plan.next.facility_id)
                         unknown(action, '建筑升级目标不匹配');
@@ -377,10 +425,6 @@ async function operate(action, input = {}) {
                 else if (action === 'completeUpgrade') {
                     if (quantity(reply.facility?.instance_id) !== plan.payload.inst_id || reply.facility.level !== plan.next.level || reply.facility.facility_id !== plan.next.facility_id)
                         unknown(action, '建筑等级不匹配');
-                }
-                else if (action === 'reportEntry') {
-                    if (!taskList(reply).find((task) => task.id === '300008')?.canClaim)
-                        unknown(action, '引导任务未完成');
                 }
                 else if (action === 'release') {
                     const target = plan.payload.targets[0];
@@ -447,10 +491,11 @@ async function operate(action, input = {}) {
                     unknown(action, '罐头桶增加时长不匹配');
             }
             const completed = reply.op_results?.length ?? plan.count;
-            const notice = action === 'release' ? `${plan.label}完成${rewards.length ? `，获得 ${sumItems(rewards).map((item) => `${item.name} ×${item.count}`).join('、')}` : ''}`
+            const notice = action === 'release' || action === 'sell' && input.all !== true ? `${plan.label}完成${rewards.length ? `，获得 ${sumItems(rewards).map((item) => `${item.name} ×${item.count}`).join('、')}` : ''}`
                 : plan.resultKeys && completed < plan.count ? `已完成 ${completed} / ${plan.count} 项，其余状态已变化，请刷新核对` : undefined;
             return { status: reply.alreadyClaimed ? 'skipped' : 'confirmed', snapshot: after ? snapshot(after) : null, refreshRequired: !after, costs: actualCosts, notice,
-                rewards: sumItems(rewards), completed: reply.op_results?.length ?? plan.count };
+                rewards: sumItems(rewards), completed,
+                harvestedAnimals: action === 'harvest' ? reply.op_results.filter((entry) => entry.kind === 1).length : 0 };
         });
     }));
 }
